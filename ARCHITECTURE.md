@@ -453,11 +453,43 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   catch-up build budget. Invalidate history for participating geometry changes,
   not irrelevant distant/empty updates. Never display missing or stale geometry
   to hide preparation. Exceptional bursts can still require explicit fallback.
+  (Superseded on September 26, 2026 by "Ray scene streaming and local history".)
 - Acceptance: real GPU tests distinguish leaf stacks, alpha holes, and solid
   roofs; static frame sequences quantify temporal changes; native movement and
   meshing observations check renderer continuity. Check readable daylight under
   trees and retain dark enclosed/night scenes. Revisit the budgets or prewarming
   only if normal movement still causes repeated fallbacks in that probe.
+
+### Ray scene streaming and local history — September 26, 2026
+
+- User outcome: the ray-casting budget no longer forces raster frames, and areas
+  with ongoing block or light changes stop flickering.
+- Verified causes, measured on the prehistoric New World: the 8M-triangle cap
+  switched 18% of flight samples to Ultra raster (a different lighting model), and
+  any pending mesh did the same. Standing still, section edits (about 20 per second)
+  and local-light field regenerations reset the whole frame's temporal history
+  124-190 times in 30 s. Invalidating the local-light field also dropped it until
+  the rebuild landed, and each fallback frame reallocated the shadow map.
+- Chosen repair, following Apple/NVIDIA/Unreal ray-tracing practice: nearest-first
+  streaming with bounded per-frame builds; previous-revision BLASes presented until
+  replaced; farthest-first truncation for the triangle and instance caps (cap raised
+  to 16M); near edits (32 blocks) always rebuilt in the same frame; per-instance
+  history invalidation instead of global resets for edits and light-field updates;
+  a continuously displayed local-light field with a clear epoch; batched BLAS builds
+  with scratch arenas; a per-tile decoder trait table; section BLAS compaction.
+- Rejected: raising the caps alone (dense scenes still fall back, and each fallback
+  still resets history); keeping global resets for nearby edits (the probe showed
+  resets nearly every frame); a shader guard for internal water faces (fixed at the
+  mesher instead; the water kernel is near the GPU compiler-service limit).
+- Tradeoff: bounded staleness. Distant edits may show old geometry, and new distant
+  chunks may appear, a few frames late; light changes converge over a few frames.
+- Evidence: [streaming record](docs/ray-traced-worlds/build.md#ray-scene-streaming-budgets-and-history--september-26-2026);
+  real-GPU renderer tests for cold start, streaming, stale presentation, truncation,
+  compaction, local invalidation and fallback-run history; a byte-equivalence test of
+  the table decoder against the former decoder over every tile and a real section.
+- Revisit if the flight probe shows fallback frames again, deferred sections stay
+  visible as holes inside fog start, stale geometry persists near the player, or a
+  light change visibly lags on lower-end GPUs.
 
 ### Underground emissive lighting — September 25, 2026
 
@@ -506,8 +538,10 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   coordinates, with a 16-block edge blend to the 1.7× existing cached illumination.
   This guarantees a full 30-block source halo around the central player region;
   distant geometry uses the lower-detail cache. Missing section snapshots are
-  not treated as empty air. One worker snapshot is in flight; stale source/wall
-  results are rejected, and each published GPU texture is immutable. This is
+  not treated as empty air. One worker snapshot is in flight; each published GPU
+  texture is immutable. Since September 26, 2026 the displayed field stays until a
+  newer one lands (see "Ray scene streaming and local history"); fields from before
+  a world or dimension clear are never published. This is
   bounded voxel diffuse lighting, not an unbiased all-emitter path integral.
 - Acceptance: source on/off, doubled reach, solid divider versus doorway, chunk
   seams, source removal/unload, stateful lamps, distant-emitter crowding, and native

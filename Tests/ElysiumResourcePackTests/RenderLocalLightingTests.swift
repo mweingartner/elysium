@@ -73,18 +73,19 @@ final class RenderLocalLightingTests: XCTestCase {
     }
 
     private func waitForVolume(_ cache: RenderLocalLighting, camera: SIMD3<Double> = .init(32, 32, 32),
-                               origin: SIMD3<Int>? = nil,
+                               origin: SIMD3<Int>? = nil, newerThan generation: UInt64? = nil,
                                file: StaticString = #filePath, line: UInt = #line) throws -> RenderLocalLightVolume {
         let deadline = Date().addingTimeInterval(10)
         repeat {
-            if let volume = cache.prepare(camera: camera), origin == nil || volume.origin == origin { return volume }
+            if let volume = cache.prepare(camera: camera), origin == nil || volume.origin == origin,
+               generation.map({ volume.generation > $0 }) ?? true { return volume }
             RunLoop.current.run(until: Date().addingTimeInterval(0.005))
         } while Date() < deadline
         XCTFail("Presentation light worker did not finish", file: file, line: line)
         throw NSError(domain: "RenderLocalLightingTests", code: 1)
     }
 
-    func testAsyncSourceRemovalRejectsStaleCompletionAndCameraOnlyDoesNotChangeGeneration() throws {
+    func testAsyncSourceRemovalSupersedesInterimFieldAndCameraOnlyDoesNotChangeGeneration() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("Metal unavailable") }
         XCTAssertTrue(Thread.isMainThread)
         let queue = DispatchQueue(label: "test.local-light.suspended")
@@ -99,11 +100,15 @@ final class RenderLocalLightingTests: XCTestCase {
         cache.upload(origin: emitterSection.origin, metadata: .init(opacity: emitterSection.metadata.opacity, emitters: []))
         queue.resume()
         resumed = true
-        let unlit = try waitForVolume(cache)
+        // The build that started before the removal may be shown as an interim field (bounded
+        // staleness beats showing nothing), but the removal's own field must supersede it.
+        let interim = try waitForVolume(cache)
+        let unlit = try waitForVolume(cache, newerThan: interim.generation)
         XCTAssertEqual(unlit.sample(worldPosition: .init(33, 32, 32)).w, 0)
         cache.upload(origin: emitterSection.origin, metadata: emitterSection.metadata)
-        XCTAssertNil(cache.prepare(camera: .init(32, 32, 32)), "Mutations must immediately invalidate stale displayed light")
-        let lit = try waitForVolume(cache)
+        XCTAssertTrue(cache.prepare(camera: .init(32, 32, 32))?.texture === unlit.texture,
+                      "A mutation keeps the displayed field until its replacement lands, instead of going dark")
+        let lit = try waitForVolume(cache, newerThan: unlit.generation)
         XCTAssertGreaterThan(lit.sample(worldPosition: .init(33, 32, 32)).w, 0)
         XCTAssertGreaterThan(lit.generation, unlit.generation)
         cache.upload(origin: .init(4096, 0, 4096), metadata: emitterSection.metadata)
@@ -114,8 +119,8 @@ final class RenderLocalLightingTests: XCTestCase {
         XCTAssertEqual(moved.generation, lit.generation)
         XCTAssertFalse(moved.texture === lit.texture, "Each finished upload owns a new immutable texture")
         cache.removeChunk(cx: 2, cz: 2)
-        XCTAssertNil(cache.prepare(camera: .init(48, 32, 32)))
-        let removed = try waitForVolume(cache, camera: .init(48, 32, 32))
+        XCTAssertTrue(cache.prepare(camera: .init(48, 32, 32))?.texture === moved.texture)
+        let removed = try waitForVolume(cache, camera: .init(48, 32, 32), newerThan: moved.generation)
         XCTAssertEqual(removed.sample(worldPosition: .init(31, 32, 32)).w, 0)
         cache.clear()
         XCTAssertNil(cache.prepare(camera: .init(48, 32, 32)))
@@ -159,6 +164,49 @@ final class RenderLocalLightingTests: XCTestCase {
         XCTAssertEqual(values[2], .zero)
         XCTAssertGreaterThan(values[3].w, 0)
         XCTAssertLessThan(values[3].w, 1, "The outer16 blocks blend into the existing light cache")
+    }
+
+    func testContinuousEditsKeepTheFieldVisibleAndStillPublishNewerFields() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("Metal unavailable") }
+        let cache = RenderLocalLighting(device: device)
+        let input = sections()
+        for section in input { cache.upload(origin: section.origin, metadata: section.metadata) }
+        let first = try waitForVolume(cache)
+        let emitterSection = try XCTUnwrap(input.first { !$0.metadata.emitters.isEmpty })
+        let dark = MeshLightingMetadata(opacity: emitterSection.metadata.opacity, emitters: [])
+        // Edit the nearby source every presented frame, like flowing lava or spreading fire.
+        // The displayed field must never disappear, and fields keep landing despite the churn.
+        var newest = first.generation
+        let deadline = Date().addingTimeInterval(10)
+        var frames = 0
+        while newest <= first.generation + 2 && Date() < deadline {
+            cache.upload(origin: emitterSection.origin, metadata: frames.isMultiple(of: 2) ? dark : emitterSection.metadata)
+            let shown = try XCTUnwrap(cache.prepare(camera: .init(32, 32, 32)), "Frame \(frames) lost the local field")
+            XCTAssertGreaterThanOrEqual(shown.generation, newest, "Published fields never go backwards")
+            newest = shown.generation
+            frames += 1
+            RunLoop.current.run(until: Date().addingTimeInterval(0.004))
+        }
+        XCTAssertGreaterThan(newest, first.generation + 2, "Continuous edits must not starve newer fields")
+    }
+
+    func testClearDropsAnAlreadyDisplayedFieldNotJustAnInFlightBuild() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("Metal unavailable") }
+        let cache = RenderLocalLighting(device: device)
+        for section in sections() { cache.upload(origin: section.origin, metadata: section.metadata) }
+        let displayed = try waitForVolume(cache)
+        XCTAssertGreaterThan(displayed.sample(worldPosition: .init(32, 32, 32)).w, 0)
+
+        cache.clear()
+        XCTAssertNil(cache.prepare(camera: .init(32, 32, 32)),
+                     "clear() must drop the already-displayed field, not only an in-flight build")
+
+        for section in sections(level: 0) { cache.upload(origin: section.origin, metadata: section.metadata) }
+        let after = try waitForVolume(cache)
+        XCTAssertFalse(after.texture === displayed.texture,
+                       "Each world/dimension gets its own field, never the previous texture object")
+        XCTAssertEqual(after.sample(worldPosition: .init(32, 32, 32)).w, 0,
+                      "The new world's field must never inherit the previous world's illumination")
     }
 
     func testClearDuringInFlightWorkCannotPublishPreviousWorldLight() throws {

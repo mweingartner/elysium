@@ -158,6 +158,7 @@ struct RenderLocalLightField: Sendable {
 final class RenderLocalLighting {
     private struct Completed {
         let ticket: UInt64
+        let epoch: UInt64
         let generation: UInt64
         let origin: SIMD3<Int>
         let field: RenderLocalLightField?
@@ -179,6 +180,9 @@ final class RenderLocalLighting {
     private var sections: [SIMD3<Int>: MeshLightingMetadata] = [:]
     private var requestedOrigin: SIMD3<Int>?
     private var generation: UInt64 = 1
+    /// Bumped by `clear()`. A field built for an earlier world or dimension is never published,
+    /// even though its worker completion may still arrive afterward.
+    private var epoch: UInt64 = 0
     private var nextTicket: UInt64 = 0
     private var activeTicket: UInt64?
     private var current: RenderLocalLightVolume?
@@ -211,7 +215,9 @@ final class RenderLocalLighting {
         precondition(Thread.isMainThread)
         sections.removeAll(keepingCapacity: true)
         requestedOrigin = nil
+        epoch &+= 1
         invalidate()
+        current = nil // a different world or dimension never inherits the old field
     }
 
     private func intersectsRequestedVolume(_ section: SIMD3<Int>) -> Bool {
@@ -234,9 +240,12 @@ final class RenderLocalLighting {
         if intersectsRelevantVolume(section) { invalidate() }
     }
 
+    /// A nearby edit schedules a rebuild but keeps the displayed field until its replacement lands
+    /// (tens of milliseconds). Dropping it immediately switched both renderers to a different
+    /// lighting model for several frames, and continuous edits (flowing fluids, fire) repeated that
+    /// every time, which read as flicker in exactly those areas.
     private func invalidate() {
         generation &+= 1
-        current = nil // stale illumination after removal or a wall edit must never remain visible
     }
 
     func prepare(camera: SIMD3<Double>) -> RenderLocalLightVolume? {
@@ -259,20 +268,23 @@ final class RenderLocalLighting {
         }
         if let completed = mailbox.take(), completed.ticket == activeTicket {
             activeTicket = nil
-            if completed.generation == generation, completed.origin == origin, let field = completed.field {
-                current = RenderLocalLightVolume(device: device, field: field, generation: generation)
+            // Accept any completed field for this origin that is newer than the displayed one, even
+            // if more edits arrived meanwhile; otherwise continuous edits starve the volume forever.
+            if completed.epoch == epoch, completed.origin == origin, let field = completed.field,
+               current.map({ $0.origin != origin || $0.generation < completed.generation }) ?? true {
+                current = RenderLocalLightVolume(device: device, field: field, generation: completed.generation)
             }
         }
-        if (current == nil || current?.origin != origin) && activeTicket == nil {
+        if (current == nil || current?.origin != origin || current?.generation != generation) && activeTicket == nil {
             nextTicket &+= 1
-            let ticket = nextTicket, revision = generation, mailbox = mailbox
+            let ticket = nextTicket, revision = generation, epoch = epoch, mailbox = mailbox
             activeTicket = ticket
             let snapshot = sections.compactMap { key, value in
                 intersectsRequestedVolume(key) ? RenderLocalLightSection(origin: key, metadata: value) : nil
             }
             queue.async {
                 let field = RenderLocalLightField.build(origin: origin, sections: snapshot)
-                mailbox.put(.init(ticket: ticket, generation: revision, origin: origin, field: field))
+                mailbox.put(.init(ticket: ticket, epoch: epoch, generation: revision, origin: origin, field: field))
             }
         }
         return current

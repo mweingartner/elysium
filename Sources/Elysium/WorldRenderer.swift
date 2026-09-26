@@ -1193,7 +1193,9 @@ final class WorldRenderer {
         }
         rayTracingActive = tracedColor != nil
         let ultraOn = requestedMode != .standard && !rayTracingActive
-        let wantShadowSize = ultraOn ? 4096 : 2048
+        // Size by the requested mode, not per-frame RT activity: a transient ray-tracing
+        // fallback frame must not reallocate the shadow map (2048 <-> 4096) twice.
+        let wantShadowSize = requestedMode != .standard ? 4096 : 2048
         if shadowSizeNow != wantShadowSize { buildShadow(size: wantShadowSize) }
         let shadowOK = !rayTracingActive && settings.shadows && world.dim == .overworld && sky.dayLight > 0.1 && sunDir.y > 0.05
 

@@ -3,8 +3,11 @@ import Metal
 import simd
 import ElysiumCore
 
-/// An optional, independent world renderer. Raster remains available during incremental scene
-/// preparation or a capability/resource failure; a partly built ray scene is never presented.
+/// An optional, independent world renderer. Raster remains available during cold scene
+/// preparation or a capability/resource failure. Once a scene has been presented, a remeshed
+/// section keeps presenting its previous BLAS until the replacement is built, and farther new
+/// sections stream in nearest-first instead of switching the whole frame back to raster.
+/// Nearby sections (player edits) are always rebuilt in the frame their mesh changes.
 final class RayTracedWorldRenderer {
     private final class MemoryLedger {
         private let lock=NSLock()
@@ -15,12 +18,29 @@ final class RayTracedWorldRenderer {
         func changeResident(_ delta: Int) { lock.lock(); resident+=delta; lock.unlock() }
         func changeTransient(_ delta: Int) { lock.lock(); transient+=delta; lock.unlock() }
     }
+    /// One frame's GPU-written compacted BLAS sizes. The completion handler records whether the
+    /// frame finished; only then are the sizes valid to read.
+    private final class CompactionBatch: @unchecked Sendable {
+        let sizes: MTLBuffer
+        private let lock=NSLock()
+        private var result: Bool?
+        init(sizes: MTLBuffer) { self.sizes=sizes }
+        /// nil while the frame is in flight; true once it completed successfully.
+        var outcome: Bool? { lock.lock(); defer { lock.unlock() }; return result }
+        func finish(success: Bool) { lock.lock(); result=success; lock.unlock() }
+    }
+    private struct CompactionTicket {
+        let batch: CompactionBatch
+        let slot: Int
+    }
     private final class Geometry {
         let structure: MTLAccelerationStructure
         let triangleCount: Int
         let bytes: Int
         let emitters: [RayTracingLight]
         let ledger: MemoryLedger
+        /// Set for a freshly built section BLAS until it is compacted or found incompressible.
+        var compaction: CompactionTicket?
         init(structure: MTLAccelerationStructure,triangles: Int,bytes: Int,
              emitters: [RayTracingLight],ledger: MemoryLedger) {
             self.structure=structure; self.triangleCount=triangles; self.bytes=bytes; self.emitters=emitters
@@ -35,9 +55,19 @@ final class RayTracedWorldRenderer {
         // Packed source is reconstructible after a distance-based BLAS eviction. The original
         // COW arrays are smaller than retaining duplicate decoded Metal build-input buffers.
         let mesh: MeshOutput
+        /// This revision's triangle count, known before its BLAS exists so budget admission
+        /// can account for sections it has not built yet.
+        let triangleEstimate: Int
+        /// The BLAS for this revision's mesh.
         var geometry: Geometry?
+        /// The previous revision's BLAS, presented until `geometry` is built. A remesh therefore
+        /// never removes a section from the ray scene. Staleness is bounded: near sections are
+        /// rebuilt in the same frame, and farther ones rebuild nearest-first within the budget.
+        var staleGeometry: Geometry?
+        var presented: Geometry? { geometry ?? staleGeometry }
         init(key: SectionKey,minY: Int,mesh: MeshOutput,revision: UInt64) {
             self.key=key; self.minY=minY; self.mesh=mesh; self.revision=revision
+            triangleEstimate=(mesh.opaque.idx.count+mesh.cutout.idx.count+mesh.translucent.idx.count)/3
         }
     }
     private struct SceneInstance {
@@ -49,6 +79,10 @@ final class RayTracedWorldRenderer {
         let overlay: SIMD4<Float>
         let dynamic: Bool
         let primaryVisible: Bool
+        /// False when this instance's presented geometry was replaced near the camera this
+        /// frame: its pixels reject temporal history (motion.w=0, MetalFX reactive mask) while
+        /// the rest of the frame keeps accumulating.
+        var historyValid = true
     }
     /// Retained by the completion closure. Replaced meshes and resized textures remain alive
     /// until their final GPU consumer completes, independent of CPU/render-frame cadence.
@@ -56,6 +90,7 @@ final class RayTracedWorldRenderer {
         var geometry: [Geometry] = []
         var resources: [MTLResource] = []
         var transientBytes = 0
+        var compactionBatch: CompactionBatch?
         let ledger: MemoryLedger
         init(ledger: MemoryLedger) { self.ledger=ledger }
         func retainTransient(_ resource: MTLResource) {
@@ -91,8 +126,6 @@ final class RayTracedWorldRenderer {
     private var requiredSectionKeys: Set<SectionKey> = []
     private var entities: [String: Geometry] = [:]
     private var sectionsRevision: UInt64 = 1
-    private var previousParticipatingSections: [SectionKey:UInt64] = [:]
-    private var previousSourceRevision: UInt64 = 0
     /// Distance-ordered selection reused across frames. Sorting ~8k sections every frame cost
     /// about 13% of the main thread; the order only prioritizes builds and fixes instance order.
     /// It is recomputed whenever any section changes, the radius changes, or the camera moves
@@ -101,16 +134,33 @@ final class RayTracedWorldRenderer {
     private var selectionCacheRevision: UInt64 = 0
     private var selectionCacheRange: Double = -1
     private var selectionCacheCamera = SIMD2<Double>(repeating: .nan)
-    private var selectionGeneration: UInt64 = 0
-    private var previousSelectionGeneration: UInt64 = 0
     private static let selectionRefreshDistance: Double = 2
-    private var hasPresentedCompleteScene=false
-    private static let warmBuildsPerFrame=64
-    private static let warmBuildTrianglesPerFrame=1_000_000
+    /// Set by the first presented frame after `clear()`; selects the streaming build policy.
+    private var hasPresentedScene=false
     private static let retentionMargin: Double=32
+    /// All BLAS builds of one frame share an encoder and suballocate scratch from arenas of
+    /// this size (distinct regions, so builds in the encoder never alias scratch memory).
+    private static let scratchArenaBytes=8<<20
+    private var frameBuildEncoder: MTLAccelerationStructureCommandEncoder?
+    private var frameScratch: MTLBuffer?
+    private var frameScratchUsed=0
+    /// BLAS compaction (Apple WWDC20/22, NVIDIA): each section build also writes its compacted
+    /// size; a later frame copies it into an exactly sized allocation, measured about 30% smaller
+    /// for this primitive layout. The copy is encoded before the TLAS build that references it.
+    private static let compactionSlots=1_024
+    private static let compactionsPerFrame=64
+    /// Individually allocated acceleration structures above 16 KiB occupy whole 16 KiB pages, so
+    /// compaction is only worth a copy when it frees at least one page (small sections do not).
+    private static let accelerationStructurePage=16_384
+    private var frameCompactionBatch: CompactionBatch?
+    private var frameCompactionSlot=0
+    private var compactionQueue: [Section]=[]
+    /// Consecutive raster-fallback frames. A single transient fallback before encoding keeps
+    /// temporal history; a longer run discards it on recovery.
+    private var consecutiveFallbackFrames=0
+    private var encodingStarted=false
     private var previousWorldIdentity: UInt64 = 0
     private var previousAtlasGeneration: UInt64 = 0
-    private var previousLocalLightGeneration: UInt64 = 0
     private var previousHadLocalLight = false
     private var previousHeldLight = SIMD4<Float>(repeating: 0)
     private var previousCamera = SIMD3<Double>(repeating: 0)
@@ -145,6 +195,7 @@ final class RayTracedWorldRenderer {
     // the memory policy or manufacture device headroom.
     var memoryBudgetOverride: Int?
     var memoryHeadroomOverride: Int?
+    var triangleBudgetOverride: Int?
 #endif
     private lazy var denoiser=RayTracingDenoiser(device:device)
     private var previousUsedDenoiser=false
@@ -247,7 +298,7 @@ final class RayTracedWorldRenderer {
             // before retrying admission. Submitted frames retain their own references, so
             // their bytes remain charged until real GPU completion and cannot be overspent.
             for section in sections.values where !requiredSectionKeys.contains(section.key) {
-                section.geometry=nil
+                section.geometry=nil; section.staleGeometry=nil
             }
             refreshMemoryDiagnostics()
             available=max(0,diagnostics.memoryBudgetBytes-diagnostics.geometryBytes)
@@ -262,17 +313,20 @@ final class RayTracedWorldRenderer {
     func uploadSection(key: SectionKey,minY: Int,mesh: MeshOutput) {
         let nonempty = !mesh.opaque.idx.isEmpty || !mesh.cutout.idx.isEmpty || !mesh.translucent.idx.isEmpty
         sectionsRevision &+= 1
-        sections[key]=nonempty ? Section(key:key,minY:minY,mesh:mesh,revision:sectionsRevision) : nil
+        guard nonempty else { sections[key]=nil; return }
+        let previous=sections[key]
+        let section=Section(key:key,minY:minY,mesh:mesh,revision:sectionsRevision)
+        section.staleGeometry=previous?.presented
+        sections[key]=section
     }
     func removeChunk(cx: Int,cz: Int,sectionCount: Int) {
         for sy in 0..<sectionCount { sections.removeValue(forKey:SectionKey(cx:cx,sy:sy,cz:cz)) }
         sectionsRevision &+= 1
     }
     func clear() {
-        sections.removeAll(); entities.removeAll(); previousTransforms.removeAll()
+        sections.removeAll(); entities.removeAll(); previousTransforms.removeAll(); compactionQueue.removeAll()
         requiredSectionKeys.removeAll(); selectionCache.removeAll(); selectionCacheRange = -1
-        selectionGeneration &+= 1
-        previousParticipatingSections.removeAll(); previousSourceRevision=0; hasPresentedCompleteScene=false
+        hasPresentedScene=false; consecutiveFallbackFrames=0
         sectionsRevision &+= 1; historyFrames=0; sampleIndex=0; allocationFailure=nil
         memoryPressureReason=nil
         diagnosticsLock.lock(); completedError=nil; diagnosticsLock.unlock()
@@ -310,9 +364,100 @@ final class RayTracedWorldRenderer {
     }
 
     private func fail(_ reason: String) -> MTLTexture? {
+        endBuildEncoding()
+        diagnostics.fallbackFrames[reason.filter { !$0.isNumber }, default: 0] += 1
         refreshMemoryDiagnostics()
-        diagnostics.ready=false; diagnostics.status=reason; historyFrames=0; depthTexture=nil
+        consecutiveFallbackFrames+=1
+        // Before any history-writing pass is encoded, the previous frame's history and camera
+        // still match, so one transient fallback does not force a full-screen noise restart.
+        if encodingStarted || consecutiveFallbackFrames>RayTracingLimits.fallbackHistoryGapFrames { historyFrames=0 }
+        diagnostics.ready=false; diagnostics.status=reason; depthTexture=nil
         return nil
+    }
+    private func sharedBuildEncoder(_ command: MTLCommandBuffer) -> MTLAccelerationStructureCommandEncoder? {
+        if let frameBuildEncoder { return frameBuildEncoder }
+        let encoder=command.makeAccelerationStructureCommandEncoder()
+        encoder?.label="RT BLAS builds"
+        frameBuildEncoder=encoder
+        return encoder
+    }
+    private func endBuildEncoding() {
+        frameBuildEncoder?.endEncoding(); frameBuildEncoder=nil
+        frameScratch=nil; frameScratchUsed=0
+        frameCompactionBatch=nil; frameCompactionSlot=0
+    }
+    private func compactionTicket(submission: Submission) -> CompactionTicket? {
+        if frameCompactionBatch == nil {
+            guard let sizes=device.makeBuffer(length:Self.compactionSlots*MemoryLayout<UInt32>.stride,
+                                              options:.storageModeShared) else { return nil }
+            sizes.label="RT BLAS compacted sizes"
+            let batch=CompactionBatch(sizes:sizes)
+            frameCompactionBatch=batch; frameCompactionSlot=0
+            submission.compactionBatch=batch
+        }
+        guard let batch=frameCompactionBatch,frameCompactionSlot<Self.compactionSlots else { return nil }
+        defer { frameCompactionSlot+=1 }
+        return .init(batch:batch,slot:frameCompactionSlot)
+    }
+    /// Replaces completed section BLASes with compacted copies, oldest first, within the frame's
+    /// budget. Sections replaced or evicted since their build simply leave the queue.
+    private func compactCompletedSections(command: MTLCommandBuffer,submission: Submission) {
+        var remaining: [Section]=[],compacted=0
+        for section in compactionQueue {
+            guard sections[section.key] === section,let geometry=section.geometry,
+                  let ticket=geometry.compaction else { continue }
+            // Out-of-selection margin sections are left to ordinary eviction, not compacted.
+            guard requiredSectionKeys.contains(section.key) else { remaining.append(section); continue }
+            guard let outcome=ticket.batch.outcome else { remaining.append(section); continue }
+            guard outcome else { geometry.compaction=nil; continue }
+            guard compacted<Self.compactionsPerFrame else { remaining.append(section); continue }
+            let size=Int(ticket.batch.sizes.contents().load(fromByteOffset:ticket.slot*MemoryLayout<UInt32>.stride,
+                                                             as:UInt32.self))
+            let page=Self.accelerationStructurePage
+            let rounded=(size+page-1)/page*page
+            guard size>0,geometry.bytes-rounded>=page else { geometry.compaction=nil; continue }
+            guard admitsAllocation(rounded),let destination=device.makeAccelerationStructure(size:size) else {
+                remaining.append(section); continue
+            }
+            guard destination.allocatedSize<geometry.bytes,let encoder=sharedBuildEncoder(command) else {
+                geometry.compaction=nil; continue
+            }
+            // Admission may have evicted this section's BLAS under pressure; never revive it.
+            guard section.geometry === geometry else { continue }
+            destination.label=geometry.structure.label
+            encoder.copyAndCompact(sourceAccelerationStructure:geometry.structure,destinationAccelerationStructure:destination)
+            let replacement=Geometry(structure:destination,triangles:geometry.triangleCount,
+                                     bytes:destination.allocatedSize,emitters:geometry.emitters,ledger:memoryLedger)
+            // The source stays alive until this frame's copy has executed.
+            submission.geometry.append(geometry); submission.geometry.append(replacement)
+            section.geometry=replacement
+            compacted+=1
+            diagnostics.compactionSavedBytes+=max(0,geometry.bytes-replacement.bytes)
+        }
+        compactionQueue=remaining
+        diagnostics.compactedSections=compacted
+    }
+    /// Bytes a scratch region of `length` would newly allocate: zero when the current arena has room.
+    private func scratchAllocationEstimate(length: Int) -> Int {
+        let aligned=(frameScratchUsed+255) & ~255
+        if let frameScratch,aligned+length<=frameScratch.length { return 0 }
+        let size=max(length,Self.scratchArenaBytes)
+        return max(size,device.heapBufferSizeAndAlign(length:size,options:.storageModePrivate).size)
+    }
+    /// A distinct, 256-byte-aligned scratch region for one BLAS build in this frame's encoder.
+    /// The caller admits `scratchAllocationEstimate` together with the structure it builds.
+    private func scratchRegion(length: Int,submission: Submission) -> (buffer: MTLBuffer,offset: Int)? {
+        let aligned=(frameScratchUsed+255) & ~255
+        if let frameScratch,aligned+length<=frameScratch.length {
+            frameScratchUsed=aligned+length
+            return (frameScratch,aligned)
+        }
+        let size=max(length,Self.scratchArenaBytes)
+        guard let buffer=device.makeBuffer(length:size,options:.storageModePrivate) else { return nil }
+        buffer.label="RT BLAS build scratch"
+        submission.retainTransient(buffer)
+        frameScratch=buffer; frameScratchUsed=length
+        return (buffer,0)
     }
     private func makeBuffer<T>(_ values: [T],label: String,submission: Submission) -> MTLBuffer? {
         guard !values.isEmpty else { return nil }
@@ -324,7 +469,7 @@ final class RayTracedWorldRenderer {
         return result
     }
     private func build(_ decoded: RayTracingMeshDecoder.Decoded,command: MTLCommandBuffer,
-                       submission: Submission,label: String) -> Geometry? {
+                       submission: Submission,label: String,compactable: Bool = false) -> Geometry? {
         guard admitsAllocation(decoded.byteCount) else { return nil }
         guard !decoded.primitives.isEmpty,
               let vertices=makeBuffer(decoded.positions,label:label+" positions",submission:submission),
@@ -338,20 +483,27 @@ final class RayTracedWorldRenderer {
         triangles.primitiveDataElementSize=MemoryLayout<RayTracingPrimitive>.stride
         let descriptor=MTLPrimitiveAccelerationStructureDescriptor(); descriptor.geometryDescriptors=[triangles]
         let sizes=device.accelerationStructureSizes(descriptor:descriptor)
-        let scratchEstimate=max(1,device.heapBufferSizeAndAlign(length:max(1,sizes.buildScratchBufferSize),options:.storageModePrivate).size)
-        guard admitsAllocation(RayTracingMemoryBudget.saturatingAdd(sizes.accelerationStructureSize,scratchEstimate)) else { return nil }
-        guard let structure=device.makeAccelerationStructure(size:sizes.accelerationStructureSize),
-              let scratch=device.makeBuffer(length:max(1,sizes.buildScratchBufferSize),options:.storageModePrivate),
-              let encoder=command.makeAccelerationStructureCommandEncoder() else { return nil }
+        let scratchLength=max(1,sizes.buildScratchBufferSize)
+        // One admission for everything this build newly allocates, so the structure and a new
+        // scratch arena cannot each pass against the same headroom.
+        guard admitsAllocation(RayTracingMemoryBudget.saturatingAdd(sizes.accelerationStructureSize,
+                                   scratchAllocationEstimate(length:scratchLength))),
+              let scratch=scratchRegion(length:scratchLength,submission:submission),
+              let structure=device.makeAccelerationStructure(size:sizes.accelerationStructureSize),
+              let encoder=sharedBuildEncoder(command) else { return nil }
         structure.label=label
-        encoder.build(accelerationStructure:structure,descriptor:descriptor,scratchBuffer:scratch,scratchBufferOffset:0)
-        encoder.endEncoding()
-        submission.retainTransient(scratch)
+        encoder.build(accelerationStructure:structure,descriptor:descriptor,
+                      scratchBuffer:scratch.buffer,scratchBufferOffset:scratch.offset)
         // Metal copies both geometry and per-primitive payload into the BLAS. Build-input
         // buffers stay in Submission until completion, not in the persistent Geometry cache.
         let geometry=Geometry(structure:structure,
                               triangles:decoded.primitives.count,bytes:structure.allocatedSize,
                               emitters:decoded.emitters,ledger:memoryLedger)
+        if compactable,let ticket=compactionTicket(submission:submission) {
+            encoder.writeCompactedSize(accelerationStructure:structure,buffer:ticket.batch.sizes,
+                                       offset:ticket.slot*MemoryLayout<UInt32>.stride)
+            geometry.compaction=ticket
+        }
         submission.geometry.append(geometry)
         return geometry
     }
@@ -397,7 +549,7 @@ final class RayTracedWorldRenderer {
         diagnostics.gpuStageFrameIndex=stageTimings?.sampleFrameIndex ?? 0
         let profile=gpuProfiler.beginFrame(command:command,frameIndex:profilerFrameIndex)
         profilerFrameIndex &+= 1
-        memoryPressureReason=nil
+        memoryPressureReason=nil; encodingStarted=false
         refreshMemoryDiagnostics()
         if let gpuError { return fail("Ray tracing GPU failure: "+gpuError) }
         if let allocationFailure { return fail(allocationFailure) }
@@ -415,6 +567,7 @@ final class RayTracedWorldRenderer {
         let hasLocalLight=localLightTexture != nil
         // Completion owns every buffer/AS used by this submission, including replacement/eviction cases.
         command.addCompletedHandler { [weak self,submission] completed in
+            submission.compactionBatch?.finish(success:completed.status == .completed)
             submission.finish()
             guard let self else { return }
             self.diagnosticsLock.lock()
@@ -440,19 +593,16 @@ final class RayTracedWorldRenderer {
                 return a.section.key.sy<b.section.key.sy
             }.map(\.section)
             selectionCacheRevision=sectionsRevision; selectionCacheRange=range; selectionCacheCamera=cameraXZ
-            selectionGeneration &+= 1
             requiredSectionKeys=Set(selectionCache.map(\.key))
             // Retain a narrow margin beyond selection: walking back across a chunk/radius boundary
-            // should not continually destroy and rebuild the same BLAS. Only selected geometry
-            // enters the scene; this cache margin never admits an incomplete ray scene.
+            // should not continually destroy and rebuild the same BLAS. Only admitted geometry
+            // enters the scene.
             let retainRange=range+Self.retentionMargin
-            for section in sections.values where section.geometry != nil {
+            for section in sections.values where section.presented != nil {
                 let dx=Double(section.key.cx*16+8)-frame.camera.x, dz=Double(section.key.cz*16+8)-frame.camera.z
-                if dx*dx+dz*dz>retainRange*retainRange { section.geometry=nil }
+                if dx*dx+dz*dz>retainRange*retainRange { section.geometry=nil; section.staleGeometry=nil }
             }
         }
-        let selected=selectionCache
-        diagnostics.sections=selected.count
         diagnostics.width=desiredWidth; diagnostics.height=desiredHeight
         diagnostics.outputWidth=outputWidth; diagnostics.outputHeight=outputHeight
         let activeEntityKeys=Set(dynamic.map { $0.geometry.key }+blocks.map { "block:"+$0.geometry.key })
@@ -460,61 +610,139 @@ final class RayTracedWorldRenderer {
         // and their bytes remain charged until completion; packed terrain sources can rebuild.
         entities=entities.filter { activeEntityKeys.contains($0.key) }
         refreshMemoryDiagnostics()
-        guard selected.count+dynamic.count+blocks.count <= RayTracingLimits.maximumInstances else {
+        guard dynamic.count+blocks.count <= RayTracingLimits.maximumInstances else {
             return fail("Ray scene exceeds the safe instance budget; using raster")
         }
-        var built=0,builtTriangles=0
-        // Terrain meshing can deliver 26 completions at once. Once a complete RT scene has
-        // been shown, a bounded catch-up slice handles that ordinary burst in the same frame
-        // instead of flashing Ultra lighting for its second half. Cold startup stays smaller;
-        // genuinely larger work still waits for a complete, fresh scene rather than hiding edits.
-        let buildLimit=hasPresentedCompleteScene ? Self.warmBuildsPerFrame:RayTracingLimits.buildsPerFrame
-        let triangleBuildLimit=hasPresentedCompleteScene ? Self.warmBuildTrianglesPerFrame:RayTracingLimits.buildTrianglesPerFrame
-        for section in selected where section.geometry == nil {
-            guard built<buildLimit,builtTriangles<triangleBuildLimit else { break }
-            guard let decoded=RayTracingMeshDecoder.decode(section.mesh) else {
-                return fail("Invalid section geometry; using raster")
-            }
-            guard let geometry=build(decoded,command:command,submission:submission,label:"RT section \(section.key)") else {
-                diagnostics.pendingSections=selected.reduce(0) { $0+($1.geometry == nil ? 1:0) }
-                return fail(memoryPressureReason ?? "Unable to allocate ray section geometry; retrying in Ultra")
-            }
-            section.geometry=geometry; built+=1; builtTriangles+=geometry.triangleCount
+        // Budget admission is a prefix of the distance-ordered selection: the farthest sections
+        // are dropped to fit the instance and triangle caps (fog covers that tail) instead of
+        // switching the whole frame to raster, which read as a full-screen flicker.
+        var triangleBudget=RayTracingLimits.maximumTriangles
+#if DEBUG
+        if let triangleBudgetOverride { triangleBudget=triangleBudgetOverride }
+#endif
+        for instance in dynamic {
+            triangleBudget-=entities[instance.geometry.key]?.triangleCount ?? instance.geometry.vertices.count/27
         }
+        for instance in blocks {
+            triangleBudget-=entities["block:"+instance.geometry.key]?.triangleCount ?? instance.geometry.indices.count/3
+        }
+        let instanceBudget=RayTracingLimits.maximumInstances-dynamic.count-blocks.count
+        var admittedCount=0,admittedTriangles=0
+        for section in selectionCache {
+            let triangles=section.geometry?.triangleCount ?? section.triangleEstimate
+            guard admittedCount<instanceBudget,admittedTriangles+triangles<=triangleBudget else { break }
+            admittedCount+=1; admittedTriangles+=triangles
+        }
+        let selected=selectionCache.prefix(admittedCount)
+        diagnostics.sections=selected.count
+        diagnostics.truncatedSections=selectionCache.count-admittedCount
+        func horizontalDistanceSquared(_ section: Section) -> Double {
+            let dx=Double(section.key.cx*16+8)-frame.camera.x, dz=Double(section.key.cz*16+8)-frame.camera.z
+            return dx*dx+dz*dz
+        }
+        let nearRadiusSquared=RayTracingLimits.nearBuildRadius*RayTracingLimits.nearBuildRadius
+        // Before the first presentation every section inside fog start must exist; afterward
+        // only near sections must, and farther ones stream in without a raster fallback.
+        let requiredRadius=hasPresentedScene ? RayTracingLimits.nearBuildRadius
+            : max(RayTracingLimits.nearBuildRadius,Double(frame.fogStart))
+        var built=0,builtTriangles=0,memoryLimited=false
+        var refreshedNear=Set<SectionKey>()
+        enum BuildOutcome { case built,invalid,unavailable }
+        func buildSection(_ section: Section) -> BuildOutcome {
+            guard let decoded=RayTracingMeshDecoder.decode(section.mesh) else { return .invalid }
+            guard let geometry=build(decoded,command:command,submission:submission,
+                                     label:"RT section \(section.key)",compactable:true) else {
+                return .unavailable
+            }
+            compactionQueue.append(section)
+            if section.staleGeometry != nil,horizontalDistanceSquared(section)<=nearRadiusSquared {
+                refreshedNear.insert(section.key)
+            }
+            section.geometry=geometry; section.staleGeometry=nil
+            built+=1; builtTriangles+=geometry.triangleCount
+            return .built
+        }
+        // 1. Near sections: edits around the player rebuild in the same frame. The ceiling only
+        //    binds after a teleport or a very large explosion.
+        for section in selected where section.geometry == nil && horizontalDistanceSquared(section)<=nearRadiusSquared {
+            guard built<RayTracingLimits.nearBuildsPerFrame,builtTriangles<RayTracingLimits.nearBuildTrianglesPerFrame else { break }
+            switch buildSection(section) {
+            case .built: continue
+            case .invalid: return fail("Invalid section geometry; using raster")
+            case .unavailable: return fail(memoryPressureReason ?? "Unable to allocate ray section geometry; retrying in Ultra")
+            }
+        }
+        // 2. Entities and moving blocks. One that cannot be built yet is omitted this frame.
         for instance in dynamic where entities[instance.geometry.key] == nil {
-            guard built<buildLimit,builtTriangles<triangleBuildLimit else { break }
-            guard let decoded=decodeEntity(instance.geometry),!decoded.primitives.isEmpty,
-                  let geometry=build(decoded,command:command,submission:submission,label:"RT entity "+instance.geometry.key) else {
-                return fail(memoryPressureReason ?? "Invalid or unavailable entity geometry; using raster")
+            guard built<RayTracingLimits.nearBuildsPerFrame,builtTriangles<RayTracingLimits.nearBuildTrianglesPerFrame else { break }
+            guard let decoded=decodeEntity(instance.geometry),!decoded.primitives.isEmpty else {
+                return fail("Invalid or unavailable entity geometry; using raster")
+            }
+            guard let geometry=build(decoded,command:command,submission:submission,label:"RT entity "+instance.geometry.key) else {
+                memoryLimited=true; break
             }
             entities[instance.geometry.key]=geometry; built+=1; builtTriangles+=geometry.triangleCount
         }
-        for instance in blocks where entities["block:"+instance.geometry.key] == nil {
-            guard built<buildLimit,builtTriangles<triangleBuildLimit else { break }
-            guard let decoded=RayTracingMeshDecoder.decodePacked(data:instance.geometry.vertices,indices:instance.geometry.indices),!decoded.primitives.isEmpty,
-                  let geometry=build(decoded,command:command,submission:submission,label:"RT block "+instance.geometry.key) else {
-                return fail(memoryPressureReason ?? "Invalid or unavailable moving block geometry; using raster")
+        for instance in blocks where !memoryLimited && entities["block:"+instance.geometry.key] == nil {
+            guard built<RayTracingLimits.nearBuildsPerFrame,builtTriangles<RayTracingLimits.nearBuildTrianglesPerFrame else { break }
+            guard let decoded=RayTracingMeshDecoder.decodePacked(data:instance.geometry.vertices,indices:instance.geometry.indices),
+                  !decoded.primitives.isEmpty else {
+                return fail("Invalid or unavailable moving block geometry; using raster")
+            }
+            guard let geometry=build(decoded,command:command,submission:submission,label:"RT block "+instance.geometry.key) else {
+                memoryLimited=true; break
             }
             entities["block:"+instance.geometry.key]=geometry; built+=1; builtTriangles+=geometry.triangleCount
         }
-        let pending=selected.reduce(0) { $0+($1.geometry == nil ? 1:0) }
+        // 3. Farther sections stream in nearest-first within the per-frame budget. Under memory
+        //    pressure the remainder stays deferred rather than failing the frame.
+        let streamingBuilds=hasPresentedScene ? RayTracingLimits.streamingBuildsPerFrame:RayTracingLimits.buildsPerFrame
+        let streamingTriangles=hasPresentedScene ? RayTracingLimits.streamingBuildTrianglesPerFrame:RayTracingLimits.buildTrianglesPerFrame
+        var streamed=0,streamedTriangles=0
+        for section in selected where !memoryLimited && section.geometry == nil {
+            guard streamed<streamingBuilds,streamedTriangles<streamingTriangles else { break }
+            let before=builtTriangles
+            switch buildSection(section) {
+            case .built: streamed+=1; streamedTriangles+=builtTriangles-before
+            case .invalid: return fail("Invalid section geometry; using raster")
+            case .unavailable:
+                if horizontalDistanceSquared(section)<=requiredRadius*requiredRadius {
+                    return fail(memoryPressureReason ?? "Unable to allocate ray section geometry; retrying in Ultra")
+                }
+                memoryLimited=true
+            }
+        }
+        compactCompletedSections(command:command,submission:submission)
+        endBuildEncoding()
+        diagnostics.builtSections=built; diagnostics.builtTriangles=builtTriangles
+        var unbuilt=0,missingRequired=0
+        for section in selected where section.presented == nil {
+            unbuilt+=1
+            if horizontalDistanceSquared(section)<=requiredRadius*requiredRadius { missingRequired+=1 }
+        }
+        diagnostics.pendingSections=selected.reduce(0) { $0+($1.geometry == nil ? 1:0) }
             + Set(dynamic.filter { entities[$0.geometry.key] == nil }.map { $0.geometry.key }).count
             + Set(blocks.filter { entities["block:"+$0.geometry.key] == nil }.map { $0.geometry.key }).count
-        diagnostics.pendingSections=pending
+        diagnostics.deferredSections=unbuilt-missingRequired
         refreshMemoryDiagnostics()
-        if pending>0 { return fail("Preparing ray scene (\(pending) meshes remaining)") }
+        if missingRequired>0 { return fail("Preparing ray scene (\(missingRequired) nearby meshes remaining)") }
         var instances: [SceneInstance]=[]
         instances.reserveCapacity(selected.count+dynamic.count+blocks.count)
+        var staleCount=0
         for section in selected {
-            guard let geometry=section.geometry else { continue }
+            guard let geometry=section.presented else { continue }
+            if section.geometry == nil { staleCount+=1 }
             var transform=matrix_identity_float4x4
             transform.columns.3 = .init(Float(Double(section.key.cx*16)-frame.camera.x),
                                        Float(Double(section.minY+section.key.sy*16)-frame.camera.y),
                                        Float(Double(section.key.cz*16)-frame.camera.z),1)
             // Terrain is translation-only; only dynamic instances key transform history.
             instances.append(.init(key:"",geometry:geometry,
-                                   transform:transform,texture:nil,tint:.init(repeating:1),overlay:.zero,dynamic:false,primaryVisible:true))
+                                   transform:transform,texture:nil,tint:.init(repeating:1),overlay:.zero,dynamic:false,primaryVisible:true,
+                                   historyValid:!refreshedNear.contains(section.key)))
         }
+        diagnostics.staleSections=staleCount
+        diagnostics.locallyInvalidatedInstances=refreshedNear.count
         for (index,instance) in dynamic.enumerated() {
             guard let geometry=entities[instance.geometry.key] else { continue }
             let stableID=instance.identity.isEmpty ? instance.geometry.key+"#\(index)" : instance.identity
@@ -531,9 +759,6 @@ final class RayTracedWorldRenderer {
         diagnostics.instances=instances.count
         diagnostics.triangles=instances.reduce(0) { $0+$1.geometry.triangleCount }
         guard !instances.isEmpty else { return fail("Waiting for loaded world geometry") }
-        guard diagnostics.triangles <= RayTracingLimits.maximumTriangles else {
-            return fail("Ray scene exceeds the safe triangle budget; using raster")
-        }
         // Native-surface angle per pixel for distance alpha coverage (rt_alpha_accept). Both
         // resolutions use the same value, so low-resolution donors see the same leaf coverage.
         let projectionScale=frame.projectionMatrix.columns.1.y
@@ -585,7 +810,8 @@ final class RayTracedWorldRenderer {
             let inverse=instance.dynamic ? m.inverse:matrix_identity_float4x4
             instanceUniforms.append(.init(transform:m,normalTransform:instance.dynamic ? inverse.transpose:matrix_identity_float4x4,
                 previousFromCurrent:instance.dynamic ? (previous ?? m)*inverse:matrix_identity_float4x4,tint:instance.tint,overlay:instance.overlay,
-                info:.init(UInt32(textureIndex),instance.dynamic ? 1:0,(!instance.dynamic || previous != nil) ? 1:0,
+                info:.init(UInt32(textureIndex),instance.dynamic ? 1:0,
+                           instance.historyValid && (!instance.dynamic || previous != nil) ? 1:0,
                            footprintScale.bitPattern)))
             for light in hasLocalLight && !instance.dynamic ? []:geometry.emitters {
                 var positioned=light; positioned.positionRadius = .init((m*SIMD4(light.positionRadius.x,light.positionRadius.y,light.positionRadius.z,1)).xyz,light.positionRadius.w)
@@ -634,25 +860,24 @@ final class RayTracedWorldRenderer {
         submission.resources.append(contentsOf:[raw,motion,diffuseAlbedo,specularAlbedo,filtered,composited,
                                                resolved,resolvedDepth,resolvedNormal]+colors+depths+normals)
         let dimension=frame.atmosphere.options.x,clock=frame.atmosphere.cameraTime.w
-        // Camera-only entry/exit from the selection radius is not a scene edit. Depth/motion
-        // reject newly visible pixels locally. Reset globally for actual changes/removals to
-        // previously participating geometry, or new uploads entering current coverage.
-        // With no section upload/removal and the same selection since the last presented frame,
-        // every revision is unchanged by construction, so the per-section scan is skipped.
-        let participationUnchanged=sectionsRevision == previousSourceRevision
-            && selectionGeneration == previousSelectionGeneration
-        let participatingSections=participationUnchanged ? previousParticipatingSections
-            : Dictionary(uniqueKeysWithValues:selected.map { ($0.key,$0.revision) })
-        let participatingChanged = !participationUnchanged && (previousParticipatingSections.contains { key,revision in
-            sections[key]?.revision != revision
-        } || selected.contains { previousParticipatingSections[$0.key] == nil && $0.revision>previousSourceRevision })
-        let discontinuity = frame.worldIdentity != previousWorldIdentity || frame.atlasGeneration != previousAtlasGeneration
-            || frame.localLightGeneration != previousLocalLightGeneration || hasLocalLight != previousHadLocalLight
-            || simd_length(frame.heldLight-previousHeldLight)>0.01
-            || participatingChanged || simd_length(frame.camera-previousCamera)>8
-            || dimension != lastDimension || abs(clock-lastClock)>0.5
-            || simd_length(frame.atmosphere.sunDaylight-previousSun)>0.04
+        // Global resets are reserved for whole-frame discontinuities. Section edits and
+        // local-light field regeneration are local: edited near instances reject history per
+        // pixel (see `historyValid`), disocclusion is rejected by depth/motion, and the
+        // temporal paths clamp or rectify history against the current frame's lighting.
+        var resetCauses: [String] = []
+        if frame.worldIdentity != previousWorldIdentity { resetCauses.append("world") }
+        if frame.atlasGeneration != previousAtlasGeneration { resetCauses.append("atlas") }
+        if hasLocalLight != previousHadLocalLight { resetCauses.append("local light") }
+        if simd_length(frame.heldLight-previousHeldLight)>0.01 { resetCauses.append("held light") }
+        if simd_length(frame.camera-previousCamera)>8 { resetCauses.append("camera cut") }
+        if dimension != lastDimension { resetCauses.append("dimension") }
+        if abs(clock-lastClock)>0.5 { resetCauses.append("clock") }
+        if simd_length(frame.atmosphere.sunDaylight-previousSun)>0.04 { resetCauses.append("sun") }
+        if consecutiveFallbackFrames>RayTracingLimits.fallbackHistoryGapFrames { resetCauses.append("fallback") }
+        let discontinuity = !resetCauses.isEmpty
+        for cause in resetCauses { diagnostics.historyResets[cause, default: 0] += 1 }
         if discontinuity { historyFrames=0 }
+        encodingStarted=true
         // A supported wrapper may still fail to configure/allocate at this size.
         // After that first failed frame, preserve the fallback's four-ray quality;
         // a later successful encode allows native two-ray denoising again.
@@ -754,11 +979,9 @@ final class RayTracedWorldRenderer {
         historyFrames=min(24,historyFrames+1); sampleIndex &+= 1
         previousTransforms=transforms; previousCamera=frame.camera; previousViewProjection=frame.viewProjection
         previousWorldIdentity=frame.worldIdentity; previousAtlasGeneration=frame.atlasGeneration
-        previousLocalLightGeneration=frame.localLightGeneration; previousHadLocalLight=hasLocalLight
+        previousHadLocalLight=hasLocalLight
         previousHeldLight=frame.heldLight
-        previousParticipatingSections=participatingSections; previousSourceRevision=sectionsRevision
-        previousSelectionGeneration=selectionGeneration
-        hasPresentedCompleteScene=true
+        hasPresentedScene=true; consecutiveFallbackFrames=0
         previousSun=frame.atmosphere.sunDaylight; lastClock=clock; lastDimension=dimension
         depthTexture=surfaceDepth
         diagnostics.ready=true; diagnostics.status="Ray Traced"; diagnostics.historySamples=historyFrames

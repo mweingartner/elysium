@@ -1,10 +1,11 @@
 # Ray-traced worlds, clouds, and water
 
-Status: the outdoor material-minification correction passes 156 selected tests.
-Matched native captures confirm reduced outdoor speckle with preserved nearby detail
-and approximately 80 FPS in the tested scene. The production release passed all nine
-pipeline stages and is installed. Release identity and separate Git publication
-results are tracked in the [verification record](ray-traced-worlds/build.md).
+Status: ray scenes now stream instead of switching to raster (September 26, 2026).
+On the prehistoric New World flight probe, raster fallback frames fell from 18% to 0%,
+standing-still history resets fell from 124-190 per 30 s to none, and median FPS rose
+from 67 to 74 with section BLAS compaction saving about 26% of acceleration-structure
+memory. Release identity and separate Git publication results are tracked in the
+[verification record](ray-traced-worlds/build.md).
 
 ## Rendering contract
 
@@ -14,8 +15,10 @@ New profiles default to Ray Traced. Loading an existing settings document preser
 its choice, including legacy Standard/OFF documents that omit the shader key.
 Unsupported devices skip Ray Traced in the cycle; a stored request on an
 unsupported device falls back to Ultra without silently changing the preference.
-Preparing or over-budget scenes also use a visible Ultra fallback, never a
-partially built ray scene with holes.
+Ultra covers only cold scene preparation (until every section inside fog start is
+built), unbuilt sections within 32 blocks after a teleport, and real capability or
+allocation failures. Once a scene has been shown, the ray scene streams: see
+[Scene streaming and temporal history](#scene-streaming-and-temporal-history).
 
 The ray renderer traces primary world visibility, sun/moon and local-light
 visibility, diffuse indirect illumination, reflective surfaces, and dielectric
@@ -33,8 +36,9 @@ is one quarter of Metal's recommended working set, capped at 32 GiB, and each
 allocation also respects current device-resource usage with a reserved margin.
 This replaces the original fixed 1 GiB cap: the 128 GiB M5 Max's reported
 107.52 GiB recommendation permits a 26.88 GiB RT budget before headroom limits.
-Missing device advice uses a conservative physical-memory fallback. Scene limits
-also bound triangles, instances, texture slots, and per-frame build work. Internal ray
+Missing device advice uses a conservative physical-memory fallback. Triangle and
+instance caps drop the farthest selected sections instead of failing the frame;
+texture slots and per-frame build work are also bounded. Internal ray
 surface resolution preserves aspect ratio within 1920 × 1200. Supported macOS 26+
 devices trace expensive transport within 640 × 400, denoise that working image
 1:1 with MetalFX, then independently trace primary visibility and material color
@@ -49,8 +53,10 @@ transport integrator at the native sample. Stable pixel centers keep leaf covera
 out of temporal jitter; beyond the pixel footprint, coverage may only grow (below). Other devices retain
 the original 1:1 albedo-guided temporal/spatial filter. Native denoising uses two
 paths per lighting pixel; the compatible fallback uses
-four. Primary water/glass Fresnel branches are both sampled each pixel. Geometry,
-world, atlas, teleport, and lighting discontinuities invalidate affected history.
+four. Primary water/glass Fresnel branches are both sampled each pixel. World,
+atlas, dimension, teleport, clock, sun and held-light discontinuities reset history
+for the whole frame; section edits and local-light field updates invalidate only
+the affected pixels.
 These are quality/performance tradeoffs, not claims of offline-render convergence.
 Camera fog and finite primary cloud segments composite after reconstruction;
 secondary-ray atmosphere and water absorption remain inside ray transport. This
@@ -78,6 +84,69 @@ off-screen loaded geometry. Reduce Motion freezes cloud drift and water normals.
 
 No world simulation, save/LAN schema, registry order, or deterministic random
 stream changes. No network service or downloaded asset is required.
+
+## Scene streaming and temporal history
+
+The ray scene degrades gracefully instead of switching the whole frame to raster.
+Raster and ray tracing use different lighting models, so every fallback frame read
+as a full-screen flicker, and each one also discarded temporal history. This follows
+the practice shared by Apple's Metal ray-tracing sessions (WWDC 2020, 2022, 2023),
+NVIDIA's RTX best practices and Unreal Engine's ray-tracing performance guide:
+geometry that is not built yet is left out of the ray scene and filled in over later
+frames, per-frame build work is budgeted, static BLASes are compacted, and temporal
+history is reset only on true cuts while edits are rejected per pixel.
+
+- **Nearby sections.** Sections within 32 blocks (horizontal distance to the section
+  centre) always rebuild in the frame their mesh changes, up to 128 builds or 1.5M
+  triangles. Player edits therefore never show old geometry. A new nearby section
+  that cannot be built yet, which only happens after a teleport, still selects Ultra
+  for that frame.
+- **Farther sections.** They stream in nearest-first, 24 builds or 200k triangles per
+  frame (32 and 500k before the first presentation). A remeshed section keeps
+  presenting its previous revision's BLAS until the replacement is built, and a new
+  one is omitted until built. The first presentation after loading waits until every
+  section inside fog start exists, so the world never appears with holes in plain view.
+- **Budget truncation.** The selection is distance-ordered, so the triangle cap
+  (16M, a traversal/memory quality bound rather than a Metal limit) and the instance
+  cap admit its nearest prefix and drop the farthest sections, which lie in the fog
+  tail. Under memory pressure the remaining far builds are deferred rather than
+  failing the frame.
+- **Batched builds.** All BLAS builds of a frame share one acceleration-structure
+  encoder and suballocate distinct scratch regions from 8 MiB arenas. The mesh
+  decoder uses a per-tile material-trait table instead of per-triangle string
+  matching, measured about 4x faster (117 to 29 ns per triangle).
+- **Compaction.** Each section build writes its compacted size on the GPU. After that
+  frame completes, a later frame copies the BLAS into an exactly sized allocation
+  (64 per frame) when it frees at least one 16 KiB page; small sections are left as
+  built. The copy precedes the TLAS build that references it.
+- **Temporal history.** Global resets remain for world, atlas, dimension, camera cut
+  (over 8 blocks), clock, sun, held light, the local-light field appearing or
+  disappearing, and a fallback run longer than four frames. A remeshed section within
+  32 blocks marks its instance history-invalid for one frame, so only its pixels
+  (motion validity, and the MetalFX reactive mask) restart. Removals and far edits
+  rely on depth/motion disocclusion rejection and the denoisers' own history
+  rectification. A single fallback frame before any history pass is encoded keeps
+  history, because the previous frame's history and camera still match.
+- **Local-light field.** A nearby edit schedules a rebuild but the displayed field
+  stays until its replacement lands; any completed field newer than the displayed
+  one is accepted, so continuous edits (flowing lava, fire) cannot starve it. A
+  field from before `clear()` (another world or dimension) is never published.
+- **Shadow map.** Its size follows the requested graphics mode, so a transient
+  fallback frame no longer reallocates it twice.
+
+The tradeoff is bounded staleness: a distant edit can show its previous geometry
+for a few frames, a newly loaded distant chunk appears a few frames after raster
+would show it, and a local light change converges over a few frames instead of
+restarting the whole image. F3's debug snapshot reports `deferredSections`,
+`staleSections`, `truncatedSections`, `locallyInvalidatedInstances`,
+`builtSections`, `builtTriangles`, `compactedSections`, `compactionSavedBytes`,
+`historyResets` by cause and `fallbackFrames` by reason.
+
+Not adopted yet, with reasons: MTLResidencySet or heap-backed `useHeap` residency
+(no measured CPU cost from the batched `useResources` call), a TLAS ring with refit
+(the rebuild measured about 0.5 ms), a smaller 48-byte primitive layout (visual
+risk to greedy-repeat UVs, needs its own golden review), off-main-thread decoding,
+and gating Ray Traced to M3-class GPUs.
 
 ## Memory capacity and recovery
 
@@ -252,14 +321,10 @@ zero where the skylight cache is zero. Exposure is unchanged; a separate modest
 dark-adaptation floor keeps an unlit cave navigable. The foliage shadow transmission is deterministic, so it
 does not create random bright pixels from frame to frame.
 
-Routine terrain updates use a larger but bounded acceleration-structure catch-up
-budget once a complete ray scene has rendered. A retention margin avoids repeated
-eviction/rebuilding on small range-boundary reversals. Distant or empty mesh churn
-does not discard the current scene's denoising history; participating geometry
-changes still invalidate it. These measures reduce avoidable renderer switching
-and unconverged frames without presenting missing or stale geometry. Startup,
-large teleports, and actual resource failures can still require Ultra while a
-complete ray scene is prepared.
+Routine terrain updates stream through bounded per-frame builds once a ray scene
+has rendered (see [Scene streaming and temporal history](#scene-streaming-and-temporal-history)).
+A retention margin avoids repeated eviction/rebuilding on small range-boundary
+reversals. Mesh churn never discards the whole frame's denoising history.
 
 Shadow visibility decodes only the material data it needs. Identical primary
 surface hits reuse their deterministic solar irradiance across the pixel's paths;

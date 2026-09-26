@@ -168,7 +168,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
                      depth: depths, radiance: colors)
     }
 
-    func testLocalLightVolumeBrightensCaveWithoutStaticProxyDoubleCountingAndResetsOnSourceEdit() throws {
+    func testLocalLightVolumeBrightensCaveWithoutStaticProxyDoubleCountingAndFollowsSourceEditsWithoutGlobalReset() throws {
         let f=try fixture()
         var view=frame()
         view.atmosphere.options.x=1 // No sun/moon; isolates the local underground term.
@@ -196,14 +196,16 @@ final class RayTracedWorldRendererTests: XCTestCase {
         let dark=try render(f,frame:view).radiance[16*32+16]
         view.localLightTexture=try volume(level:192); view.localLightGeneration=2
         let lit=try render(f,frame:view).radiance[16*32+16]
-        XCTAssertEqual(f.renderer.diagnostics.historySamples,1,"Source edits must discard old dark illumination")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,2,
+            "A regenerated field is a local lighting change; the temporal paths follow it without a global reset")
+        XCTAssertEqual(f.renderer.diagnostics.historyResets["local light"],1,"Only the field's first appearance resets history")
         XCTAssertGreaterThan(lit.x,dark.x+0.25)
         XCTAssertLessThan(lit.x,dark.x+0.35,"Nearby diffuse lamp response must remain below the washed-out unit response")
         XCTAssertGreaterThan(dark.x,0.035,"Display encoding preserves this deliberately dim linear cave floor")
         XCTAssertLessThan(dark.x,0.06,"The cave visibility floor must not illuminate a room like daylight")
         view.localLightOrigin = .init(-33,-32,-32)
         _=try render(f,frame:view)
-        XCTAssertEqual(f.renderer.diagnostics.historySamples,2,"Camera-only volume recentering is not a light-source edit")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,3,"Camera-only volume recentering is not a light-source edit")
 
         // Packed emitter power stays nonzero, but black source texels return no secondary
         // radiance. This isolates duplicate static proxy lighting; an ordinary white emitter
@@ -225,8 +227,9 @@ final class RayTracedWorldRendererTests: XCTestCase {
         XCTAssertEqual(after.x,lit.x,accuracy:0.06,"The static field replaces, not duplicates, mesh proxy lighting")
         view.localLightTexture=try volume(level:0); view.localLightGeneration=3
         let off=try render(f,frame:view).radiance[16*32+16]
-        XCTAssertLessThan(off.x,lit.x*0.3)
-        XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
+        XCTAssertLessThan(off.x,lit.x*0.3,"Switching the source off darkens the wall within one frame")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,5)
+        XCTAssertEqual(f.renderer.diagnostics.historyResets["local light"],1)
     }
 
     func testEnclosedWhiteRoomDoesNotMultiplyPropagatedLightOrCaveFillAcrossDiffuseBounces() throws {
@@ -884,7 +887,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
         }}
     }
 
-    func testBlockGeometryReplacementInvalidatesHistoryAndChangesRealHit() throws {
+    func testNearBlockGeometryReplacementRebuildsSameFrameAndInvalidatesOnlyItsOwnHistory() throws {
         let f = try fixture(), view = frame()
         f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
         _ = try render(f, frame: view)
@@ -893,8 +896,14 @@ final class RayTracedWorldRendererTests: XCTestCase {
         f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 7, halfSize: 4)))
         let edited = try render(f, frame: view)
         XCTAssertEqual(edited.depthAt(16, 16), expectedDepth(distance: 7, frame: view), accuracy: 0.00001)
-        XCTAssertEqual(f.renderer.diagnostics.historySamples, 1)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 3, "A section edit is not a whole-frame discontinuity")
+        XCTAssertEqual(f.renderer.diagnostics.locallyInvalidatedInstances, 1,
+                       "The replaced near section rejects its own pixels' history")
+        XCTAssertEqual(f.renderer.diagnostics.staleSections, 0, "A near edit never presents its previous geometry")
         XCTAssertEqual(f.renderer.diagnostics.pendingSections, 0)
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.locallyInvalidatedInstances, 0, "Invalidation lasts exactly one frame")
+        XCTAssertNil(f.renderer.diagnostics.historyResets["section edit"])
     }
 
     func testResizeAtlasAndWorldChangesResetActualRendererHistory() throws {
@@ -1019,25 +1028,238 @@ final class RayTracedWorldRendererTests: XCTestCase {
         command.commit(); command.waitUntilCompleted()
     }
 
-    func testIncrementalBuildNeverPresentsAnIncompleteRayScene() throws {
+    func testFailureAfterBuildingOneSectionLeavesTheCommandBufferCommittableAndTheNextFrameRecovers() throws {
         let f = try fixture(), view = frame()
-        let count = RayTracingLimits.buildsPerFrame + 1
-        for y in 0..<count {
-            f.renderer.uploadSection(key: SectionKey(cx: 0, sy: y, cz: 0), minY: 0,
+        // Both sections are near (horizontal distance depends only on cx/cz), so the
+        // distance-ordered near loop builds the valid one (sy 0) before the malformed one
+        // (sy 1) in the very same frame, opening the shared BLAS-build encoder first.
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        let malformedKey = SectionKey(cx: 0, sy: 1, cz: 0)
+        let malformed = MeshLayer(data: [0], idx: [0, 0, 0], count: 1)
+        f.renderer.uploadSection(key: malformedKey, minY: 0, mesh: mesh(opaque: malformed))
+        let command = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNil(f.renderer.render(command: command, frame: view, atlas: f.atlas, entities: []))
+        XCTAssertTrue(f.renderer.diagnostics.status.contains("Invalid section geometry"))
+        // The failure path must close the acceleration-structure encoder opened for the
+        // already-built section before returning; an open encoder would make committing
+        // this command buffer either throw or fail asynchronously.
+        command.commit(); command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed,
+                       command.error?.localizedDescription ?? "Command buffer failed to commit after a build-then-fail frame")
+
+        // Recovery: fixing the malformed section lets the very next frame present normally.
+        f.renderer.uploadSection(key: malformedKey, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        let recovered = try render(f, frame: view)
+        XCTAssertEqual(recovered.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+    }
+
+    func testColdStartRequiresFogStartSectionsThenStreamsFartherSectionsWithoutFallback() throws {
+        let f = try fixture()
+        var view = frame(); view.fogStart = 64; view.fogEnd = 120
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        // Centres at (40, 8): beyond the near radius but inside fog start. One more than a
+        // loading frame's streaming budget.
+        let inside = RayTracingLimits.buildsPerFrame + 1
+        for y in 0..<inside {
+            f.renderer.uploadSection(key: SectionKey(cx: 2, sy: y, cz: 0), minY: 0,
                                      mesh: mesh(opaque: plane(distance: 4)))
         }
         let command = try XCTUnwrap(f.queue.makeCommandBuffer())
-        XCTAssertNil(f.renderer.render(command: command, frame: view, atlas: f.atlas, entities: []))
+        XCTAssertNil(f.renderer.render(command: command, frame: view, atlas: f.atlas, entities: []),
+                     "The first presentation waits for every section inside fog start")
         XCTAssertFalse(f.renderer.diagnostics.ready)
         XCTAssertNil(f.renderer.depthTexture)
         XCTAssertEqual(f.renderer.diagnostics.pendingSections, 1)
         command.commit(); command.waitUntilCompleted()
         XCTAssertEqual(command.status, .completed, command.error?.localizedDescription ?? "GPU build failed")
         let complete = try render(f, frame: view)
-        XCTAssertTrue(f.renderer.diagnostics.ready)
         XCTAssertEqual(f.renderer.diagnostics.pendingSections, 0)
-        XCTAssertEqual(f.renderer.diagnostics.sections, count)
+        XCTAssertEqual(f.renderer.diagnostics.sections, inside + 1)
         XCTAssertEqual(complete.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+
+        // Once a scene is shown, new sections beyond the near radius stream in nearest-first
+        // and are omitted until built; the frame stays ray traced and keeps its history.
+        let streaming = RayTracingLimits.streamingBuildsPerFrame + 5
+        for y in 0..<streaming {
+            f.renderer.uploadSection(key: SectionKey(cx: -3, sy: y, cz: 0), minY: 0,
+                                     mesh: mesh(opaque: plane(distance: 4)))
+        }
+        let streamed = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.deferredSections, 5)
+        XCTAssertEqual(f.renderer.diagnostics.pendingSections, 5)
+        XCTAssertEqual(f.renderer.diagnostics.instances, inside + 1 + streaming - 5)
+        XCTAssertEqual(streamed.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 2, "Streaming geometry in does not reset history")
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.deferredSections, 0)
+        XCTAssertEqual(f.renderer.diagnostics.pendingSections, 0)
+        XCTAssertEqual(f.renderer.diagnostics.instances, inside + 1 + streaming)
+
+        // A new section inside the near radius is still built before the frame is presented.
+        f.renderer.uploadSection(key: SectionKey(cx: 0, sy: 5, cz: 0), minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.deferredSections, 0)
+        XCTAssertEqual(f.renderer.diagnostics.instances, inside + 2 + streaming)
+    }
+
+    func testRemeshedFarSectionPresentsItsPreviousGeometryUntilItsTurnToRebuild() throws {
+        let f = try fixture(), view = frame()
+        // Centre (8, -56) is 56.6 blocks away, beyond the near radius; the plane lies 66 ahead.
+        let far = SectionKey(cx: 0, sy: 0, cz: -4)
+        f.renderer.uploadSection(key: far, minY: 0, mesh: mesh(opaque: plane(distance: 2, halfSize: 40)))
+        let before = try render(f, frame: view)
+        XCTAssertEqual(before.depthAt(16, 16), expectedDepth(distance: 66, frame: view), accuracy: 0.00001)
+        // Nearer new sections (40.8 blocks) take this frame's whole streaming budget.
+        for y in 0..<RayTracingLimits.streamingBuildsPerFrame {
+            f.renderer.uploadSection(key: SectionKey(cx: 2, sy: y, cz: 0), minY: 0,
+                                     mesh: mesh(opaque: plane(distance: 4)))
+        }
+        f.renderer.uploadSection(key: far, minY: 0, mesh: mesh(opaque: plane(distance: 10, halfSize: 40)))
+        let stale = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.staleSections, 1)
+        XCTAssertEqual(stale.depthAt(16, 16), expectedDepth(distance: 66, frame: view), accuracy: 0.00001,
+                       "The far section keeps its previous BLAS rather than vanishing or forcing raster")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 2)
+        let rebuilt = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.staleSections, 0)
+        XCTAssertEqual(rebuilt.depthAt(16, 16), expectedDepth(distance: 74, frame: view), accuracy: 0.00001)
+        XCTAssertEqual(f.renderer.diagnostics.locallyInvalidatedInstances, 0,
+                       "Only near replacements reject history; far ones rely on depth rejection and the denoiser")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 3)
+    }
+
+#if DEBUG
+    func testTriangleCapTruncatesTheFarthestSectionsInsteadOfFallingBack() throws {
+        let f = try fixture(), view = frame()
+        f.renderer.triangleBudgetOverride = 4
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        f.renderer.uploadSection(key: SectionKey(cx: 2, sy: 0, cz: 0), minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        f.renderer.uploadSection(key: SectionKey(cx: 0, sy: 0, cz: -4), minY: 0,
+                                 mesh: mesh(opaque: plane(distance: 2, halfSize: 40)))
+        let capped = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.truncatedSections, 1, "Only the farthest section is dropped")
+        XCTAssertEqual(f.renderer.diagnostics.sections, 2)
+        XCTAssertEqual(f.renderer.diagnostics.triangles, 4)
+        XCTAssertEqual(capped.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+        f.renderer.triangleBudgetOverride = nil
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.truncatedSections, 0)
+        XCTAssertEqual(f.renderer.diagnostics.sections, 3)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 2, "Admission changes are not discontinuities")
+    }
+#endif
+
+    func testCompletedSectionBLASIsCompactedWithoutChangingHitsOrHistory() throws {
+        let f = try fixture(), view = frame()
+        // A section-sized BLAS (8k triangles, like real terrain); tiny ones are not worth a copy.
+        var words: [UInt32] = [], indices: [UInt32] = []
+        let quads = 4_096
+        for quad in 0..<quads {
+            let base = plane(distance: 4 + Float(quad) * 0.001, halfSize: 3)
+            words += base.data
+            indices += base.idx.map { $0 + UInt32(quad * 4) }
+        }
+        f.renderer.uploadSection(key: section, minY: 0,
+                                 mesh: mesh(opaque: MeshLayer(data: words, idx: indices, count: quads * 4)))
+        let built = try render(f, frame: view)
+        f.renderer.refreshMemoryDiagnostics()
+        let uncompacted = f.renderer.diagnostics.residentGeometryBytes
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 0, "Sizes are unknown until the build frame completes")
+        let compacted = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 1)
+        XCTAssertEqual(compacted.depthAt(16, 16), built.depthAt(16, 16), "A compacted BLAS returns the same hit")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 2, "Compaction is invisible to temporal history")
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertLessThan(Double(f.renderer.diagnostics.residentGeometryBytes), Double(uncompacted) * 0.9,
+                          "Compaction must free a meaningful share of the build allocation")
+        XCTAssertEqual(f.renderer.diagnostics.compactionSavedBytes,
+                       uncompacted - f.renderer.diagnostics.residentGeometryBytes)
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 0, "Each BLAS is compacted once")
+    }
+
+    private func bigPlaneLayer(quads: Int, distanceOffset: Float) -> MeshLayer {
+        var words: [UInt32] = [], indices: [UInt32] = []
+        for quad in 0..<quads {
+            let base = plane(distance: 4 + distanceOffset + Float(quad) * 0.001, halfSize: 3)
+            words += base.data
+            indices += base.idx.map { $0 + UInt32(quad * 4) }
+        }
+        return MeshLayer(data: words, idx: indices, count: quads * 4)
+    }
+
+    func testCompactionNeverCompactsARemeshedSectionsStaleGeometry() throws {
+        let f = try fixture(), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: bigPlaneLayer(quads: 4_096, distanceOffset: 0)))
+        _ = try render(f, frame: view) // builds the big BLAS and queues its compaction ticket
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 0, "Sizes are unknown until the build frame completes")
+
+        // Remesh before the ticket's turn: the old BLAS is superseded, never compacted.
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        let afterRemesh = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 0,
+                       "A remeshed section's now-superseded BLAS must never be copied by a later compaction pass")
+        XCTAssertEqual(afterRemesh.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001,
+                       "The new small mesh renders normally; the discarded big BLAS is not resurrected")
+    }
+
+    func testCompactionNeverCompactsAnEvictedSectionsStaleGeometry() throws {
+        let f = try fixture(), view = frame()
+        let farKey = SectionKey(cx: 3, sy: 0, cz: 0)
+        f.renderer.uploadSection(key: farKey, minY: 0, mesh: mesh(opaque: bigPlaneLayer(quads: 4_096, distanceOffset: 0)))
+        _ = try render(f, frame: view) // builds the far section's BLAS and queues its compaction ticket
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 0, "Sizes are unknown until the build frame completes")
+
+        // Evicted (chunk unload) before the ticket's turn: it must never be compacted either.
+        f.renderer.removeChunk(cx: 3, cz: 0, sectionCount: 1)
+        let command = try XCTUnwrap(f.queue.makeCommandBuffer())
+        _ = f.renderer.render(command: command, frame: view, atlas: f.atlas, entities: [])
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 0,
+                       "An evicted section's BLAS must never be copied by a later compaction pass")
+        command.commit(); command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed, String(describing: command.error))
+    }
+
+    func testRemoveChunkAndClearEventuallyReleaseAStillPendingCompactionTicketsGeometry() throws {
+        let f = try fixture(), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        _ = try render(f, frame: view) // builds geometry and queues its (still-pending) compaction ticket
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertGreaterThan(f.renderer.diagnostics.residentGeometryBytes, 0)
+
+        f.renderer.removeChunk(cx: 0, cz: 0, sectionCount: 1)
+        // The world is now empty; the removed section's geometry must not be resurrected via
+        // its still-pending compaction ticket, and the frame renders as empty rather than
+        // presenting anything stale.
+        let command = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNil(f.renderer.render(command: command, frame: view, atlas: f.atlas, entities: []))
+        XCTAssertEqual(f.renderer.diagnostics.compactedSections, 0,
+                       "A removed section's geometry must never be copied by compaction")
+        command.commit(); command.waitUntilCompleted()
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, 0,
+                       "removeChunk must eventually release geometry, including a section with a pending compaction ticket")
+
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        let recovered = try render(f, frame: view)
+        XCTAssertEqual(recovered.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+    }
+
+    func testClearReleasesGeometryAndTheCompactionQueueImmediatelyWithoutARenderPass() throws {
+        let f = try fixture(), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        _ = try render(f, frame: view) // builds geometry and queues its (still-pending) compaction ticket
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertGreaterThan(f.renderer.diagnostics.residentGeometryBytes, 0)
+
+        f.renderer.clear()
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, 0,
+                       "clear() must drop every section's geometry and its pending compaction ticket immediately")
+
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        let recovered = try render(f, frame: view)
+        XCTAssertEqual(recovered.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
     }
 
     func testWarmSceneAbsorbs26MeshCompletionBurstWithoutRasterFallbackOrStaleBlocks() throws {
@@ -1056,7 +1278,9 @@ final class RayTracedWorldRendererTests: XCTestCase {
         XCTAssertEqual(f.renderer.diagnostics.instances,26)
         XCTAssertEqual(f.renderer.diagnostics.triangles,52)
         XCTAssertEqual(updated.depthAt(16,16),expectedDepth(distance:7,frame:view),accuracy:0.00001)
-        XCTAssertEqual(f.renderer.diagnostics.historySamples,1,"Real participating edits still invalidate old lighting")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,2,"Edits invalidate their own pixels, not the whole frame")
+        XCTAssertEqual(f.renderer.diagnostics.locallyInvalidatedInstances,1,
+            "The replaced visible section rejects history; the 25 new sections had none to reuse")
     }
 
     func testDistantAndEmptyMeshUpdatesDoNotResetParticipatingHistory() throws {
@@ -1076,7 +1300,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
         XCTAssertEqual(retained.depthAt(16,16),expectedDepth(distance:4,frame:view),accuracy:0.00001)
     }
 
-    func testRemovingParticipatingSectionResetsHistoryAndRevealsFreshGeometry() throws {
+    func testRemovingParticipatingSectionRevealsFreshGeometryWithoutGlobalReset() throws {
         let f=try fixture(), view=frame()
         f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:plane(distance:4)))
         // A separate section uses an offset world origin to place the backing plane at eye level.
@@ -1087,7 +1311,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
         f.renderer.uploadSection(key:section,minY:0,mesh:mesh())
         let removed=try render(f,frame:view)
         XCTAssertEqual(removed.depthAt(16,16),expectedDepth(distance:7,frame:view),accuracy:0.00001)
-        XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,3,"Depth rejection handles the disocclusion locally")
         XCTAssertEqual(f.renderer.diagnostics.instances,1)
     }
 
@@ -1270,7 +1494,90 @@ final class RayTracedWorldRendererTests: XCTestCase {
         f.renderer.refreshMemoryDiagnostics()
         XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, oneResident)
         XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
-        XCTAssertEqual(f.renderer.diagnostics.historySamples, 1)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 4,
+                       "One fallback frame before encoding leaves the previous history and camera consistent")
+        XCTAssertNil(f.renderer.diagnostics.historyResets["fallback"])
+    }
+
+    func testStreamingSectionDeferredUnderMemoryPressureWhileNearEditFailsTheFrame() throws {
+        let f = try fixture(memoryBudgetOverride: 64 * 1_024 * 1_024), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        _ = try render(f, frame: view)
+        // A second, no-op frame (nothing new to build) measures the steady per-frame cost:
+        // one resident section BLAS plus this frame's TLAS/instance/table transients.
+        _ = try render(f, frame: view)
+        let noOpPeak = f.renderer.diagnostics.geometryBytes
+        XCTAssertGreaterThan(noOpPeak, 0)
+
+        // Leave zero slack for any new BLAS build; a big new far section cannot possibly fit,
+        // but the frame's own recurring per-frame allocations still do.
+        f.renderer.memoryBudgetOverride = noOpPeak
+        let far = SectionKey(cx: 3, sy: 0, cz: 0) // 56.6 blocks away: beyond the 32-block near radius.
+        f.renderer.uploadSection(key: far, minY: 0, mesh: mesh(opaque: bigPlaneLayer(quads: 4_096, distanceOffset: 40)))
+        let deferred = try render(f, frame: view)
+        XCTAssertTrue(f.renderer.diagnostics.ready,
+                      "A streaming build failure under memory pressure defers the section; it must never fail the frame")
+        XCTAssertEqual(f.renderer.diagnostics.deferredSections, 1)
+        XCTAssertEqual(f.renderer.diagnostics.sections, 2, "Both sections fit the triangle/instance budget; only the build was deferred")
+        XCTAssertEqual(f.renderer.diagnostics.instances, 1, "The deferred far section is left out of this frame's presented instances")
+        XCTAssertEqual(deferred.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+
+        // The same ceiling makes a *near* edit fail the frame outright: a near section must be
+        // rebuilt in the same frame it changes, or the frame falls back, never silently defers.
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: bigPlaneLayer(quads: 4_096, distanceOffset: 0)))
+        let rejected = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNil(f.renderer.render(command: rejected, frame: view, atlas: f.atlas, entities: []))
+        XCTAssertFalse(f.renderer.diagnostics.ready)
+        rejected.commit(); rejected.waitUntilCompleted()
+        XCTAssertEqual(rejected.status, .completed, String(describing: rejected.error))
+
+        f.renderer.memoryBudgetOverride = 64 * 1_024 * 1_024
+        _ = try render(f, frame: view)
+        XCTAssertTrue(f.renderer.diagnostics.ready)
+        XCTAssertEqual(f.renderer.diagnostics.deferredSections, 0)
+    }
+
+    func testEntityGeometryThatCannotBeBuiltIsOmittedRatherThanFailingTheFrame() throws {
+        let f = try fixture(memoryBudgetOverride: 64 * 1_024 * 1_024), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        _ = try render(f, frame: view)
+        _ = try render(f, frame: view) // steady no-op frame: the per-frame cost with nothing new to build
+        let noOpPeak = f.renderer.diagnostics.geometryBytes
+        XCTAssertGreaterThan(noOpPeak, 0)
+
+        f.renderer.memoryBudgetOverride = noOpPeak // zero slack for any new BLAS build
+        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+            width: 1, height: 1, mipmapped: false)
+        textureDescriptor.usage = .shaderRead
+        let texture = try XCTUnwrap(f.device.makeTexture(descriptor: textureDescriptor))
+        var white: UInt32 = 0xffffffff
+        texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &white, bytesPerRow: 4)
+        var vertices: [Float] = []
+        for i in 0..<2_000 {
+            let z = Float(-4 - i)
+            for p: [Float] in [[-1, -1, z], [1, -1, z], [1, 1, z]] {
+                vertices.append(contentsOf: [p[0], p[1], p[2], 0, 0, 1, 0, 0, 0])
+            }
+        }
+        let geometry = RayTracingEntityGeometry(key: "big-entity", vertices: vertices, texture: texture)
+        let entity = RayTracingEntityInstance(geometry: geometry, identity: "big-entity:0",
+                                              transform: matrix_identity_float4x4)
+
+        let command = try XCTUnwrap(f.queue.makeCommandBuffer())
+        let color = f.renderer.render(command: command, frame: view, atlas: f.atlas, entities: [entity])
+        XCTAssertNotNil(color, "An entity that cannot be built under memory pressure must be omitted, not fail the frame")
+        XCTAssertTrue(f.renderer.diagnostics.ready)
+        XCTAssertEqual(f.renderer.diagnostics.instances, 1, "Only the terrain section is presented; the big entity is left out")
+        XCTAssertGreaterThan(f.renderer.diagnostics.pendingSections, 0,
+                             "The omitted entity is tracked as pending, not silently dropped")
+        command.commit(); command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed, String(describing: command.error))
+
+        f.renderer.memoryBudgetOverride = 64 * 1_024 * 1_024
+        let recovered = try render(f, frame: view, entities: [entity])
+        XCTAssertEqual(recovered.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001,
+                       "Terrain is unaffected; recovery lets the entity build normally")
+        XCTAssertEqual(f.renderer.diagnostics.instances, 2)
     }
 
     func testGeometryBudgetFailureRecoversWithoutClearingOrReopeningWorld() throws {
@@ -1327,7 +1634,19 @@ final class RayTracedWorldRendererTests: XCTestCase {
         f.renderer.refreshMemoryDiagnostics()
         XCTAssertTrue(f.renderer.diagnostics.ready)
         XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, resident)
-        XCTAssertEqual(f.renderer.diagnostics.historySamples, 1, "Recovery must discard stale lighting history")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 2, "A single transient fallback keeps valid history")
+
+        // A longer fallback run discards history on recovery.
+        f.renderer.memoryHeadroomOverride = 0
+        for _ in 0...RayTracingLimits.fallbackHistoryGapFrames {
+            let command = try XCTUnwrap(f.queue.makeCommandBuffer())
+            XCTAssertNil(f.renderer.render(command: command, frame: view, atlas: f.atlas, entities: []))
+            command.commit(); command.waitUntilCompleted()
+        }
+        f.renderer.memoryHeadroomOverride = nil
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 1, "Recovery after a long fallback run starts fresh")
+        XCTAssertEqual(f.renderer.diagnostics.historyResets["fallback"], 1)
     }
 
     func testCompletedSubmissionsReleaseScratchUploadsAndRetiredGeometry() throws {

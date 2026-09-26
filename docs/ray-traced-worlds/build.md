@@ -1,5 +1,41 @@
 # Ray-traced worlds verification — September 24, 2026
 
+## Ray scene streaming, budgets, and history — September 26, 2026
+
+The user reported that the ray-casting budget was still being hit, that some areas
+still flickered, and asked that the renderer follow the ray-tracing practice of top
+games on Metal. Evidence used the optimized debug-control build on the 128 GB M5 Max
+in the isolated profile's copy of the prehistoric New World (`wmuhh0wumk62d`), noon,
+clear weather, 16-chunk distance.
+
+- **Flight probe.** Three 40 s teleport-step flights at yaw 0, 1.57 and 3.14
+  radians, 3 blocks per step, sampling every ~120 ms.
+- **History probe.** 30 s standing still after a 20 s settle, sampling every 50 ms.
+
+| Measure | Before (0458c45) | Streaming | Streaming + compaction |
+|---|---:|---:|---:|
+| Flight samples not ray traced | 138 / 767 (18.0%) | 0 / 768 | 0 / 774 |
+| Fallback reason | triangle cap (8M) | none | none |
+| Peak selected triangles | 9.83M | 9.30M | 9.67M |
+| Flight FPS median / min | 67 / 31 | 71 / 54 | 74 / 57 |
+| Whole-command GPU median / p95 | 9.56 / 14.99 ms | 9.11 / 13.68 ms | 8.72 / 13.54 ms |
+| Resident RT geometry peak | 2.27 GiB | 2.21 GiB | 1.63 GiB |
+| Standing-still history drops / 30 s | 124-190 | 0 | 0 |
+| Standing-still history samples | 1-10 | 24 | 24 |
+
+During the streaming flights at most 28 sections were deferred and 7 were
+presented from their previous revision in any sample; no section was truncated.
+Before the change, cumulative reset causes over the history probe were
+"section edit" 1,132 and "local light" 69; afterward, only the one-time load causes
+remain (world/atlas/dimension/clock/sun and the field's first appearance).
+
+Decoder: a verbatim copy of the former string-matching decoder is kept in
+`RayTracingDecoderEquivalenceTests` and must match the table decoder byte for byte
+for every registered tile in every layer and for a real mesher section of every
+block; a standalone benchmark measured 117 ns per triangle before and 29 ns after.
+Compaction: the real-GPU fixture compacts an 8k-triangle section BLAS by more than
+10% with an identical hit; the flight peak fell by 26%.
+
 ## Clean distance, native water and CPU frame time — September 25, 2026
 
 The user reported that ray casting was not clean, distance detail was too grainy and
