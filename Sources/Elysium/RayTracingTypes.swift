@@ -127,8 +127,11 @@ enum RayTracingLimits {
     static let maximumTriangles = 8_000_000
     static let buildsPerFrame = 12
     static let buildTrianglesPerFrame = 250_000
-    static let maximumInternalWidth = 1_440
-    static let maximumInternalHeight = 900
+    // Native primary surfaces: 1920x1080 on a 2880x1620 Retina drawable (a 1.5x final resample).
+    // Measured on the M5 Max reference scenes it trades roughly 8-11 FPS for visibly finer
+    // distant terrain edges than the former 1440x900 cap; lighting stays at the 640x400 cap.
+    static let maximumInternalWidth = 1_920
+    static let maximumInternalHeight = 1_200
     // Expensive lighting is independent of full-resolution primary surfaces.
     static let maximumNativeTraceWidth = 640
     static let maximumNativeTraceHeight = 400

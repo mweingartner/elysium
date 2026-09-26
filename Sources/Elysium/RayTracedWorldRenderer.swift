@@ -79,6 +79,11 @@ final class RayTracedWorldRenderer {
     private let temporalPipeline: MTLComputePipelineState
     private let filterPipeline: MTLComputePipelineState
     private let mediaPipeline: MTLComputePipelineState
+    private let skyPipeline: MTLComputePipelineState
+    /// Camera-centred sky/cloud radiance without the sun or moon discs, rewritten on the GPU every
+    /// frame before the path pass. 1024x512 equirectangular (0.35 degrees per texel), 4 MiB.
+    private let skyRadiance: MTLTexture
+    static let skyRadianceSize = (width: 1024, height: 512)
     private let textureEncoder: MTLArgumentEncoder
     private let whiteTexture: MTLTexture
     private let emptyLocalLightTexture: MTLTexture
@@ -88,6 +93,17 @@ final class RayTracedWorldRenderer {
     private var sectionsRevision: UInt64 = 1
     private var previousParticipatingSections: [SectionKey:UInt64] = [:]
     private var previousSourceRevision: UInt64 = 0
+    /// Distance-ordered selection reused across frames. Sorting ~8k sections every frame cost
+    /// about 13% of the main thread; the order only prioritizes builds and fixes instance order.
+    /// It is recomputed whenever any section changes, the radius changes, or the camera moves
+    /// `selectionRefreshDistance` blocks horizontally (well inside the 24-block selection margin).
+    private var selectionCache: [Section] = []
+    private var selectionCacheRevision: UInt64 = 0
+    private var selectionCacheRange: Double = -1
+    private var selectionCacheCamera = SIMD2<Double>(repeating: .nan)
+    private var selectionGeneration: UInt64 = 0
+    private var previousSelectionGeneration: UInt64 = 0
+    private static let selectionRefreshDistance: Double = 2
     private var hasPresentedCompleteScene=false
     private static let warmBuildsPerFrame=64
     private static let warmBuildTrianglesPerFrame=1_000_000
@@ -154,7 +170,8 @@ final class RayTracedWorldRenderer {
                   let surface=library.makeFunction(name:"rt_surface_resolve"),
                   let temporal=library.makeFunction(name:"rt_temporal"),
                   let filter=library.makeFunction(name:"rt_filter"),
-                  let media=library.makeFunction(name:"rt_media") else { return nil }
+                  let media=library.makeFunction(name:"rt_media"),
+                  let sky=library.makeFunction(name:"rt_sky_radiance") else { return nil }
             guard let alpha=try RayTracingAlphaPipeline(device:device,library:library,function:path),
                   let surfaceAlpha=try RayTracingAlphaPipeline(device:device,library:library,function:surface) else { return nil }
             alphaPipeline=alpha;pathPipeline=alpha.pipeline
@@ -162,6 +179,13 @@ final class RayTracedWorldRenderer {
             temporalPipeline=try device.makeComputePipelineState(function:temporal)
             filterPipeline=try device.makeComputePipelineState(function:filter)
             mediaPipeline=try device.makeComputePipelineState(function:media)
+            skyPipeline=try device.makeComputePipelineState(function:sky)
+            let skyDescriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.rgba16Float,
+                width:Self.skyRadianceSize.width,height:Self.skyRadianceSize.height,mipmapped:false)
+            skyDescriptor.storageMode = .private; skyDescriptor.usage=[.shaderRead,.shaderWrite]
+            guard let skyTexture=device.makeTexture(descriptor:skyDescriptor) else { return nil }
+            skyTexture.label="RT sky radiance (no sun/moon discs)"
+            skyRadiance=skyTexture
             textureEncoder=path.makeArgumentEncoder(bufferIndex:4)
             let descriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.rgba8Unorm,width:1,height:1,mipmapped:false)
             descriptor.usage = .shaderRead
@@ -246,7 +270,8 @@ final class RayTracedWorldRenderer {
     }
     func clear() {
         sections.removeAll(); entities.removeAll(); previousTransforms.removeAll()
-        requiredSectionKeys.removeAll()
+        requiredSectionKeys.removeAll(); selectionCache.removeAll(); selectionCacheRange = -1
+        selectionGeneration &+= 1
         previousParticipatingSections.removeAll(); previousSourceRevision=0; hasPresentedCompleteScene=false
         sectionsRevision &+= 1; historyFrames=0; sampleIndex=0; allocationFailure=nil
         memoryPressureReason=nil
@@ -398,30 +423,38 @@ final class RayTracedWorldRenderer {
             self.diagnosticsLock.unlock()
         }
         let range=Double(frame.renderDistance+24)
-        let selected=sections.values.filter {
-            let dx=Double($0.key.cx*16+8)-frame.camera.x, dz=Double($0.key.cz*16+8)-frame.camera.z
-            return dx*dx+dz*dz <= range*range
-        }.sorted {
-            let ax=Double($0.key.cx*16+8)-frame.camera.x, az=Double($0.key.cz*16+8)-frame.camera.z
-            let bx=Double($1.key.cx*16+8)-frame.camera.x, bz=Double($1.key.cz*16+8)-frame.camera.z
-            let a=ax*ax+az*az,b=bx*bx+bz*bz
-            if a != b { return a<b }
-            if $0.key.cx != $1.key.cx { return $0.key.cx<$1.key.cx }
-            if $0.key.cz != $1.key.cz { return $0.key.cz<$1.key.cz }
-            return $0.key.sy<$1.key.sy
+        let cameraXZ=SIMD2<Double>(frame.camera.x,frame.camera.z)
+        let cameraShift=cameraXZ-selectionCacheCamera
+        if selectionCacheRevision != sectionsRevision || selectionCacheRange != range
+            || !(simd_length_squared(cameraShift) < Self.selectionRefreshDistance*Self.selectionRefreshDistance) {
+            selectionCache=sections.values.filter {
+                let dx=Double($0.key.cx*16+8)-frame.camera.x, dz=Double($0.key.cz*16+8)-frame.camera.z
+                return dx*dx+dz*dz <= range*range
+            }.map { section -> (distance: Double,section: Section) in
+                let dx=Double(section.key.cx*16+8)-frame.camera.x, dz=Double(section.key.cz*16+8)-frame.camera.z
+                return (dx*dx+dz*dz,section)
+            }.sorted { a,b in
+                if a.distance != b.distance { return a.distance<b.distance }
+                if a.section.key.cx != b.section.key.cx { return a.section.key.cx<b.section.key.cx }
+                if a.section.key.cz != b.section.key.cz { return a.section.key.cz<b.section.key.cz }
+                return a.section.key.sy<b.section.key.sy
+            }.map(\.section)
+            selectionCacheRevision=sectionsRevision; selectionCacheRange=range; selectionCacheCamera=cameraXZ
+            selectionGeneration &+= 1
+            requiredSectionKeys=Set(selectionCache.map(\.key))
+            // Retain a narrow margin beyond selection: walking back across a chunk/radius boundary
+            // should not continually destroy and rebuild the same BLAS. Only selected geometry
+            // enters the scene; this cache margin never admits an incomplete ray scene.
+            let retainRange=range+Self.retentionMargin
+            for section in sections.values where section.geometry != nil {
+                let dx=Double(section.key.cx*16+8)-frame.camera.x, dz=Double(section.key.cz*16+8)-frame.camera.z
+                if dx*dx+dz*dz>retainRange*retainRange { section.geometry=nil }
+            }
         }
+        let selected=selectionCache
         diagnostics.sections=selected.count
         diagnostics.width=desiredWidth; diagnostics.height=desiredHeight
         diagnostics.outputWidth=outputWidth; diagnostics.outputHeight=outputHeight
-        requiredSectionKeys=Set(selected.map(\.key))
-        // Retain a narrow margin beyond selection: walking back across a chunk/radius boundary
-        // should not continually destroy and rebuild the same BLAS. Only selected geometry
-        // enters the scene; this cache margin never admits an incomplete ray scene.
-        let retainRange=range+Self.retentionMargin
-        for section in sections.values where section.geometry != nil {
-            let dx=Double(section.key.cx*16+8)-frame.camera.x, dz=Double(section.key.cz*16+8)-frame.camera.z
-            if dx*dx+dz*dz>retainRange*retainRange { section.geometry=nil }
-        }
         let activeEntityKeys=Set(dynamic.map { $0.geometry.key }+blocks.map { "block:"+$0.geometry.key })
         // Eviction precedes admission. In-flight submissions still own retired BLAS objects,
         // and their bytes remain charged until completion; packed terrain sources can rebuild.
@@ -443,7 +476,7 @@ final class RayTracedWorldRenderer {
                 return fail("Invalid section geometry; using raster")
             }
             guard let geometry=build(decoded,command:command,submission:submission,label:"RT section \(section.key)") else {
-                diagnostics.pendingSections=selected.filter { $0.geometry == nil }.count
+                diagnostics.pendingSections=selected.reduce(0) { $0+($1.geometry == nil ? 1:0) }
                 return fail(memoryPressureReason ?? "Unable to allocate ray section geometry; retrying in Ultra")
             }
             section.geometry=geometry; built+=1; builtTriangles+=geometry.triangleCount
@@ -464,20 +497,22 @@ final class RayTracedWorldRenderer {
             }
             entities["block:"+instance.geometry.key]=geometry; built+=1; builtTriangles+=geometry.triangleCount
         }
-        let pending=selected.filter { $0.geometry == nil }.count
+        let pending=selected.reduce(0) { $0+($1.geometry == nil ? 1:0) }
             + Set(dynamic.filter { entities[$0.geometry.key] == nil }.map { $0.geometry.key }).count
             + Set(blocks.filter { entities["block:"+$0.geometry.key] == nil }.map { $0.geometry.key }).count
         diagnostics.pendingSections=pending
         refreshMemoryDiagnostics()
         if pending>0 { return fail("Preparing ray scene (\(pending) meshes remaining)") }
         var instances: [SceneInstance]=[]
+        instances.reserveCapacity(selected.count+dynamic.count+blocks.count)
         for section in selected {
             guard let geometry=section.geometry else { continue }
             var transform=matrix_identity_float4x4
             transform.columns.3 = .init(Float(Double(section.key.cx*16)-frame.camera.x),
                                        Float(Double(section.minY+section.key.sy*16)-frame.camera.y),
                                        Float(Double(section.key.cz*16)-frame.camera.z),1)
-            instances.append(.init(key:"s\(section.key.cx),\(section.key.sy),\(section.key.cz)",geometry:geometry,
+            // Terrain is translation-only; only dynamic instances key transform history.
+            instances.append(.init(key:"",geometry:geometry,
                                    transform:transform,texture:nil,tint:.init(repeating:1),overlay:.zero,dynamic:false,primaryVisible:true))
         }
         for (index,instance) in dynamic.enumerated() {
@@ -499,20 +534,31 @@ final class RayTracedWorldRenderer {
         guard diagnostics.triangles <= RayTracingLimits.maximumTriangles else {
             return fail("Ray scene exceeds the safe triangle budget; using raster")
         }
+        // Native-surface angle per pixel for distance alpha coverage (rt_alpha_accept). Both
+        // resolutions use the same value, so low-resolution donors see the same leaf coverage.
+        let projectionScale=frame.projectionMatrix.columns.1.y
+        let footprintScale: Float=projectionScale.isFinite && projectionScale>0
+            ? 2/(projectionScale*Float(max(1,outputHeight))):0
         var textureSlots: [ObjectIdentifier:Int]=[:],textures:[MTLTexture]=[]
         var descriptors:[MTLAccelerationStructureInstanceDescriptor]=[]
         var instanceUniforms:[RayTracingInstanceUniforms]=[]
         var structures:[MTLAccelerationStructure]=[],structureSlots:[ObjectIdentifier:Int]=[:]
+        // Residency list built alongside the tables; bridging ~7.5k structures per frame cost more.
+        var sceneResources:[MTLResource]=[]
         var lights:[RayTracingLight]=[]
         var transforms:[String:simd_float4x4]=[:]
         descriptors.reserveCapacity(instances.count)
         instanceUniforms.reserveCapacity(instances.count)
         structures.reserveCapacity(instances.count)
+        sceneResources.reserveCapacity(instances.count+RayTracingLimits.maximumTextures+1)
         for instance in instances {
             let geometry=instance.geometry,identity=ObjectIdentifier(geometry)
             let structureIndex: Int
             if let existing=structureSlots[identity] { structureIndex=existing }
-            else { structureIndex=structures.count; structureSlots[identity]=structureIndex; structures.append(geometry.structure) }
+            else {
+                structureIndex=structures.count; structureSlots[identity]=structureIndex
+                structures.append(geometry.structure); sceneResources.append(geometry.structure)
+            }
             var descriptor=MTLAccelerationStructureInstanceDescriptor()
             let m=instance.transform
             descriptor.transformationMatrix=MTLPackedFloat4x3(columns:(
@@ -527,7 +573,7 @@ final class RayTracedWorldRenderer {
             if let texture=instance.texture {
                 let id=ObjectIdentifier(texture)
                 if let existing=textureSlots[id] { textureIndex=existing }
-                else { textureIndex=textures.count; textureSlots[id]=textureIndex; textures.append(texture) }
+                else { textureIndex=textures.count; textureSlots[id]=textureIndex; textures.append(texture); sceneResources.append(texture) }
             }
             guard textures.count<=RayTracingLimits.maximumTextures else {
                 return fail("Ray scene exceeds the safe texture budget; using raster")
@@ -539,7 +585,8 @@ final class RayTracedWorldRenderer {
             let inverse=instance.dynamic ? m.inverse:matrix_identity_float4x4
             instanceUniforms.append(.init(transform:m,normalTransform:instance.dynamic ? inverse.transpose:matrix_identity_float4x4,
                 previousFromCurrent:instance.dynamic ? (previous ?? m)*inverse:matrix_identity_float4x4,tint:instance.tint,overlay:instance.overlay,
-                info:.init(UInt32(textureIndex),instance.dynamic ? 1:0,(!instance.dynamic || previous != nil) ? 1:0,0)))
+                info:.init(UInt32(textureIndex),instance.dynamic ? 1:0,(!instance.dynamic || previous != nil) ? 1:0,
+                           footprintScale.bitPattern)))
             for light in hasLocalLight && !instance.dynamic ? []:geometry.emitters {
                 var positioned=light; positioned.positionRadius = .init((m*SIMD4(light.positionRadius.x,light.positionRadius.y,light.positionRadius.z,1)).xyz,light.positionRadius.w)
                 lights.append(positioned)
@@ -582,18 +629,23 @@ final class RayTracedWorldRenderer {
         buildEncoder.build(accelerationStructure:scene,descriptor:sceneDescriptor,scratchBuffer:scratch,scratchBufferOffset:0)
         buildEncoder.endEncoding()
         submission.geometry.append(contentsOf:instances.map(\.geometry))
-        submission.resources.append(contentsOf:[atlas,whiteTexture,localLightTexture ?? emptyLocalLightTexture])
+        submission.resources.append(contentsOf:[atlas,whiteTexture,localLightTexture ?? emptyLocalLightTexture,skyRadiance])
         submission.resources.append(contentsOf:textures)
         submission.resources.append(contentsOf:[raw,motion,diffuseAlbedo,specularAlbedo,filtered,composited,
                                                resolved,resolvedDepth,resolvedNormal]+colors+depths+normals)
         let dimension=frame.atmosphere.options.x,clock=frame.atmosphere.cameraTime.w
-        let participatingSections=Dictionary(uniqueKeysWithValues:selected.map { ($0.key,$0.revision) })
         // Camera-only entry/exit from the selection radius is not a scene edit. Depth/motion
         // reject newly visible pixels locally. Reset globally for actual changes/removals to
         // previously participating geometry, or new uploads entering current coverage.
-        let participatingChanged=previousParticipatingSections.contains { key,revision in
+        // With no section upload/removal and the same selection since the last presented frame,
+        // every revision is unchanged by construction, so the per-section scan is skipped.
+        let participationUnchanged=sectionsRevision == previousSourceRevision
+            && selectionGeneration == previousSelectionGeneration
+        let participatingSections=participationUnchanged ? previousParticipatingSections
+            : Dictionary(uniqueKeysWithValues:selected.map { ($0.key,$0.revision) })
+        let participatingChanged = !participationUnchanged && (previousParticipatingSections.contains { key,revision in
             sections[key]?.revision != revision
-        } || selected.contains { previousParticipatingSections[$0.key] == nil && $0.revision>previousSourceRevision }
+        } || selected.contains { previousParticipatingSections[$0.key] == nil && $0.revision>previousSourceRevision })
         let discontinuity = frame.worldIdentity != previousWorldIdentity || frame.atlasGeneration != previousAtlasGeneration
             || frame.localLightGeneration != previousLocalLightGeneration || hasLocalLight != previousHadLocalLight
             || simd_length(frame.heldLight-previousHeldLight)>0.01
@@ -620,6 +672,11 @@ final class RayTracedWorldRenderer {
         guard let encoder=command.makeComputeCommandEncoder(
             descriptor:profile?.computePass(start:.pathStart,end:.pathEnd) ?? MTLComputePassDescriptor()) else { return fail("Unable to encode ray tracing") }
         encoder.label="Path traced world: primary, visibility, indirect and dielectric rays"
+        // Serial dispatch order: the sky radiance is complete before any path reads it.
+        encoder.setComputePipelineState(skyPipeline)
+        encoder.setBytes(&uniforms,length:MemoryLayout<RayTracingUniforms>.stride,index:0)
+        encoder.setTexture(skyRadiance,index:0)
+        dispatch(encoder,pipeline:skyPipeline,width:Self.skyRadianceSize.width,height:Self.skyRadianceSize.height)
         encoder.setComputePipelineState(pathPipeline)
         encoder.setAccelerationStructure(scene,bufferIndex:0)
         encoder.setBuffer(instanceBuffer,offset:0,index:1)
@@ -630,8 +687,10 @@ final class RayTracedWorldRenderer {
         encoder.setTexture(normals[current],index:3); encoder.setTexture(motion,index:4)
         encoder.setTexture(diffuseAlbedo,index:5); encoder.setTexture(specularAlbedo,index:6)
         encoder.setTexture(localLightTexture ?? emptyLocalLightTexture,index:7)
-        for structure in structures { encoder.useResource(structure,usage:.read) }
-        for texture in textures { encoder.useResource(texture,usage:.read) }; encoder.useResource(whiteTexture,usage:.read)
+        encoder.setTexture(skyRadiance,index:8)
+        // One batched residency declaration instead of ~7.5k per-structure driver calls.
+        sceneResources.append(whiteTexture)
+        encoder.useResources(sceneResources,usage:.read)
         dispatch(encoder,pipeline:pathPipeline)
         encoder.endEncoding()
         let denoised=denoiser?.encode(command:command,color:raw,depth:depths[current],motion:motion,
@@ -670,12 +729,10 @@ final class RayTracedWorldRenderer {
             surfaceEncoder.setIntersectionFunctionTable(surfaceFunctions,bufferIndex:5)
             for (index,texture) in [atlas,surfaceColor,depths[current],normals[current],diffuseAlbedo,
                                    resolved,resolvedDepth,resolvedNormal,
-                                   localLightTexture ?? emptyLocalLightTexture,specularAlbedo].enumerated() {
+                                   localLightTexture ?? emptyLocalLightTexture,specularAlbedo,skyRadiance].enumerated() {
                 surfaceEncoder.setTexture(texture,index:index)
             }
-            for structure in structures { surfaceEncoder.useResource(structure,usage:.read) }
-            for texture in textures { surfaceEncoder.useResource(texture,usage:.read) }
-            surfaceEncoder.useResource(whiteTexture,usage:.read)
+            surfaceEncoder.useResources(sceneResources,usage:.read)
             dispatch(surfaceEncoder,pipeline:surfacePipeline.pipeline,width:outputWidth,height:outputHeight)
             surfaceEncoder.endEncoding()
             surfaceColor=resolved;surfaceDepth=resolvedDepth;surfaceNormal=resolvedNormal
@@ -700,6 +757,7 @@ final class RayTracedWorldRenderer {
         previousLocalLightGeneration=frame.localLightGeneration; previousHadLocalLight=hasLocalLight
         previousHeldLight=frame.heldLight
         previousParticipatingSections=participatingSections; previousSourceRevision=sectionsRevision
+        previousSelectionGeneration=selectionGeneration
         hasPresentedCompleteScene=true
         previousSun=frame.atmosphere.sunDaylight; lastClock=clock; lastDimension=dimension
         depthTexture=surfaceDepth

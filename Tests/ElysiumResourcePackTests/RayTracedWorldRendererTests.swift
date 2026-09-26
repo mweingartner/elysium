@@ -379,15 +379,15 @@ final class RayTracedWorldRendererTests: XCTestCase {
         XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
         for _ in 0..<2 { upscaled=try render(f,frame:view) }
         XCTAssertEqual(f.renderer.diagnostics.denoiser,"MetalFX temporal denoising")
-        XCTAssertEqual(upscaled.width,1440); XCTAssertEqual(upscaled.height,810)
-        XCTAssertEqual(upscaled.colorWidth,1440); XCTAssertEqual(upscaled.colorHeight,810)
+        XCTAssertEqual(upscaled.width,1920); XCTAssertEqual(upscaled.height,1080)
+        XCTAssertEqual(upscaled.colorWidth,1920); XCTAssertEqual(upscaled.colorHeight,1080)
         XCTAssertEqual(f.renderer.diagnostics.width,640); XCTAssertEqual(f.renderer.diagnostics.height,360)
-        XCTAssertEqual(f.renderer.diagnostics.outputWidth,1440); XCTAssertEqual(f.renderer.diagnostics.outputHeight,810)
-        XCTAssertEqual(upscaled.depthAt(540,405),expectedDepth(distance:6,frame:view),accuracy:0.00001,
+        XCTAssertEqual(f.renderer.diagnostics.outputWidth,1920); XCTAssertEqual(f.renderer.diagnostics.outputHeight,1080)
+        XCTAssertEqual(upscaled.depthAt(720,540),expectedDepth(distance:6,frame:view),accuracy:0.00001,
             "Native primary rays must see through the transparent half")
-        XCTAssertEqual(upscaled.depthAt(900,405),expectedDepth(distance:3,frame:view),accuracy:0.00001,
+        XCTAssertEqual(upscaled.depthAt(1200,540),expectedDepth(distance:3,frame:view),accuracy:0.00001,
             "Low-rate lighting must not reduce visible geometry or overlay depth resolution")
-        let red=upscaled.colorAt(540,405),white=upscaled.colorAt(900,405)
+        let red=upscaled.colorAt(720,540),white=upscaled.colorAt(1200,540)
         XCTAssertGreaterThan(red.x-red.y,0.05,"The alpha opening must show the red backing surface")
         XCTAssertGreaterThan(white.y-red.y,0.1,"Reconstruction must preserve both sides of the authored cutout")
 
@@ -404,7 +404,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
                 for channel in 0..<3 { XCTAssertEqual(actual[channel],expected[channel],accuracy:0.001) }
             }
         }
-        XCTAssertEqual(fogged.depthAt(540,405),expectedDepth(distance:6,frame:view),accuracy:0.00001,
+        XCTAssertEqual(fogged.depthAt(720,540),expectedDepth(distance:6,frame:view),accuracy:0.00001,
             "Camera fog must not overwrite the depth used by raster overlays")
 
         f.renderer.resize(width:48,height:24)
@@ -418,6 +418,133 @@ final class RayTracedWorldRendererTests: XCTestCase {
         _=try render(f,frame:restoredView)
         XCTAssertEqual(f.renderer.diagnostics.historySamples,2,
             "After resizing back, correctly sized resources must resume normal temporal history")
+    }
+
+    /// Rotates the standard "camera looks along -Z" frame so its forward axis points down world
+    /// -Y, letting a horizontal (Y-up) water/seabed pair reuse the same local-space, distance-based
+    /// vertex math as `plane()`/`nativeDetailPlane()`. Robust to whichever handedness `simd_quatf`
+    /// happens to use: it measures the actual transform and flips the pitch if needed, so the
+    /// camera always ends up looking down at freshly built geometry, never up past it.
+    private func lookingDownFrame(width: Int, height: Int) -> (view: RayTracingFrame, worldFromView: simd_float4x4) {
+        var view = frame(width: width, height: height)
+        func viewMatrix(_ angle: Float) -> simd_float4x4 {
+            simd_float4x4(simd_quatf(angle: angle, axis: SIMD3<Float>(1, 0, 0)))
+        }
+        var candidate = viewMatrix(.pi / 2)
+        if (candidate.inverse * SIMD4<Float>(0, 0, -1, 0)).y > 0 { candidate = viewMatrix(-.pi / 2) }
+        view.viewMatrix = candidate
+        view.viewProjection = view.projectionMatrix * candidate
+        view.inverseViewProjection = view.viewProjection.inverse
+        return (view, candidate.inverse)
+    }
+
+    func testTopWaterSeenFromAirInSeparatedSurfaceModeIsFiniteAtNativeResolution() throws {
+        let f = try fixture(redTile: 1)
+        guard #available(macOS 26.0, *),
+              MTLFXTemporalDenoisedScalerDescriptor.supportsDevice(f.device) else {
+            throw XCTSkip("Requires the split-rate native surface (MetalFX) path")
+        }
+        f.renderer.resize(width: 1440, height: 810)
+        let (view, worldFromView) = lookingDownFrame(width: 1440, height: 810)
+
+        // Raw normal (0,1,0): the shader always flips it to face the incoming ray, so this
+        // choice is not load-bearing for which side the camera is actually looking from.
+        func quad(_ local: [SIMD3<Float>], tile: UInt32, anim: UInt32 = 0) -> MeshLayer {
+            let uv: [SIMD2<Float>] = [.init(0, 1), .init(1, 1), .init(1, 0), .init(0, 0)]
+            var words: [UInt32] = []
+            for i in 0..<4 {
+                let w = worldFromView * SIMD4<Float>(local[i], 1)
+                let p = SIMD3<Float>(w.x, w.y, w.z)
+                words += [p.x.bitPattern, p.y.bitPattern, p.z.bitPattern, uv[i].x.bitPattern, uv[i].y.bitPattern,
+                          tile | (1 << 12) | (15 << 17), 0xffffff | (anim << 24)]
+            }
+            return MeshLayer(data: words, idx: [0, 1, 2, 0, 2, 3], count: 4)
+        }
+
+        let waterDistance: Float = 4, seabedDepth: Float = 2
+        let waterHalfX = waterDistance / view.projectionMatrix[0][0]
+        let waterHalfY = waterDistance / view.projectionMatrix[1][1]
+        let totalDistance = waterDistance + seabedDepth
+        let seabedHalfX = totalDistance / view.projectionMatrix[0][0]
+        let seabedHalfY = totalDistance / view.projectionMatrix[1][1]
+        let water = quad([.init(-waterHalfX, -waterHalfY, -waterDistance), .init(waterHalfX, -waterHalfY, -waterDistance),
+                          .init(waterHalfX, waterHalfY, -waterDistance), .init(-waterHalfX, waterHalfY, -waterDistance)],
+                         tile: 0, anim: 1) // anim=1 marks this primitive as water regardless of mesh layer.
+        let seabedZ = -totalDistance
+        // White (tile 0) and red (tile 1) halves split exactly at local/world x = 0: a ray down
+        // the camera's own axis refracts with zero deflection, so this boundary is not smeared
+        // by the water above it, only attenuated and tinted by it.
+        let white = quad([.init(-seabedHalfX, -seabedHalfY, seabedZ), .init(0, -seabedHalfY, seabedZ),
+                          .init(0, seabedHalfY, seabedZ), .init(-seabedHalfX, seabedHalfY, seabedZ)], tile: 0)
+        let red = quad([.init(0, -seabedHalfY, seabedZ), .init(seabedHalfX, -seabedHalfY, seabedZ),
+                        .init(seabedHalfX, seabedHalfY, seabedZ), .init(0, seabedHalfY, seabedZ)], tile: 1)
+        let combined = MeshLayer(data: water.data + white.data + red.data,
+            idx: water.idx + white.idx.map { $0 + 4 } + red.idx.map { $0 + 8 }, count: 12)
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: combined))
+
+        var image = try render(f, frame: view)
+        for _ in 0..<2 { image = try render(f, frame: view) }
+        XCTAssertEqual(f.renderer.diagnostics.denoiser, "MetalFX temporal denoising")
+        XCTAssertEqual(image.colorWidth, 1440); XCTAssertEqual(image.colorHeight, 810)
+        XCTAssertEqual(f.renderer.diagnostics.outputWidth, 1440); XCTAssertEqual(f.renderer.diagnostics.outputHeight, 810)
+        XCTAssertLessThan(f.renderer.diagnostics.width, image.colorWidth,
+            "This must actually exercise the separated-surface (below-native lighting) path")
+
+        // `render()` already requires every value to be finite; add the non-negative half here.
+        for pixel in image.radiance {
+            for channel in 0..<4 {
+                XCTAssertGreaterThanOrEqual(pixel[channel], 0, "Ray-traced radiance must never go negative")
+            }
+        }
+
+        // A native-resolution seabed texture edge: sample redness (R minus the other channels)
+        // along the center row and require the transition near the center to be only a few
+        // native pixels wide, not smeared to the width of a low-resolution lighting texel.
+        let centerY = image.colorHeight / 2
+        let window = 600..<840
+        let redness = window.map { x -> Float in
+            let c = image.colorAt(x, centerY); return c.x - max(c.y, c.z)
+        }
+        XCTAssertTrue(redness.contains { $0 < -0.01 }, "Some sampled column must show the white seabed tinted by water, not red")
+        XCTAssertTrue(redness.contains { $0 > 0.02 }, "Some sampled column must show the red seabed through water")
+        let maximumStep = zip(redness, redness.dropFirst()).map { abs($1 - $0) }.max() ?? 0
+        XCTAssertGreaterThan(maximumStep, 0.01,
+            "The red/white boundary must resolve as a sharp native-resolution edge, not a blurred low-resolution one")
+    }
+
+    func testSelectionCacheRefreshesOnSectionUploadRemovalAndRenderDistanceChange() throws {
+        let f = try fixture()
+        let near = section
+        let far = SectionKey(cx: 20, sy: 0, cz: 0) // world x = 20*16+8 = 328 blocks from the camera
+        f.renderer.uploadSection(key: near, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        var view = frame(); view.renderDistance = 32 // range = 56: `far` (328) is excluded
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.sections, 1)
+
+        // A distant upload stays outside the radius. Invalidating the cache on upload must
+        // re-filter by distance, not blindly append the newly uploaded section.
+        f.renderer.uploadSection(key: far, minY: 0, mesh: mesh(opaque: plane(distance: 6)))
+        _ = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.sections, 1,
+            "An out-of-range upload must not leak into the cached selection")
+
+        // Widen the render distance alone: same camera, same section set. The cache key must
+        // include `range`, not only the sections revision and the camera position.
+        view.renderDistance = 512
+        let widened = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.sections, 2,
+            "Widening the render distance alone must refresh the cached selection")
+        XCTAssertEqual(f.renderer.diagnostics.pendingSections, 0)
+        XCTAssertEqual(widened.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+
+        // Removing the near section (render distance and camera unchanged) must drop it from
+        // the very next selection rather than keep serving a stale cached entry.
+        f.renderer.uploadSection(key: near, minY: 0, mesh: mesh())
+        let afterRemoval = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.sections, 1,
+            "Removing a section must refresh the cached selection")
+        XCTAssertEqual(afterRemoval.depthAt(16, 16), 1, accuracy: 0.00001,
+            "The removed section's geometry must no longer be selected for tracing")
     }
 
     /// Exactly three output pixels per authored atlas texel. Geometry spans the
@@ -703,6 +830,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
         let raw = try texture(.rgba16Float),depth = try texture(.r32Float),normal = try texture(.rgba16Float)
         let motion = try texture(.rgba16Float),diffuse = try texture(.rgba16Float),specular = try texture(.rgba16Float)
         let resolved = try texture(.rgba16Float),resolvedDepth = try texture(.r32Float),resolvedNormal = try texture(.rgba16Float)
+        let sky = try texture(.rgba16Float,width:1) // per-frame sky radiance input (black here)
         let projection = Elysium.mat4Perspective(fovYRad:.pi/2,aspect:4,near:0.1,far:64)
         var atmosphere = AtmosphereUniforms()
         atmosphere.options.x = 1; atmosphere.weather.z = 0
@@ -729,7 +857,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
         let topBuild = try XCTUnwrap(command.makeAccelerationStructureCommandEncoder())
         topBuild.build(accelerationStructure:scene,descriptor:topDescriptor,scratchBuffer:topScratch,scratchBufferOffset:0)
         topBuild.endEncoding()
-        try encode(command,pipeline:path,table:pathTable,textures:[atlas,raw,depth,normal,motion,diffuse,specular,local])
+        try encode(command,pipeline:path,table:pathTable,textures:[atlas,raw,depth,normal,motion,diffuse,specular,local,sky])
         command.commit(); command.waitUntilCompleted()
         XCTAssertEqual(command.status,.completed,String(describing:command.error))
         var guide = [Float16](repeating:0,count:16)
@@ -745,7 +873,7 @@ final class RayTracedWorldRendererTests: XCTestCase {
             withBytes:$0.baseAddress!,bytesPerRow:32) }
         let resolve = try XCTUnwrap(queue.makeCommandBuffer())
         try encode(resolve,pipeline:surface,table:surfaceTable,
-            textures:[atlas,raw,depth,normal,diffuse,resolved,resolvedDepth,resolvedNormal,local,specular])
+            textures:[atlas,raw,depth,normal,diffuse,resolved,resolvedDepth,resolvedNormal,local,specular,sky])
         resolve.commit(); resolve.waitUntilCompleted()
         XCTAssertEqual(resolve.status,.completed,String(describing:resolve.error))
         var output = [Float16](repeating:0,count:16)

@@ -332,7 +332,9 @@ fragment float4 water_fs(ChunkVOut in [[stage_in]],
     float3 worldPosition = in.worldPos + u.worldOrigin.xyz;
     float time = e.atmosphere.options.y > 0.5 ? 0.0 : e.atmosphere.cameraTime.w;
     float3 view = elySafeDirection(-in.worldPos, float3(0,1,0));
-    float3 normal = elyWaterNormal(worldPosition, in.faceNormal, time, e.atmosphere.weather.x);
+    // Band-limit the waves to this fragment's footprint so distant raster water does not alias.
+    float footprint = max(length(fwidth(in.worldPos)), 1e-4);
+    float3 normal = elyWaterSurface(worldPosition, in.faceNormal, time, e.atmosphere.weather.x, footprint).normal;
     if (dot(normal, view) < 0.0) normal = -normal;
     bool underwater = e.atmosphere.weather.w > 0.5;
     float etaI = underwater ? 1.333 : 1.0, etaT = underwater ? 1.0 : 1.333;

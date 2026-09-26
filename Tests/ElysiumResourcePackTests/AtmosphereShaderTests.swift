@@ -476,6 +476,152 @@ final class AtmosphereShaderTests: XCTestCase {
         XCTAssertEqual(escaped, air, "Camera submersion must not suppress the sky after a refracted ray exits water")
     }
 
+    // Band-limited water surface (elyWaterSurface / elyWaterNormal). One dedicated probe and
+    // buffer, separate from `evaluate()`, so these cases do not renumber the existing ones above.
+    private static let waterSurfaceProbeMSL = """
+    kernel void water_surface_probe(device float4* result [[buffer(0)]],
+                                     uint index [[thread_position_in_grid]]) {
+        float3 p = float3(-137.25, 63.9, 512.5);
+        float3 up = float3(0,1,0);
+        float3 side = float3(1,0,0);
+        float3 sloped = normalize(float3(0.3, 1.0, -0.2));
+        switch (index) {
+            case 0: { // top, footprint 0: unit normal, zero removed variance
+                ElyWaterSurface s = elyWaterSurface(p, up, 12.0, 0.0, 0.0);
+                result[index] = float4(s.normal, s.variance);
+                break;
+            }
+            case 1: { // top, huge footprint: collapses to the geometric normal; full slope variance
+                ElyWaterSurface s = elyWaterSurface(p, up, 12.0, 0.0, 1.0e6);
+                result[index] = float4(s.normal, s.variance);
+                break;
+            }
+            case 2: { // 1800s wrap, t = 0
+                ElyWaterSurface s = elyWaterSurface(p, up, 0.0, 0.0, 0.0);
+                result[index] = float4(s.normal, 0);
+                break;
+            }
+            case 3: { // 1800s wrap, t = 1800
+                ElyWaterSurface s = elyWaterSurface(p, up, 1800.0, 0.0, 0.0);
+                result[index] = float4(s.normal, 0);
+                break;
+            }
+            case 4: { // flowing (sloped) top, unit length, at time t
+                ElyWaterSurface s = elyWaterSurface(p, sloped, 12.0, 0.0, 0.0);
+                result[index] = float4(s.normal, length(s.normal));
+                break;
+            }
+            case 5: { // flowing (sloped) top, unit length, at a different time (advection)
+                ElyWaterSurface s = elyWaterSurface(p, sloped, 12.6, 0.0, 0.0);
+                result[index] = float4(s.normal, length(s.normal));
+                break;
+            }
+            case 6: { // elyWaterNormal wrapper == elyWaterSurface(...,0).normal, top face
+                float3 wrapper = elyWaterNormal(p, up, 12.0, 0.3);
+                ElyWaterSurface s = elyWaterSurface(p, up, 12.0, 0.3, 0.0);
+                result[index] = float4(wrapper - s.normal, 0);
+                break;
+            }
+            case 7: { // same wrapper equivalence, vertical (waterfall) side face
+                float3 wrapper = elyWaterNormal(p, side, 12.0, 0.3);
+                ElyWaterSurface s = elyWaterSurface(p, side, 12.0, 0.3, 0.0);
+                result[index] = float4(wrapper - s.normal, 0);
+                break;
+            }
+            case 8: { // side face, footprint 0: also a unit normal
+                ElyWaterSurface s = elyWaterSurface(p, side, 12.0, 0.0, 0.0);
+                result[index] = float4(s.normal, length(s.normal));
+                break;
+            }
+            default: { // side face, huge footprint: also collapses with positive removed variance
+                ElyWaterSurface s = elyWaterSurface(p, side, 12.0, 0.0, 1.0e6);
+                result[index] = float4(s.normal, s.variance);
+                break;
+            }
+        }
+    }
+    """
+
+    private func evaluateWaterSurface() throws -> [SIMD4<Float>] {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let library = try device.makeLibrary(source: ELYSIUM_ENVIRONMENT_MSL + Self.waterSurfaceProbeMSL, options: nil)
+        let function = try XCTUnwrap(library.makeFunction(name: "water_surface_probe"))
+        let pipeline = try device.makeComputePipelineState(function: function)
+        let queue = try XCTUnwrap(device.makeCommandQueue())
+        let command = try XCTUnwrap(queue.makeCommandBuffer())
+        let count = 10
+        let output = try XCTUnwrap(device.makeBuffer(length: count * MemoryLayout<SIMD4<Float>>.stride,
+                                                    options: .storageModeShared))
+        let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(output, offset: 0, index: 0)
+        encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: min(count, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+        XCTAssertEqual(command.status, .completed)
+        return Array(UnsafeBufferPointer(start: output.contents().assumingMemoryBound(to: SIMD4<Float>.self), count: count))
+    }
+
+    func testWaterSurfaceUnitNormalAndZeroFootprintRemovesNoVariance() throws {
+        let result = try evaluateWaterSurface()
+        let top = SIMD3(result[0].x, result[0].y, result[0].z)
+        XCTAssertEqual(simd_length(top), 1, accuracy: 0.0001)
+        XCTAssertEqual(result[0].w, 0, accuracy: 0.0001,
+            "A footprint of 0 band-limits nothing, so no slope variance is removed")
+        let side = SIMD3(result[8].x, result[8].y, result[8].z)
+        XCTAssertEqual(simd_length(side), 1, accuracy: 0.0001, "The vertical (waterfall) branch is also unit length")
+    }
+
+    func testWaterSurfaceHugeFootprintCollapsesToTheGeometricNormalWithFullSlopeVariance() throws {
+        let result = try evaluateWaterSurface()
+        let n = SIMD3(result[1].x, result[1].y, result[1].z)
+        for channel in 0..<3 {
+            XCTAssertEqual(n[channel], SIMD3<Float>(0, 1, 0)[channel], accuracy: 0.00001,
+                "A footprint far past every wavelength band-limits every wave to zero weight")
+        }
+        // Verbatim oracle for the eight directional waves' slope amplitudes (AtmosphereShaders.swift
+        // `elyWaterWaves`), independent of the production `elyWaterRemovedVariance` helper itself.
+        let slopeAmplitudes: [Float] = [0.034, 0.030, 0.027, 0.023, 0.019, 0.015, 0.011, 0.008]
+        let fullSlopeVariance = slopeAmplitudes.reduce(Float(0)) { $0 + 0.5 * $1 * $1 }
+        XCTAssertGreaterThan(result[1].w, 0)
+        XCTAssertEqual(result[1].w, fullSlopeVariance, accuracy: 0.00005)
+        // The vertical branch collapses the same way, with its own (single-wave) slope variance.
+        let sideNormal = SIMD3(result[9].x, result[9].y, result[9].z)
+        for channel in 0..<3 {
+            XCTAssertEqual(sideNormal[channel], SIMD3<Float>(1, 0, 0)[channel], accuracy: 0.00001)
+        }
+        XCTAssertEqual(result[9].w, 0.5 * 0.065 * 0.065, accuracy: 0.00001)
+    }
+
+    func testWaterSurfaceEighteenHundredSecondWrapIsSeamless() throws {
+        let result = try evaluateWaterSurface()
+        for channel in 0..<3 {
+            XCTAssertEqual(result[2][channel], result[3][channel], accuracy: 0.0001,
+                "The render clock wraps every 1800 seconds; every wave frequency is an exact multiple of it")
+        }
+    }
+
+    func testWaterSurfaceFlowingSlopedTopIsAdvectedAndRemainsUnitLength() throws {
+        let result = try evaluateWaterSurface()
+        XCTAssertEqual(result[4].w, 1, accuracy: 0.0001, "length(normal) at t")
+        XCTAssertEqual(result[5].w, 1, accuracy: 0.0001, "length(normal) at a later t")
+        let a = SIMD3(result[4].x, result[4].y, result[4].z)
+        let b = SIMD3(result[5].x, result[5].y, result[5].z)
+        XCTAssertGreaterThan(simd_length(a - b), 0.0005,
+            "A flowing (sloped) top must actually advect over time, not stay static")
+    }
+
+    func testWaterNormalWrapperMatchesZeroFootprintSurfaceOnTopAndSideFaces() throws {
+        let result = try evaluateWaterSurface()
+        XCTAssertEqual(simd_length(SIMD3(result[6].x, result[6].y, result[6].z)), 0, accuracy: 0.00001,
+            "elyWaterNormal must be exactly elyWaterSurface(...,0).normal on the top face")
+        XCTAssertEqual(simd_length(SIMD3(result[7].x, result[7].y, result[7].z)), 0, accuracy: 0.00001,
+            "elyWaterNormal must be exactly elyWaterSurface(...,0).normal on a vertical face")
+    }
+
     func testReducedMotionFreezesCloudWindAndNightSkyRemainsFinite() throws {
         var e = AtmosphereUniforms()
         e.options.y = 1

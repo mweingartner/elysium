@@ -1,5 +1,70 @@
 # Ray-traced worlds verification — September 24, 2026
 
+## Clean distance, native water and CPU frame time — September 25, 2026
+
+The user reported that ray casting was not clean, distance detail was too grainy and
+water was not realistic, and asked that frame rate stay high. Native evidence used
+the optimized debug-control build (`scripts/package-debug-app.sh`) on the 128 GB
+M5 Max, 2880 × 1620 drawable, 16-chunk distance, simulation paused after streaming,
+with three fixed cameras in the isolated debug profile's copies of the user's worlds:
+the user's New World shoreline (339.758, 75, 129.523; yaw 4.2504, pitch 0.3118), the
+LostWorld valley and forest cameras recorded above. Both executables ran the same
+fixed pose and `/time set` before sampling (baseline built unmodified from `2459587`
+in a separate worktree); FPS/GPU values are medians of 15 one-second `state.snapshot`
+samples after the scene was ready with no pending sections. Two alternating noon passes
+agreed within 1 FPS.
+
+| Scene (time) | Baseline FPS min / median | Final FPS min / median | Final whole-command GPU |
+|---|---:|---:|---:|
+| New World shoreline (noon) | 68 / 80 | 85-87 / 100 | 10.7-11.0 ms |
+| LostWorld valley (noon) | 68-71 / 80 | 94-97 / 113-114 | 8.0-8.8 ms |
+| LostWorld forest (noon) | 67-70 / 80 | 83-84 / 99-100 | 10.0-11.0 ms |
+| New World shoreline (sunset, glint) | 67 / 79 | 76 / 87 | 12.3 ms |
+
+Earlier development probes did not set the time (a missing command slash sent it
+as chat), so their absolute FPS varied with sun position; only the fixed-time A/B
+above is used for conclusions. Stage figures below are from those development probes.
+
+Baseline surfaces were 1440 × 810 and lighting 640 × 360; final surfaces are
+1920 × 1080 with the same lighting extent. `sample` of the baseline main thread
+showed it about 100% busy (54% renderer encoding, of which 13% sorting sections;
+30% HUD, almost all minimap string matching), so the frame was CPU-bound with GPU
+headroom. After the CPU changes alone, at 1440 × 810, the shoreline measured 99-110
+and the valley 115-120 FPS, and `nextDrawable` waits appeared on the main thread.
+
+Stage evidence and decisions:
+
+| Probe | Shoreline path / surface | Forest path | Decision |
+|---|---|---|---|
+| CPU changes only (1440) | 4.40 / 1.27 ms | 5.49 ms | kept |
+| Opaque-tile BLAS split | 5.36 / 1.38 ms | 7.21 ms | rejected (slower) |
+| Same split, both groups non-opaque | 4.45 / 1.35 ms | 6.42 ms | not needed |
+| Native water + sky radiance (1440) | 4.27 / 1.68 ms | 5.17 ms | kept |
+| 1920-wide surfaces (final) | 4.68 / 3.02 ms | 5.52 ms | kept |
+| 2160-wide surfaces | 4.99 / 3.80 ms | 5.25 ms | rejected (81 FPS) |
+
+Native captures located every symptom before it was changed. Debug-only views
+(removed before release) showed the dark dashes across distant water were ice
+blocks rendered as clear glass over deep water (98% of the dark pixels carried the
+glass flag); a later white patch under the canopy was the sun glint passing the art-
+directed 0.62 leaf transmission. Final captures show a sharp seabed and reflected
+trees, a pale frozen sea, solid distant canopies without sky speckle, a correct low
+sun glint and pink cloud reflections at sunset, and moonlit shallows at midnight.
+
+| Capture (fixed time) | Baseline SHA-256 prefix | Final SHA-256 prefix |
+|---|---|---|
+| New World shoreline, noon | `74ac889da360caf8` | `28b33c1fd0bd5119` |
+| LostWorld valley, noon | `edbef2eb33e1a6aa` | `c8d6c33f92df5720` |
+| LostWorld forest, noon | `b9a1ea2dbafe8d28` | `97798d31f60aab6b` |
+| New World shoreline, sunset | `6152dabb24c38668` | `c2aecd61d44075a2` |
+
+Baseline debug executable `0e15411c387f6eb6811f9921dc13538e2dedf43c67a346a0125f0922eb229167`;
+final debug executable `413e992d4296f00145c8d6a4907bb0977f4ef908dba5d42ebee393505802f9e6`.
+Probe earlier rejected: the reload probe initially appeared to lose all geometry on
+a second world load; the cause was the debug manual clock remaining paused across
+`world.load`, not a product defect. Probes also require a visible window; macOS
+stops drawing a fully covered MTKView.
+
 ## Forest performance, blur, and foliage shimmer — September 25, 2026
 
 The final renderer separates expensive lighting from full-resolution authored

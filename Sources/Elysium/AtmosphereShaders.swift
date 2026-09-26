@@ -234,26 +234,103 @@ float3 elyAtmosphereRadianceAir(float3 worldOrigin, float3 rayDirection,
     return elyAtmosphereRadianceForRay(worldOrigin, rayDirection, e, includeSun, true);
 }
 
-// The water surface has gentle long ripples and two successively smaller scales. Derivatives
-// produce a normal, rather than unrelated sine values. The caller supplies the real face normal:
-// waterfall sides and the underside must not be shaded as upward-facing ocean surfaces.
-float3 elyWaterNormal(float3 worldPosition, float3 geometricNormal, float time, float rain) {
+// Band-limited water surface shared by raster and ray tracing. Eight directional waves span
+// 9 to 0.5 blocks; phase speed follows deep-water dispersion (omega = sqrt(g k), scaled for
+// block-sized ponds) and every frequency is an exact multiple of 2*pi/1800 s, so the render
+// clock's 30-minute wrap is seamless. A wave shorter than twice the pixel footprint fades out;
+// its slope variance becomes roughness instead of aliasing into sparkle at distance.
+// The caller supplies the real face normal: waterfall sides and the underside must not be
+// shaded as upward-facing ocean surfaces. A sloped (flowing) top advects along its downhill.
+struct ElyWaterSurface {
+    float3 normal;
+    float variance;
+    float laplacian;
+};
+
+constant float4 elyWaterWaves[8] = {
+    // wavelength (blocks), slope amplitude, direction offset (radians), phase
+    float4(9.00, 0.034,  0.00, 0.0),
+    float4(5.90, 0.030,  0.85, 1.7),
+    float4(3.90, 0.027, -0.70, 3.1),
+    float4(2.60, 0.023,  1.55, 4.4),
+    float4(1.70, 0.019, -1.35, 0.9),
+    float4(1.13, 0.015,  0.35, 2.6),
+    float4(0.75, 0.011, -2.20, 5.3),
+    float4(0.49, 0.008,  2.60, 3.8)
+};
+
+static float elyWaterWaveWeight(float wavelength, float footprint) {
+    return footprint > 0.0 ? clamp(wavelength / (2.0 * footprint) - 0.5, 0.0, 1.0) : 1.0;
+}
+
+static float3 elyWaterWaveField(float2 p, float time, float footprint, float strength) {
+    // x,y: slope; z: height Laplacian. Accumulated variance is returned separately by the caller.
+    float2 slope = float2(0.0);
+    float laplacian = 0.0;
+    const float wind = 0.38;
+    for (int i = 0; i < 8; ++i) {
+        float4 w = elyWaterWaves[i];
+        float weight = elyWaterWaveWeight(w.x, footprint);
+        if (weight <= 0.0) continue;
+        float k = 6.28318530718 / w.x;
+        float omega = rint(sqrt(3.2 * k) * 1800.0 / 6.28318530718) * (6.28318530718 / 1800.0);
+        float angle = wind + w.z;
+        float2 direction = float2(cos(angle), sin(angle));
+        float phase = dot(p, direction) * k - omega * time + w.w;
+        float amplitude = w.y * strength * weight;
+        slope += direction * (cos(phase) * amplitude);
+        laplacian -= sin(phase) * amplitude * k;
+    }
+    return float3(slope, laplacian);
+}
+
+static float elyWaterRemovedVariance(float footprint, float strength) {
+    float variance = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        float weight = elyWaterWaveWeight(elyWaterWaves[i].x, footprint);
+        float amplitude = elyWaterWaves[i].y * strength;
+        variance += (1.0 - weight * weight) * amplitude * amplitude * 0.5;
+    }
+    return variance;
+}
+
+ElyWaterSurface elyWaterSurface(float3 worldPosition, float3 geometricNormal, float time, float rain,
+                                float footprint) {
+    ElyWaterSurface result;
     float3 n = elySafeDirection(geometricNormal, float3(0,1,0));
     float strength = mix(1.0, 1.65, clamp(rain, 0.0, 1.0));
     if (abs(n.y) > 0.65) {
-        float2 p = worldPosition.xz;
-        float2 d0 = normalize(float2(0.93, 0.37));
-        float2 d1 = normalize(float2(-0.42, 0.91));
-        float2 d2 = normalize(float2(0.73, -0.68));
-        float2 slope = d0 * (cos(dot(p, d0) * 1.31 - time * 1.45) * 0.038 * 1.31)
-                     + d1 * (cos(dot(p, d1) * 2.73 - time * 2.10 + 1.7) * 0.018 * 2.73)
-                     + d2 * (cos(dot(p, d2) * 8.38 - time * 3.10 + 0.4) * 0.006 * 8.38);
         float orientation = n.y >= 0.0 ? 1.0 : -1.0;
-        return normalize(n + float3(-slope.x, 0.0, -slope.y) * (strength * orientation));
+        float2 downhill = -n.xz * orientation;
+        float3 field;
+        if (dot(downhill, downhill) > 0.0004) {
+            // Two half-period-offset advected copies cross-fade, so flow never jumps.
+            float2 flow = normalize(downhill) * 1.1;
+            float cycle = 2.0;
+            float phase0 = fract(time / cycle), phase1 = fract(time / cycle + 0.5);
+            float blend = abs(2.0 * phase0 - 1.0);
+            float3 a = elyWaterWaveField(worldPosition.xz - flow * (phase0 * cycle), time, footprint, strength);
+            float3 b = elyWaterWaveField(worldPosition.xz - flow * (phase1 * cycle), time, footprint, strength);
+            field = mix(a, b, blend);
+        } else {
+            field = elyWaterWaveField(worldPosition.xz, time, footprint, strength);
+        }
+        result.normal = normalize(n + float3(-field.x, 0.0, -field.y) * orientation);
+        result.laplacian = field.z;
+        result.variance = elyWaterRemovedVariance(footprint, strength);
+        return result;
     }
     float3 tangent = elySafeDirection(cross(float3(0,1,0), n), float3(1,0,0));
+    float verticalWeight = elyWaterWaveWeight(1.1, footprint);
     float verticalFlow = sin(worldPosition.y * 5.7 + time * 5.2 + dot(worldPosition, tangent) * 1.8);
-    return normalize(n + tangent * (verticalFlow * 0.065 * strength));
+    result.normal = normalize(n + tangent * (verticalFlow * 0.065 * strength * verticalWeight));
+    result.laplacian = 0.0;
+    result.variance = (1.0 - verticalWeight * verticalWeight) * 0.065 * 0.065 * strength * strength * 0.5;
+    return result;
+}
+
+float3 elyWaterNormal(float3 worldPosition, float3 geometricNormal, float time, float rain) {
+    return elyWaterSurface(worldPosition, geometricNormal, time, rain, 0.0).normal;
 }
 
 // Exact unpolarized dielectric reflectance, including total internal reflection on water exit.
@@ -272,7 +349,8 @@ float elyDielectricFresnel(float cosineIncident, float etaIncident, float etaTra
 
 float3 elyWaterTransmittance(float distanceInWater, float3 biomeTint) {
     float3 tint = clamp(biomeTint, float3(0), float3(1));
-    float3 absorption = float3(0.115, 0.040, 0.018) + (1.0 - tint) * 0.018;
+    // Near pure-water absorption per block (red is absorbed first) plus biome turbidity.
+    float3 absorption = float3(0.24, 0.052, 0.020) + (1.0 - tint) * 0.045;
     return exp(-absorption * clamp(distanceInWater, 0.0, 256.0));
 }
 

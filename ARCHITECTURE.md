@@ -364,6 +364,54 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   antialiasing or a fix for all residual transport noise. Revisit if native motion
   retains grain, grazing surfaces blur, or measured GPU time/memory regresses.
 
+### Clean distance, native water and CPU frame time — September 25, 2026
+
+- Outcome: remove unclean ray artifacts, distant grain and flat/blurry water while
+  raising frame rate. On the M5 Max reference scenes (2880 × 1620 drawable, 16-chunk
+  distance, fixed noon) median FPS moved from 80 to 100-114 with 1920 × 1080 surfaces
+  (79 to 87 in the heaviest sunset-glint shoreline view).
+- Frame-rate cause established by sampling: the main thread was about 100% busy at
+  80 FPS while ray GPU work took about 7.5 ms. Per-frame filtering/sorting of ~8k
+  sections, per-section String keys, ~7.5k individual residency calls and the
+  minimap's per-cell `String.contains` rules dominated. The distance-sorted selection
+  is now cached and recomputed only when sections change, the radius changes or the
+  camera moves two blocks (inside the 24-block selection margin); residency is one
+  batched call; the minimap resolves block rules once per registered id (an
+  every-id test compares against the removed rules) and reuses its colour grid for
+  up to ten frames while the view is unchanged.
+- Rejected probe: splitting each BLAS into hardware-opaque and alpha-tested geometry
+  (tiles whose minimum alpha proves the callback can never reject) and removing the
+  forced non-opaque traversal made the path pass slower on this GPU (4.5 → 5.4 ms
+  shoreline, 6.1 → 7.1 ms forest). Two non-opaque groups cost the same as one, so
+  the forced non-opaque callback path remains.
+- Water: top water seen from air is shaded natively in `rt_surface_resolve`: a
+  mirror ray with mirrored-camera texture differentials, a refracted ray to the
+  seabed with bent differentials, Beer-Lambert over the actual depth, seabed
+  irradiance (with bounce light) carried by the low-resolution path in a distinct
+  donor class, wave-focused caustics, GGX sun/moon glint whose roughness absorbs the
+  waves removed by the pixel footprint, and shoreline foam. The shared wave function
+  (`elyWaterSurface`) sums eight dispersive waves quantized to the 1800 s render
+  clock and band-limits them by footprint in both RT and raster. Side/waterfall
+  faces, water behind glass and the underwater camera keep the previous paths.
+- Clean rays: diffuse-bounce misses read a per-frame sky radiance texture without
+  the sun/moon discs (no double count, no per-bounce cloud march); indirect
+  contributions have a luminance cap; the first diffuse bounce is R2-stratified
+  without changing other random draws; reflections stay above their plane; and
+  continuation offsets scale with distance. Translucent blocks shade authored alpha
+  coverage as a lit layer (ice no longer renders as clear glass over deep water).
+- Distance: rt_alpha_accept may add acceptance where the camera-footprint mip passes
+  the cutoff (never removing mip-zero acceptance). Low-confidence native pixels widen
+  to 5 × 5 donors and add a deterministic sky/ground-bounce estimate occluded by one
+  sky-visibility ray. Surfaces are capped at 1920 × 1200 (was 1440 × 900); 2160-wide
+  surfaces were measured and rejected at 81 FPS on the shoreline.
+- Constraint found: fully inlining native water and fallbacks into
+  `rt_surface_resolve` crashed Apple's GPU compiler service
+  (XPC_ERROR_CONNECTION_INTERRUPTED) at pipeline creation. `rtNativeWater` and
+  `rtNativeFallbackIrradiance` are out of line; renderer tests fail if any RT
+  pipeline cannot be built.
+- Revisit if water banding, glint fireflies, leaf-coverage popping during motion or
+  frame-rate regressions appear, or if a denser foliage scene falls below 90 FPS.
+
 ### Ray-tracing memory policy correction — September 25, 2026
 
 - Observed failure: the production renderer rejected a normal 16-chunk Lost World

@@ -35,7 +35,7 @@ This replaces the original fixed 1 GiB cap: the 128 GiB M5 Max's reported
 107.52 GiB recommendation permits a 26.88 GiB RT budget before headroom limits.
 Missing device advice uses a conservative physical-memory fallback. Scene limits
 also bound triangles, instances, texture slots, and per-frame build work. Internal ray
-surface resolution preserves aspect ratio within 1440 × 900. Supported macOS 26+
+surface resolution preserves aspect ratio within 1920 × 1200. Supported macOS 26+
 devices trace expensive transport within 640 × 400, denoise that working image
 1:1 with MetalFX, then independently trace primary visibility and material color
 at the full surface resolution. Nearby resolvable authored texels retain nearest
@@ -43,9 +43,10 @@ sampling; subpixel atlas detail uses the filtered footprint described below.
 Only ordinary diffuse incident lighting is
 reconstructed across compatible depth, normal, and material-class guides; primary
 emission is restored exactly afterward. Metal, glass, water, fading bodies, and
-submerged transport are not multiplied by a diffuse albedo. Missing special-material
-donors use the same bounded transport integrator at the native sample. Stable
-pixel centers keep leaf coverage out of temporal jitter. Other devices retain
+submerged transport are not multiplied by a diffuse albedo; top water seen from air
+is shaded natively (below). Missing special-material donors use the same bounded
+transport integrator at the native sample. Stable pixel centers keep leaf coverage
+out of temporal jitter; beyond the pixel footprint, coverage may only grow (below). Other devices retain
 the original 1:1 albedo-guided temporal/spatial filter. Native denoising uses two
 paths per lighting pixel; the compatible fallback uses
 four. Primary water/glass Fresnel branches are both sampled each pixel. Geometry,
@@ -62,8 +63,11 @@ Paths are bounded to seven surface events and two diffuse bounces. Placed lamps
 use a stable, occlusion-respecting render-only voxel irradiance field instead of
 competing in a scene-wide random light lottery. Held and moving emitters retain
 visibility rays, and emissive faces remain visible to secondary paths. Metalness and dielectric properties are
-semantic material presets, not imported PBR maps. Water has normal-map waves and
-absorption/refraction, not a fluid simulation, geometric waves, or caustics.
+semantic material presets, not imported PBR maps. Water has band-limited, dispersive
+normal waves, absorption/refraction, analytic sun/moon glint, approximate
+wave-focused caustics and shoreline foam; it is not a fluid simulation and has no
+geometric wave displacement. Translucent blocks such as ice shade their authored
+alpha coverage as a lit diffuse layer and transmit the remainder.
 
 Both paths use world-anchored volumetric clouds. Raster clouds march at half
 resolution and upsample with full-resolution depth rejection at silhouettes.
@@ -152,10 +156,51 @@ first-frame subpixel-checkerboard averaging, subpixel camera movement, oblique
 unequal UV density, three-output-pixel authored detail, black texels, exact cutout
 coverage, and complete animated mip uploads. Native scene-matched still/movement and
 frame-time measurements also passed and are recorded in the verification record.
-Alpha acceptance and silhouettes, entity textures, and secondary-ray
-material lookups remain nearest sampled. This correction does not establish
-general geometry antialiasing or eliminate all transport noise; residual shimmer,
-grazing-angle blur, or performance/memory regressions warrant further investigation.
+Entity textures and secondary-ray material lookups remain nearest sampled, except
+for native water reflections and refractions, which carry mirrored/refracted
+differentials. Alpha acceptance gained distance coverage (next section). This
+correction does not establish general geometry antialiasing or eliminate all
+transport noise; residual shimmer, grazing-angle blur, or performance/memory
+regressions warrant further investigation.
+
+### Clean distance, native water and frame rate — September 25, 2026
+
+The user reported unclean ray casting, grainy distance and unrealistic water.
+Native captures of their frozen-sea shoreline, the LostWorld valley and forest
+located each symptom:
+
+- Water, the seabed seen through it and everything under the canopy nearby were
+  rebuilt from 640 × 360 radiance, so they read as soft blotches. Top water seen
+  from air is now shaded at native resolution: a real mirror ray (mirrored-camera
+  texture differentials, reflected paths fogged by their full length), a real
+  refracted ray to the seabed (native texture, Beer-Lambert over the actual depth),
+  and seabed irradiance with bounce light carried by the low-resolution path for
+  that pixel. Glint is GGX with roughness from the waves the footprint removed; a
+  leaf blocks the glint's collimated beam, unlike the diffuse canopy transmission.
+- Distant ice rendered as clear glass over deep water, giving rows of dark dashes
+  at grazing angles. Translucent coverage is now a lit diffuse layer.
+- Subpixel leaf holes showed single sky-coloured pixels. Beyond the camera pixel
+  footprint, rt_alpha_accept may additionally accept a texel whose footprint mip
+  passes the cutoff; mip zero still accepts every texel it did, so sparse plants
+  never vanish and nearby holes stay exact. Every ray type uses the same rule.
+- Native pixels without compatible low-resolution donors fell back to direct and
+  cached light only. They now widen to a 5 × 5 search (relaxed plane tolerance
+  beyond 48 blocks) and add a deterministic sky/ground-bounce estimate occluded by
+  one sky-visibility ray, so thin distant risers no longer read as dark grain.
+- Bounce rays counted the sun and moon discs again after next-event estimation,
+  producing fireflies. Diffuse-bounce misses now read a per-frame camera-centred sky
+  radiance texture without discs (also replacing a cloud march per bounce), and
+  indirect contributions have a luminance-preserving cap. The first diffuse bounce
+  uses a stratified R2 pair per pixel without changing any later random draw.
+- Reflected rays are kept above their geometric plane with a continuous ramp, and
+  continuation rays use distance-scaled offsets along the plane normal.
+
+The main thread was the frame-rate limit (about 100% busy at 80 FPS). Caching the
+distance-sorted section selection, batching Metal residency, dropping per-section
+string keys and replacing the minimap's per-cell string matching raised the ceiling;
+the freed GPU time pays for native water and a 1920 × 1200 surface cap. Measured
+numbers and the rejected opaque-geometry probe are in the verification record
+(`docs/ray-traced-worlds/build.md`).
 
 ### Underground and artificial light
 

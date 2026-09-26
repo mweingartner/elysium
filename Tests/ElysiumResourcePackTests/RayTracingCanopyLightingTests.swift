@@ -315,6 +315,10 @@ final class RayTracingCanopyLightingTests: XCTestCase {
             var zero: UInt32=0
             localTexture.replace(region:MTLRegionMake3D(0,0,0,1,1,1),mipmapLevel:0,slice:0,
                 withBytes:&zero,bytesPerRow:4,bytesPerImage:4)
+            let skyDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
+                width: 1, height: 1, mipmapped: false)
+            skyDescriptor.usage = .shaderRead
+            let sky = try XCTUnwrap(device.makeTexture(descriptor: skyDescriptor)) // per-frame sky radiance input
             let counter = try buffer([UInt32](repeating: 0,count: 6))
             let lights = try buffer([RayTracingLight(positionRadius: .zero,colorPower: .zero)])
             // Narrowly target one column without moving the camera-relative acceleration structure.
@@ -338,7 +342,7 @@ final class RayTracingCanopyLightingTests: XCTestCase {
             trace.setIntersectionFunctionTable(traceAlphaFunctions,bufferIndex:5)
             trace.setBuffer(counter,offset: 0,index: 6); trace.setTexture(atlas,index: 0)
             for index in outputs.indices { trace.setTexture(outputs[index],index: index+1) }
-            trace.setTexture(localTexture,index:7)
+            trace.setTexture(localTexture,index:7); trace.setTexture(sky,index:8)
             trace.useResource(bottom,usage: .read); trace.useResource(entityTexture,usage: .read)
             trace.dispatchThreads(.init(width: 16,height: 16,depth: 1),
                 threadsPerThreadgroup: .init(width: 8,height: 8,depth: 1))
