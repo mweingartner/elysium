@@ -396,7 +396,11 @@ EXPECTED_CORE_OBJECT_SHA256='8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7
 # evidence in build.md. Disposable normalization leaves Core/Storage/TextInput/smoke unchanged.
 # Outdoor material minification changes only renderer shaders, UV gradients and atlas mips.
 # Core/storage/text-input objects and elysmoke remain byte-identical; no storage API change.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='af471e5e86293490b3804826f42dd8df176d9be83ce0eb17b2f8018de1dd65c5'
+# Clean distance/native water/CPU frame time: app-target renderer shaders, ray selection
+# caching, minimap colour rules and the 1920x1200 surface cap only. Renewed from
+# af471e5e86293490b3804826f42dd8df176d9be83ce0eb17b2f8018de1dd65c5 after a warning-free
+# release build in this checkout; Core/Storage/TextInput objects and elysmoke unchanged.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='c0e54413f6c934b6493115610ac6315218e747b06c0f296149d5ac339fea370f'
 EXPECTED_SMOKE_PRODUCT_SHA256='85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
