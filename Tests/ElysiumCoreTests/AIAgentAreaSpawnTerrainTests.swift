@@ -83,44 +83,90 @@ final class AIAgentAreaSpawnTerrainTests: XCTestCase {
         return world
     }
 
-    private func spawnedCreatures(_ request: String, in world: World, at position: (Double, Double, Double))
-        throws -> [Entity] {
+    private func spawnedCreatures(_ request: String, in world: World, at position: (Double, Double, Double),
+                                  budget: AIAgentPlacementBudget = AIAgentPlacementBudget()) throws -> [Entity] {
         let player = Player(world: world)
         player.setPos(position.0, position.1, position.2)
         world.addEntity(player)
-        _ = try executeAIAgentAreaSpawn(request, count: nil, radius: nil, world: world, player: player)
+        _ = try executeAIAgentAreaSpawn(request, count: nil, radius: nil, world: world, player: player, budget: budget)
         return world.entities.compactMap { $0 as? Entity }.filter { $0.type.hasPrefix("prehistoric.") }
     }
 
-    func testAPlayerUnderARoofStillGetsCompanyUnderOpenSky() throws {
-        // A 49x49 pavilion roof, like standing in the starter hut but wider than the
-        // default ring: covered ground is right there, yet open ground is in reach.
-        let world = syntheticWorld { chunk, x, z in
-            if abs(x) <= 24 && abs(z) <= 24 { chunk.set(posMod(x, CHUNK_W), 70, posMod(z, CHUNK_W), cell(B.stone)) }
+    /// A flat world with a one-block roof of the given half-width over the origin.
+    private func roofedWorld(halfWidth: Int, roofY: Int) -> World {
+        syntheticWorld { chunk, x, z in
+            if abs(x) <= halfWidth && abs(z) <= halfWidth {
+                chunk.set(posMod(x, CHUNK_W), roofY, posMod(z, CHUNK_W), cell(B.oak_planks))
+            }
         }
+    }
+
+    func testAPlayerUnderAWideRoofGetsCompanyOutsideNotOnTheRoof() throws {
+        // A 49x49 pavilion wider than the default ring: every random draw lands under it,
+        // and its roof top is open sky, yet creatures must go out to the open ground.
+        let world = roofedWorld(halfWidth: 24, roofY: 70)
         XCTAssertTrue(roofed(world, 0, 64, 0))
         let spawned = try spawnedCreatures("various dinosaurs", in: world, at: (0.5, 64, 0.5))
         XCTAssertFalse(spawned.isEmpty)
         for creature in spawned {
-            XCTAssertFalse(roofed(world, ifloor(creature.x), ifloor(creature.y), ifloor(creature.z)),
-                           "\(creature.type) placed under the roof at \(ifloor(creature.x)),\(ifloor(creature.z))")
+            let x = ifloor(creature.x), y = ifloor(creature.y), z = ifloor(creature.z)
+            XCTAssertEqual(y, 64, "\(creature.type) at \(x),\(y),\(z) must stand on the ground, not the roof")
+            XCTAssertTrue(abs(x) > 24 || abs(z) > 24, "\(creature.type) at \(x),\(z) must be outside the pavilion")
+            XCTAssertFalse(roofed(world, x, y, z))
+        }
+    }
+
+    func testAPlayerInAHutSizedShelterGetsCompanyOnTheGroundOutside() throws {
+        // The starter hut's footprint: a 9x9 roof three blocks above the floor.
+        let world = roofedWorld(halfWidth: 4, roofY: 67)
+        XCTAssertTrue(roofed(world, 0, 64, 0))
+        let spawned = try spawnedCreatures("some predators and herbivores", in: world, at: (0.5, 64, 0.5))
+        XCTAssertFalse(spawned.isEmpty)
+        for creature in spawned {
+            let x = ifloor(creature.x), y = ifloor(creature.y), z = ifloor(creature.z)
+            XCTAssertEqual(y, 64, "\(creature.type) at \(x),\(y),\(z)")
+            XCTAssertTrue(abs(x) > 4 || abs(z) > 4, "\(creature.type) at \(x),\(z) must be outside the hut")
+        }
+    }
+
+    /// Rock from y 30 to 110 with a walled 61x61 chamber at y 50 up to `ceiling`.
+    private func sealedCaveWorld(ceiling: Int = 56) -> World {
+        syntheticWorld { chunk, x, z in
+            let lx = posMod(x, CHUNK_W), lz = posMod(z, CHUNK_W)
+            let inChamber = abs(x) <= 30 && abs(z) <= 30
+            for y in 30...110 where !(inChamber && (50...ceiling).contains(y)) {
+                chunk.set(lx, y, lz, cell(B.stone))
+            }
         }
     }
 
     func testAPlayerSealedInACaveStillGetsCompanyThere() throws {
-        // Rock up to y 110 with a 61x61 chamber at y 50...56: no open sky within reach.
-        let world = syntheticWorld { chunk, x, z in
-            let lx = posMod(x, CHUNK_W), lz = posMod(z, CHUNK_W)
-            for y in 64...110 { chunk.set(lx, y, lz, cell(B.stone)) }
-            if abs(x) <= 30 && abs(z) <= 30 {
-                for y in 50...56 { chunk.set(lx, y, lz, 0) }
-            }
-            for y in 30..<50 { chunk.set(lx, y, lz, cell(B.stone)) }
-        }
+        let world = sealedCaveWorld()
         XCTAssertTrue(roofed(world, 0, 50, 0))
+        XCTAssertEqual(world.getBlock(31, 52, 0) >> 4, Int(B.stone), "the chamber has walls")
         let spawned = try spawnedCreatures("various dinosaurs", in: world, at: (0.5, 50, 0.5))
         XCTAssertFalse(spawned.isEmpty, "a covered player falls back to covered ground")
-        XCTAssertTrue(spawned.allSatisfy { (50...56).contains(ifloor($0.y)) }, "company stays in the chamber")
+        for creature in spawned {
+            let x = ifloor(creature.x), y = ifloor(creature.y), z = ifloor(creature.z)
+            XCTAssertEqual(y, 50, "\(creature.type) stands on the chamber floor")
+            XCTAssertTrue(abs(x) <= 30 && abs(z) <= 30, "\(creature.type) at \(x),\(z) stays in the chamber")
+        }
+    }
+
+    func testPlacementWorkIsBoundedWhenNothingFits() throws {
+        // A Brachiosaurus cannot fit a two-block-high crawlspace, so every search fails.
+        let world = sealedCaveWorld(ceiling: 51)
+        let budget = AIAgentPlacementBudget()
+        XCTAssertThrowsError(try spawnedCreatures("8 brachiosaurus", in: world, at: (0.5, 50, 0.5), budget: budget)) {
+            guard case .areaSpawnFailed? = $0 as? AIAgentError else { return XCTFail("\($0)") }
+        }
+        XCTAssertLessThanOrEqual(budget.spent, budget.limit + 1_000, "one request stays within its placement budget")
+
+        // A tight budget stops the search early instead of scanning on.
+        let tight = AIAgentPlacementBudget(limit: 2_000)
+        _ = try? spawnedCreatures("8 brachiosaurus", in: sealedCaveWorld(ceiling: 51), at: (0.5, 50, 0.5), budget: tight)
+        XCTAssertTrue(tight.exhausted)
+        XCTAssertLessThanOrEqual(tight.spent, tight.limit + 1_000)
     }
 
     func testVariousDinosaursNearMeSucceedsOnRealRuggedAndWoodedTerrain() throws {

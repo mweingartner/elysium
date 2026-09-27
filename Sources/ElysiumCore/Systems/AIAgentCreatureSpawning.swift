@@ -17,6 +17,11 @@ public let AIAgentAreaSpawnMaxItems = 4
 public let AIAgentAreaSpawnMaxPerItem = 8
 /// Random candidate sites tried per pack before the deterministic ring sweep.
 let AIAgentAreaSpawnSiteAttempts = 24
+/// Blocks above or below the player's feet that a land creature's standing cell may be.
+let AIAgentAreaSpawnVerticalReach = 24
+/// Placement work one area-spawn request may do (see `AIAgentPlacementBudget`). The
+/// heaviest request measured on real and adversarial terrain spent about 13 million.
+let AIAgentAreaSpawnPlacementBudget = 40_000_000
 /// Boss-tier mobs are summoned only where the player deliberately aims (the
 /// cursor), never scattered around the player by an area request.
 let AIAgentAreaSpawnExcludedEntities: Set<String> = ["wither", "ender_dragon", "warden", "elder_guardian"]
@@ -294,9 +299,11 @@ private struct AIAgentSpawnTally {
 }
 
 /// Whether nothing but tree canopy or trunks stands above feet cell (x, y, z).
-private func aiAgentOpenToSky(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+private func aiAgentOpenToSky(_ world: World, _ x: Int, _ y: Int, _ z: Int,
+                              budget: AIAgentPlacementBudget? = nil) -> Bool {
     let top = world.heightAt(x, z)
     guard top >= y else { return true }
+    budget?.charge(top - y + 1)
     for cy in y...top {
         let id = world.getBlock(x, cy, z) >> 4
         if id > 0, id < blockDefs.count, blockDefs[id].solid, !isTreeCanopyOrTrunk(blockDefs[id].name) { return false }
@@ -304,30 +311,63 @@ private func aiAgentOpenToSky(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> B
     return true
 }
 
+/// One pass of an area-spawn site search.
+private struct AIAgentPlacementPass {
+    /// Whether a standing cell may be under cover (a roof, a cave ceiling).
+    let allowCovered: Bool
+    /// How far above the player's feet a standing cell may be.
+    let maxRise: Int
+}
+
+/// Work shared by the whole placement search of one area-spawn request, counted in
+/// blocks examined, so ground where nothing fits cannot stall the host's simulation tick.
+/// Once it runs out, the remaining creatures are reported as finding no safe spot.
+final class AIAgentPlacementBudget {
+    let limit: Int
+    private(set) var spent = 0
+
+    init(limit: Int = AIAgentAreaSpawnPlacementBudget) {
+        self.limit = limit
+    }
+
+    var exhausted: Bool { spent >= limit }
+
+    func charge(_ blocks: Int) { spent += max(1, blocks) }
+}
+
 /// The feet cell to put `entity` at in column (x, z), or nil when the column has none.
 /// Land bodies use the admitted standing cell nearest the player's own height, so a
-/// forest floor under the canopy counts, not only the topmost ground. Unless the player
-/// is under cover themselves, that cell must be open to the sky: a creature sealed in a
-/// cave below an outdoor player would be out of sight and out of reach.
+/// forest floor under the canopy counts, not only the topmost ground. Unless the pass
+/// allows cover, that cell must be open to the sky: a creature sealed in a cave below the
+/// player would be out of sight and out of reach.
 private func aiAgentAreaSpawnY(_ world: World, _ entity: String, _ x: Int, _ z: Int, nearY: Int,
-                               allowRoofed: Bool) -> Int? {
+                               pass: AIAgentPlacementPass, budget: AIAgentPlacementBudget) -> Int? {
+    guard !budget.exhausted else { return nil }
     let lowest = world.info.minY + 1, highest = world.info.minY + world.info.height - 2
+    let clearance = PrehistoricCreatureDefinition.named(entity)?.bodyClearanceRadius ?? 0
+    let validityCost = (2 * clearance + 1) * (2 * clearance + 1) * 2
     switch spawnPlacementMedium(forMob: entity) {
     case .water:
         // Start at the seabed and rise through the water column until the body fits.
         let floor = world.surfaceY(x, z)
         for y in floor..<(floor + 8) where y >= lowest && y <= highest {
+            guard !budget.exhausted else { return nil }
+            budget.charge(validityCost)
             if spawnPlacementIsValid(world, entity, x, y, z) { return y }
         }
         return nil
     case .land, .amphibious, .object:
-        for distance in 0...24 {
-            for y in distance == 0 ? [nearY] : [nearY - distance, nearY + distance] where y >= lowest && y <= highest {
+        for distance in 0...AIAgentAreaSpawnVerticalReach {
+            for y in distance == 0 ? [nearY] : [nearY - distance, nearY + distance]
+            where y >= lowest && y <= highest && y - nearY <= pass.maxRise {
+                guard !budget.exhausted else { return nil }
+                budget.charge(1)
                 let ground = world.getBlock(x, y - 1, z) >> 4
                 guard ground > 0, ground < blockDefs.count, blockDefs[ground].solid,
                       !isTreeCanopyOrTrunk(blockDefs[ground].name) else { continue }
+                budget.charge(validityCost)
                 if spawnPlacementIsValid(world, entity, x, y, z),
-                   allowRoofed || aiAgentOpenToSky(world, x, y, z) { return y }
+                   pass.allowCovered || aiAgentOpenToSky(world, x, y, z, budget: budget) { return y }
             }
         }
         return nil
@@ -367,13 +407,14 @@ private func aiAgentPackOffsets(spacing: Int) -> [(Int, Int)] {
 /// rings every three blocks still finds a site on rugged or wooded ground.
 private func aiAgentAreaAnchor(_ world: World, _ player: Player, _ entity: String, minDistance: Double,
                                radius: Double, occupied: [(x: Int, z: Int)], spacing: Int,
-                               allowRoofed: Bool) -> (x: Int, z: Int)? {
+                               pass: AIAgentPlacementPass, budget: AIAgentPlacementBudget) -> (x: Int, z: Int)? {
     func admits(_ x: Int, _ z: Int) -> Bool {
         guard world.isLoadedAt(x, z),
               !occupied.contains(where: { abs($0.x - x) < spacing && abs($0.z - z) < spacing }) else { return false }
-        return aiAgentAreaSpawnY(world, entity, x, z, nearY: ifloor(player.y), allowRoofed: allowRoofed) != nil
+        return aiAgentAreaSpawnY(world, entity, x, z, nearY: ifloor(player.y), pass: pass, budget: budget) != nil
     }
     for _ in 0..<AIAgentAreaSpawnSiteAttempts {
+        guard !budget.exhausted else { return nil }
         let distance = minDistance + world.rng.nextFloat() * (radius - minDistance)
         let angle = world.rng.nextFloat() * .pi * 2
         let x = ifloor(player.x + detCos(angle) * distance), z = ifloor(player.z + detSin(angle) * distance)
@@ -384,6 +425,7 @@ private func aiAgentAreaAnchor(_ world: World, _ player: Player, _ entity: Strin
     while distance <= max(radius, Double(AIAgentAreaSpawnFallbackRadius)) {
         let steps = max(8, Int((2 * .pi * distance / 3).rounded(.up)))
         for step in 0..<steps {
+            guard !budget.exhausted else { return nil }
             let angle = start + Double(step) / Double(steps) * .pi * 2
             let x = ifloor(player.x + detCos(angle) * distance), z = ifloor(player.z + detSin(angle) * distance)
             if admits(x, z) { return (x, z) }
@@ -398,17 +440,27 @@ private func aiAgentAreaAnchor(_ world: World, _ player: Player, _ entity: Strin
 /// from `world.rng`. Each creature is admitted by `spawnPlacementIsValid`.
 public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: Int?, radius requestedRadius: Int?,
                                     world: World, player: Player) throws -> AIAgentExecutionResult {
+    try executeAIAgentAreaSpawn(rawEntity, count: requestedCount, radius: requestedRadius,
+                                world: world, player: player, budget: AIAgentPlacementBudget())
+}
+
+func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: Int?, radius requestedRadius: Int?,
+                             world: World, player: Player, budget: AIAgentPlacementBudget) throws -> AIAgentExecutionResult {
     let requests = try parseAIAgentSpawnList(rawEntity)
     let radius = Double(min(AIAgentMaxAreaSpawnRadius, max(12, requestedRadius ?? 28)))
     var remaining = AIAgentMaxSpawnCount
     var serial = 0
     var tallies: [AIAgentSpawnTally] = []
     var occupied: [(x: Int, z: Int)] = []
-    // Creatures stand under open sky first (tree cover is fine), so a player in the starter
-    // hut still gets company outside. Only a player who is under cover themselves, such as
-    // in a cave, falls back to covered ground when nothing open is in reach.
+    // Creatures stand under open sky first (tree cover is fine). A player under cover, such
+    // as in the starter hut, gets company outside at or below their own floor, never on the
+    // roof over them; only when nothing open is in reach, such as deep in a cave, does a
+    // second pass use covered ground.
     let playerCovered = !aiAgentOpenToSky(world, ifloor(player.x), ifloor(player.y), ifloor(player.z))
-    let coverPasses = playerCovered ? [false, true] : [false]
+    let passes = playerCovered
+        ? [AIAgentPlacementPass(allowCovered: false, maxRise: 2),
+           AIAgentPlacementPass(allowCovered: true, maxRise: AIAgentAreaSpawnVerticalReach)]
+        : [AIAgentPlacementPass(allowCovered: false, maxRise: AIAgentAreaSpawnVerticalReach)]
 
     for request in requests where remaining > 0 {
         let explicit = requests.count == 1 ? (request.count ?? requestedCount) : request.count
@@ -490,11 +542,11 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
                 let spacing = aiAgentPackSpacing(species)
                 // A pack that did not fully fit may start again at a second site.
                 for _ in 0..<2 where remainingInPack > 0 {
-                    var site: (anchor: (x: Int, z: Int), allowRoofed: Bool)?
-                    for allowRoofed in coverPasses {
+                    var site: (anchor: (x: Int, z: Int), pass: AIAgentPlacementPass)?
+                    for pass in passes {
                         if let anchor = aiAgentAreaAnchor(world, player, species, minDistance: minDistance, radius: radius,
-                                                          occupied: occupied, spacing: spacing, allowRoofed: allowRoofed) {
-                            site = (anchor, allowRoofed)
+                                                          occupied: occupied, spacing: spacing, pass: pass, budget: budget) {
+                            site = (anchor, pass)
                             break
                         }
                     }
@@ -505,7 +557,7 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
                         guard ddx * ddx + ddz * ddz >= minDistance * minDistance * 0.5, world.isLoadedAt(x, z),
                               !occupied.contains(where: { abs($0.x - x) < spacing && abs($0.z - z) < spacing }),
                               let y = aiAgentAreaSpawnY(world, species, x, z, nearY: ifloor(player.y),
-                                                        allowRoofed: site.allowRoofed) else { continue }
+                                                        pass: site.pass, budget: budget) else { continue }
                         serial += 1
                         if aiAgentSpawnAt(world, species, x, y, z, serial: serial) != nil {
                             tally.record(species)

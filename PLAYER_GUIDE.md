@@ -992,8 +992,9 @@ picks a random amount of each group, species from your map's roster, and safe sp
 "assorted", "mixed", or "all kinds of" creatures brings several species rather than one big pack. On
 rugged or wooded ground it searches farther, up to about 48 blocks, and swaps in smaller species when a
 large one has no room; if some still find no spot, the reply says how many. Creatures land under open
-sky (tree cover is fine), even when you ask from inside the starter hut; only when you are underground
-with no open ground in reach do they join you there. Land creatures never go into water and sea reptiles
+sky (tree cover is fine), even when you ask from inside the starter hut: they wait on the ground outside,
+never on the roof over you. Only when you are under cover, such as in a cave, with no open ground in reach
+do they join you there. Land creatures never go into water and sea reptiles
 only into it. Bosses such as the Wither or Warden can only be summoned where you aim,
 never scattered around you. These spawns run for the host player; a LAN guest's `/ai`
 request goes to the scripting assistant, which cannot spawn creatures.
