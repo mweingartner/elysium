@@ -318,12 +318,14 @@ At that dawn, Elysium attempts to refill vacancies near active players, subject 
 safe, loaded habitat. On prehistoric maps the caps apply around each player: only creatures within
 about 128 blocks of that player count, so distant herds at the edge of the loaded area (or another
 player's crowded region) no longer stop your surroundings from refilling. Regular maps use their ordinary animal, flying-creature, and aquatic tables.
-Prehistoric maps use their selected roster instead. New **land dinosaurs** follow a repeating
-**herbivore, herbivore, carnivore** sequence across successful spawns—even across separate dawns.
-This is a birth ratio, not a guarantee that the surviving population always has that ratio. **Ancient
-Seas** has no land-herbivore roster: its pterosaurs, marine reptiles, and existing wild-fish prey remain
-eligible without inventing herbivorous sea creatures. Initial wildlife in newly explored terrain is
-unchanged; the preference controls replenishment, not initial world generation or ordinary monsters.
+Prehistoric maps use their selected roster instead, with local caps of **48 land, 30 air and 10 water
+creatures**. Land herbivores arrive in complete **pods of 8–10** of the same species; a site that cannot
+safely fit eight does not produce a partial pod. Refills aim for roughly two herbivores per predator
+based on the living local population, while terrain and mortality can change the actual ratio.
+**Ancient Seas** has no land-herbivore roster: its pterosaurs, marine reptiles, and existing wild-fish
+prey remain eligible without inventing herbivorous sea creatures. Newly explored dinosaur terrain
+also has twice the previous chance of an initial land pack (56%, previously 28%), with complete
+herbivore pods. The preference controls later replenishment, not initial generation or ordinary monsters.
 
 The setting applies to worlds you play locally or host; a LAN guest follows the host's choice.
 Closed, paused, or inactive worlds do not earn offline dawns. Freezing the daylight cycle freezes the
