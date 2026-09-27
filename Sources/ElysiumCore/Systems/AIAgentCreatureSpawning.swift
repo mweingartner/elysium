@@ -20,8 +20,8 @@ let AIAgentAreaSpawnSiteAttempts = 24
 /// Blocks above or below the player's feet that a land creature's standing cell may be.
 let AIAgentAreaSpawnVerticalReach = 24
 /// Placement work one area-spawn request may do (see `AIAgentPlacementBudget`). The heaviest
-/// requests measured spent about 33 million on real terrain and 91 million on adversarial
-/// terrain, each under 0.4 s in a debug build, so the cap only stops unforeseen runaways.
+/// requests measured spent about 33 million units on real terrain (24 ms in a release build)
+/// and 91 million on adversarial terrain (36 ms at most), so the cap only stops runaways.
 let AIAgentAreaSpawnPlacementBudget = 120_000_000
 /// Boss-tier mobs are summoned only where the player deliberately aims (the
 /// cursor), never scattered around the player by an area request.

@@ -167,12 +167,14 @@ final class AIAgentAreaSpawnTerrainTests: XCTestCase {
             XCTAssertTrue(budget.exhausted, "limit \(limit)")
             XCTAssertLessThanOrEqual(budget.spent, limit + slack, "limit \(limit) overshot")
         }
-        // Sea reptiles on dry ground: every column's seabed scan is charged as well.
-        let marine = AIAgentPlacementBudget(limit: 5_000)
-        XCTAssertThrowsError(try spawnedCreatures("8 mosasaurus", in: syntheticWorld { _, _, _ in },
-                                                  at: (0.5, 64, 0.5), budget: marine))
-        XCTAssertTrue(marine.exhausted)
-        XCTAssertLessThanOrEqual(marine.spent, marine.limit + slack)
+        // Fish on dry ground: a cod's clearance check costs 2 per cell, so one failed search
+        // of about 830 columns stays near 13,000 unless each column's seabed scan (about
+        // 256 blocks here) is charged too. Only that charge can exhaust this budget.
+        let seabed = AIAgentPlacementBudget(limit: 50_000)
+        XCTAssertThrowsError(try spawnedCreatures("8 cod", in: syntheticWorld { _, _, _ in },
+                                                  at: (0.5, 64, 0.5), budget: seabed))
+        XCTAssertTrue(seabed.exhausted, "seabed scans are charged")
+        XCTAssertLessThanOrEqual(seabed.spent, seabed.limit + slack)
         // Requests from chat use the production limit.
         XCTAssertEqual(AIAgentPlacementBudget().limit, AIAgentAreaSpawnPlacementBudget)
     }
