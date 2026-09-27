@@ -121,6 +121,53 @@ final class AIAgentCreatureSpawningTests: XCTestCase {
         }
     }
 
+    /// A variety word ("various", "assorted", "different"...) resolved against a group
+    /// sets `mixed`, but the same word applied to a phrase that resolves to one exact
+    /// species must never carry through: there is nothing to mix among one species.
+    func testMixedNeverAppliesToAnExplicitlyNamedSpecies() throws {
+        for phrase in ["various t-rex", "different triceratops", "3 assorted raptors", "diverse velociraptor",
+                       "mixed stegosaurus", "several kinds of triceratops", "all sorts of mosasaurus"] {
+            let requests = try parseAIAgentSpawnList(phrase)
+            XCTAssertEqual(requests.count, 1, phrase)
+            guard case .entity = requests[0].subject else {
+                return XCTFail("\(phrase) resolved to a group, not a named species: \(requests[0])")
+            }
+            XCTAssertFalse(requests[0].mixed, "\(phrase): mixed must never apply to a named species")
+        }
+        // Contrast: the same variety words applied to a *group* do set mixed.
+        XCTAssertEqual(try parseAIAgentSpawnList("various dinosaurs"),
+                       [AIAgentSpawnRequest(subject: .group(.dinosaurs), count: nil, mixed: true)])
+        XCTAssertEqual(try parseAIAgentSpawnList("5 kinds of dinosaurs"),
+                       [AIAgentSpawnRequest(subject: .group(.dinosaurs), count: 5, mixed: true)],
+                       "an explicit count survives alongside a variety word")
+    }
+
+    /// Every accepted separator (comma, semicolon, ampersand, plus, slash, "and") must
+    /// split segments cleanly, and a variety word in one segment must never leak `mixed`
+    /// into a sibling segment that named its own group or species without one.
+    func testVarietyWordsWorkAcrossEveryMixedSeparatorAndDoNotLeakBetweenSegments() throws {
+        XCTAssertEqual(try parseAIAgentSpawnList("predators; different herbivores"), [
+            .init(subject: .group(.predators), count: nil),
+            .init(subject: .group(.herbivores), count: nil, mixed: true),
+        ])
+        XCTAssertEqual(try parseAIAgentSpawnList("2 raptors & assorted flyers"), [
+            .init(subject: .entity("prehistoric.velociraptor"), count: 2),
+            .init(subject: .group(.flyers), count: nil, mixed: true),
+        ])
+        XCTAssertEqual(try parseAIAgentSpawnList("carnivores/varied marine reptiles"), [
+            .init(subject: .group(.predators), count: nil),
+            .init(subject: .group(.marineReptiles), count: nil, mixed: true),
+        ])
+        XCTAssertEqual(try parseAIAgentSpawnList("mixed dinosaurs + herbivores"), [
+            .init(subject: .group(.dinosaurs), count: nil, mixed: true),
+            .init(subject: .group(.herbivores), count: nil),
+        ])
+        XCTAssertEqual(try parseAIAgentSpawnList("diverse predators, 2 triceratops"), [
+            .init(subject: .group(.predators), count: nil, mixed: true),
+            .init(subject: .entity("prehistoric.triceratops"), count: 2),
+        ])
+    }
+
     func testDirectRequestsRouteToAreaAndCursorSpawns() throws {
         let area = try XCTUnwrap(inferDirectAIAgentAction(from: "spawn some predators and herbivores in my area"))
         XCTAssertEqual(area.action, "spawn_group")
@@ -203,6 +250,28 @@ final class AIAgentCreatureSpawningTests: XCTestCase {
         XCTAssertLessThanOrEqual(creatures(big).count, AIAgentMaxSpawnCount)
         XCTAssertLessThanOrEqual(creatures(big).filter { $0.type == "prehistoric.velociraptor" }.count,
                                  AIAgentAreaSpawnMaxPerItem)
+    }
+
+    /// "various herbivores" must spread across several species rather than one big herd,
+    /// and no single pack may contribute more than half the planned total.
+    func testMixedGroupCapsEachPackAtHalfAndBringsSeveralSpecies() throws {
+        let (world, player) = makePlain(.prehistoricLostWorldV3, radius: 6, seed: 0xC0FFEE)
+        _ = try executeAIAgentAreaSpawn("various herbivores", count: 8, radius: nil, world: world, player: player)
+        let spawned = creatures(world).filter { $0.definition.isLandHerdHerbivore }
+        XCTAssertEqual(spawned.count, 8)
+        let bySpecies = Dictionary(grouping: spawned, by: \.type).mapValues(\.count)
+        XCTAssertGreaterThanOrEqual(bySpecies.count, 2, "a mix must bring more than one species: \(bySpecies)")
+        let packCap = max(1, (8 + 1) / 2)
+        for (species, count) in bySpecies {
+            XCTAssertLessThanOrEqual(count, packCap, "\(species) exceeded the half-of-group pack cap: \(bySpecies)")
+        }
+
+        // Contrast: the same request without a variety word may still land everything
+        // in one herd, so the spread above is really the mixed behaviour, not luck.
+        let (plainWorld, plainPlayer) = makePlain(.prehistoricLostWorldV3, radius: 6, seed: 0xC0FFEE)
+        _ = try executeAIAgentAreaSpawn("herbivores", count: 8, radius: nil, world: plainWorld, player: plainPlayer)
+        let plainSpawned = creatures(plainWorld).filter { $0.definition.isLandHerdHerbivore }
+        XCTAssertEqual(plainSpawned.count, 8)
     }
 
     func testLandCreaturesAvoidWaterAndMarineReptilesNeedIt() throws {
@@ -381,16 +450,18 @@ final class AIAgentCreatureSpawningTests: XCTestCase {
     }
 
     /// A deterministic seeded fuzz over random mixes of numbers, quantity words,
-    /// separators, group names, species names, nicknames and junk. The parser
-    /// must never crash, must resolve every accepted item to a real spawnable id
-    /// or group, must never report a negative count, and must never accept more
-    /// than the item cap.
+    /// variety words, separators, group names, species names, nicknames and junk. The
+    /// parser must never crash, must resolve every accepted item to a real spawnable id
+    /// or group, must never report a negative count, must never accept more than the
+    /// item cap, must never set `mixed` on a named-species item, and must be
+    /// deterministic (the same phrase parses to the same result every time).
     func testParseAIAgentSpawnListFuzzNeverCrashesAndInvariantsHold() {
         let vocabulary: [String] = [
             "0", "1", "2", "3", "4", "5", "8", "12", "99",
             "999999999999999999999999999999", "9999999999999999999999999999999999999999",
             "a", "an", "the", "of", "some", "few", "several", "many", "random", "number",
             "couple", "pair", "dozen", "handful", "extra", "various", "more", "amount",
+            "assorted", "mixed", "different", "diverse", "varied", "variety", "kinds", "sorts", "types",
             ",", ";", "&", "+", "/", "and", "plus", "with", "also", "then",
             "predators", "herbivores", "dinosaurs", "pterosaurs", "marine", "reptiles",
             "marine_reptiles", "carnivores", "plant", "eaters", "herd", "pack", "flock",
@@ -399,7 +470,7 @@ final class AIAgentCreatureSpawningTests: XCTestCase {
             "stegosaurus", "brontosaurus", "mosasaurus", "pteranodon", "compsognathus",
             "spinosaurus", "prehistoric.tyrannosaurus", "iguanodons",
             "cow", "cows", "pig", "zombie", "sheep", "unicorns",
-            "asdkjhaskjd", "!!!", "kind", "type", "🦖", "   ",
+            "asdkjhaskjd", "!!!", "kind", "type", "sort", "all", "any", "🦖", "   ",
         ]
         var rng = RandomX(0xF00D_5EED)
         func randomPhrase(maxWords: Int) -> String {
@@ -408,7 +479,7 @@ final class AIAgentCreatureSpawningTests: XCTestCase {
             for _ in 0..<n { words.append(vocabulary[rng.nextInt(vocabulary.count)]) }
             return words.joined(separator: " ")
         }
-        var successes = 0, failures = 0
+        var successes = 0, failures = 0, mixedRequests = 0
         for _ in 0..<3_000 {
             let phrase = randomPhrase(maxWords: rng.nextBoolean() ? 6 : 24)
             do {
@@ -416,12 +487,18 @@ final class AIAgentCreatureSpawningTests: XCTestCase {
                 successes += 1
                 XCTAssertLessThanOrEqual(requests.count, AIAgentAreaSpawnMaxItems, phrase)
                 XCTAssertFalse(requests.isEmpty, phrase)
+                // Same input, same output: parsing draws no randomness of its own.
+                XCTAssertEqual(try parseAIAgentSpawnList(phrase), requests, "\(phrase) -> non-deterministic parse")
                 for request in requests {
                     if let count = request.count {
                         XCTAssertGreaterThanOrEqual(count, 0, "\(phrase) -> negative count \(count)")
                     }
-                    if case .entity(let id) = request.subject {
+                    switch request.subject {
+                    case .entity(let id):
                         XCTAssertEqual(resolveAIAgentEntityName(id), id, "\(phrase) -> non-spawnable id \(id)")
+                        XCTAssertFalse(request.mixed, "\(phrase) -> mixed set on a named species \(id)")
+                    case .group:
+                        if request.mixed { mixedRequests += 1 }
                     }
                 }
             } catch is AIAgentError {
@@ -434,5 +511,6 @@ final class AIAgentCreatureSpawningTests: XCTestCase {
         // if either count is zero the vocabulary/generator stopped being representative.
         XCTAssertGreaterThan(successes, 0)
         XCTAssertGreaterThan(failures, 0)
+        XCTAssertGreaterThan(mixedRequests, 0, "the variety vocabulary must actually reach a group item")
     }
 }

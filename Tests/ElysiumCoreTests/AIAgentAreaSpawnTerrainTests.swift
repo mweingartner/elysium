@@ -213,4 +213,85 @@ final class AIAgentAreaSpawnTerrainTests: XCTestCase {
             }
         }
     }
+
+    /// A synthetic flat world with a uniform layer at `y` across every loaded chunk in
+    /// `-radius..<radius`. Cheap and deterministic, unlike real terrain generation.
+    private func makeSyntheticWorld(preset: WorldPreset, seed: UInt32, radius: Int = 4,
+                                    fill: (Chunk) -> Void) -> World {
+        let world = World(dim: .overworld, seed: seed, generationSettings: .init(preset: preset))
+        for cz in -radius..<radius {
+            for cx in -radius..<radius {
+                let chunk = Chunk(cx: cx, cz: cz, minY: world.info.minY, height: world.info.height)
+                chunk.status = .lit
+                fill(chunk)
+                chunk.buildHeightmap()
+                world.setChunk(chunk)
+                world.light.initChunkLight(chunk)
+            }
+        }
+        return world
+    }
+
+    /// A player sealed in a cave (a solid ceiling everywhere, not just overhead) must
+    /// still get company: `allowRoofed` lets the whole enclosed room admit placements
+    /// that an outdoor request would otherwise refuse for lacking open sky.
+    func testPlayerInAFullyEnclosedCaveStillGetsRoofedCompanions() throws {
+        let world = makeSyntheticWorld(preset: .prehistoricLostWorldV4, seed: 0xCA0E, radius: 4) { chunk in
+            for z in 0..<CHUNK_W {
+                for x in 0..<CHUNK_W {
+                    chunk.set(x, 62, z, cell(B.stone))
+                    chunk.set(x, 63, z, cell(B.grass_block))
+                    chunk.set(x, 68, z, cell(B.stone)) // a solid ceiling everywhere: a sealed cave
+                }
+            }
+        }
+        let player = Player(world: world)
+        player.setPos(0.5, 64, 0.5)
+        world.addEntity(player)
+        XCTAssertTrue(roofed(world, 0, 64, 0), "the whole cave is sealed above the player")
+
+        let result = try executeAIAgentAreaSpawn("5 raptors", count: nil, radius: 16, world: world, player: player)
+        let spawned = world.entities.compactMap { $0 as? PrehistoricCreature }
+        XCTAssertEqual(spawned.count, 5, result.message)
+        for creature in spawned {
+            XCTAssertTrue(roofed(world, ifloor(creature.x), ifloor(creature.y), ifloor(creature.z)),
+                          "\(creature.type) should still be admitted though the whole cave is roofed")
+            XCTAssertTrue(spawnPlacementIsValid(world, creature.type, ifloor(creature.x), ifloor(creature.y),
+                                               ifloor(creature.z)))
+        }
+    }
+
+    /// A dense, unbroken canopy sits over every column except the player's own. If the
+    /// open-sky rule mistook tree canopy for a roof, `allowRoofed` would flip true for the
+    /// outdoor player and mask the bug; instead the player's column is genuinely open so
+    /// only the canopy exemption itself can admit the treed sites the pack must use.
+    func testOpenSkyRuleTreatsTreeCanopyAsPassableNotAsARoof() throws {
+        let world = makeSyntheticWorld(preset: .prehistoricLostWorldV4, seed: 0xCA0F, radius: 4) { chunk in
+            for z in 0..<CHUNK_W {
+                for x in 0..<CHUNK_W {
+                    chunk.set(x, 62, z, cell(B.stone))
+                    chunk.set(x, 63, z, cell(B.grass_block))
+                    guard chunk.cx != 0 || chunk.cz != 0 || x != 0 || z != 0 else { continue }
+                    for y in 66...68 { chunk.set(x, y, z, cell(B.oak_log)) }
+                    for y in 69...71 { chunk.set(x, y, z, cell(B.oak_leaves)) }
+                }
+            }
+        }
+        let player = Player(world: world)
+        player.setPos(0.5, 64, 0.5)
+        world.addEntity(player)
+        XCTAssertFalse(roofed(world, 0, 64, 0), "the player's own column is genuinely open to the sky")
+
+        let result = try executeAIAgentAreaSpawn("5 raptors", count: nil, radius: 16, world: world, player: player)
+        let spawned = world.entities.compactMap { $0 as? PrehistoricCreature }
+        XCTAssertEqual(spawned.count, 5, result.message)
+        for creature in spawned {
+            let (x, y, z) = (ifloor(creature.x), ifloor(creature.y), ifloor(creature.z))
+            XCTAssertFalse(roofed(world, x, y, z), "canopy overhead must not read as a roof for \(creature.type)")
+            XCTAssertEqual(world.getBlock(x, y - 1, z) >> 4, Int(B.grass_block),
+                           "\(creature.type) stands on real ground, not the trunk")
+            XCTAssertEqual(world.getBlock(x, 66, z) >> 4, Int(B.oak_log),
+                           "\(creature.type) has canopy directly overhead, proving the exemption fired")
+        }
+    }
 }

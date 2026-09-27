@@ -67,9 +67,14 @@ final class AIAgentAreaSpawnSafetyTests: XCTestCase {
             "please never summon raptors nearby",
             "stop spawning herbivores in my area",
             "spawn no dinosaurs",
+            // The new variety vocabulary must not slip past the same negation guard.
+            "don't spawn various dinosaurs near me",
+            "spawn no different herbivores",
+            "please avoid summoning a mixed pack of predators",
         ] {
             XCTAssertNotEqual(inferDirectAIAgentAction(from: request)?.action, "spawn_group", request)
         }
         XCTAssertEqual(inferDirectAIAgentAction(from: "spawn some predators near me")?.action, "spawn_group")
+        XCTAssertEqual(inferDirectAIAgentAction(from: "spawn various dinosaurs near me")?.action, "spawn_group")
     }
 }

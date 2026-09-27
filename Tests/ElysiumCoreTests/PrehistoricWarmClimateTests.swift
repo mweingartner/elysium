@@ -107,4 +107,34 @@ final class PrehistoricWarmClimateTests: XCTestCase {
         XCTAssertFalse(warm.snow, "v4 weather must not layer snow")
         XCTAssertFalse(warm.ice, "v4 weather must not freeze water")
     }
+
+    /// `precipitationIsSnow` is `!supportsWarmClimate && snowsAt(...)`. Normal worlds and
+    /// every pre-warm-climate revision (v1-v3) must therefore track `snowsAt` exactly,
+    /// for both a biome/height that snows and one that does not; only v4+ forces `false`
+    /// unconditionally.
+    func testPrecipitationIsSnowMatchesSnowsAtForNormalAndPreWarmClimatePresets() {
+        // Reuses the exact biome/height pairs already established elsewhere in this file:
+        // snowyTaiga at y 171 snows (see the weather test above); the warm-mapped output
+        // biomes (plains among them) never snow at y 64 (see the remap test above).
+        let cold = (biome: Biome.snowyTaiga, y: 171)
+        let warm = (biome: Biome.plains, y: 64)
+        XCTAssertTrue(snowsAt(cold.biome.rawValue, cold.y))
+        XCTAssertFalse(snowsAt(warm.biome.rawValue, warm.y))
+
+        for preset in [WorldPreset.normal, .prehistoricLostWorld, .prehistoricLostWorldV2, .prehistoricLostWorldV3] {
+            let world = World(dim: .overworld, seed: seed, generationSettings: .init(preset: preset))
+            XCTAssertFalse(preset.supportsWarmClimate, "\(preset)")
+            XCTAssertTrue(world.precipitationIsSnow(biome: cold.biome.rawValue, y: cold.y),
+                          "\(preset) must still snow where snowsAt is true")
+            XCTAssertFalse(world.precipitationIsSnow(biome: warm.biome.rawValue, y: warm.y),
+                           "\(preset) must not snow where snowsAt is false")
+        }
+        for preset in [WorldPreset.prehistoricLostWorldV4, .prehistoricJurassicGiantsV4,
+                       .prehistoricCretaceousFrontiersV4, .prehistoricAncientSeasV4] {
+            let world = World(dim: .overworld, seed: seed, generationSettings: .init(preset: preset))
+            XCTAssertTrue(preset.supportsWarmClimate, "\(preset)")
+            XCTAssertFalse(world.precipitationIsSnow(biome: cold.biome.rawValue, y: cold.y),
+                           "\(preset) must never snow, even where snowsAt is true")
+        }
+    }
 }

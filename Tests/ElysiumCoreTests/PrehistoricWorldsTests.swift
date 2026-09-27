@@ -199,6 +199,44 @@ final class PrehistoricWorldsTests: XCTestCase {
                        "the current create-world cycle must not show duplicate legacy/current labels")
     }
 
+    /// `validatedWorldPreset` is the persistence/LAN decode boundary. Every known
+    /// revision (v1-v4) must decode to its exact preset without throwing; a v5
+    /// identifier — the still-unknown next revision — must fail closed in every
+    /// disguised form, not silently fall back to `.normal`.
+    func testValidatedWorldPresetAcceptsEveryKnownVersionAndRejectsAFutureOne() throws {
+        let acceptedV4: [(String, WorldPreset)] = [
+            ("elysium:prehistoric_lost_world_v4", .prehistoricLostWorldV4),
+            ("elysium:prehistoric_jurassic_giants_v4", .prehistoricJurassicGiantsV4),
+            ("elysium:prehistoric_cretaceous_frontiers_v4", .prehistoricCretaceousFrontiersV4),
+            ("elysium:prehistoric_ancient_seas_v4", .prehistoricAncientSeasV4),
+            ("lost world v4", .prehistoricLostWorldV4),
+        ]
+        for (raw, expected) in acceptedV4 {
+            XCTAssertEqual(try validatedWorldPreset(raw), expected, raw)
+        }
+        // v1-v3 stay loadable and unaffected by the v4 addition.
+        for raw in [
+            "lost_world", "elysium:prehistoric_lost_world_v1",
+            "elysium:prehistoric_lost_world_v2", "elysium:prehistoric_lost_world_v3",
+        ] {
+            XCTAssertNoThrow(try validatedWorldPreset(raw), raw)
+        }
+        for raw in [
+            "elysium:prehistoric_lost_world_v5", "other:prehistoric_lost_world_v5",
+            "other:prehistoric lost world v5", "other:prehistoric.lost_world_v5",
+            "elysium:lost.world.v5", "other:prehistoricLostWorldV5", "elysium:lostWorldV5",
+            "other:pre.historic_lost_world_v5",
+        ] {
+            XCTAssertThrowsError(try validatedWorldPreset(raw), raw) { error in
+                XCTAssertEqual(error as? WorldPresetValidationError, .unsupportedPrehistoricPreset, raw)
+            }
+        }
+        XCTAssertEqual(try validatedWorldPreset("minecraft:normal"), .normal)
+        XCTAssertEqual(try validatedWorldPreset(nil), .normal)
+        XCTAssertEqual(try validatedWorldPreset("some totally unrecognized future mode"), .normal,
+                       "an unrelated unknown id with no prehistoric marker still falls back to normal")
+    }
+
     func testPrehistoricSoundCatalogAndCombatXPRewardsAreDistinct() throws {
         let roster = PrehistoricCreatureDefinition.all
         let expectedCueCount = PrehistoricSoundCue.allCases.count
