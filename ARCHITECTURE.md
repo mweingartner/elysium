@@ -123,8 +123,12 @@ Structures use a region grid (`spacing`/`separation`/`salt`) with a `check` pred
 
 ### Decision: saved dawn replenishment and provenance-aware forest renewal — September 24, 2026
 
+The dinosaur density, initial-population and diet-sequence details below record the
+original release; the September 27 decision supersedes them. Ordinary worlds and
+the saved calendar retain this contract.
+
 - Status: implemented; focused tests, warning-free production build, deterministic smoke, and native Options/tree-decay checks passed. Release/install/Git acceptance is reported separately; see [verification and pin renewal](docs/creature-tree-ecology/build.md).
-- User outcome and acceptance example: Options → World offers Daily (default), Alternate Days, and Weekly. After two real game dawns with Alternate Days selected, a depleted loaded habitat receives one bounded refill; a save/reload does not reset that interval. New land dinosaurs arrive in successful H,H,C order. Cutting a natural trunk starts gradual decay and occasional seedlings, while a nearby wooden building remains intact.
+- User outcome and acceptance example: Options → World offers Daily (default), Alternate Days, and Weekly. After two real game dawns with Alternate Days selected, a depleted loaded habitat receives one bounded refill; a save/reload does not reset that interval. Originally land dinosaurs arrived in successful H,H,C order; the September 27 pod policy below supersedes that rule. Cutting a natural trunk starts gradual decay and occasional seedlings, while a nearby wooden building remains intact.
 - Fixed constraints: in-game cycles rather than wall time; host-only deterministic mutations; loaded/habitable placement and existing category caps; no changes to registry order, initial chunk creature generation, prehistoric roster revisions, or saved full terrain; preserve player builds and ordinary hostile/no-sky spawning.
 - Chosen clock: `EcologyCalendar` records completed dawns, the last consumed refill dawn, and ecological age. Natural sunrise and explicit sleeping advance it, with sleep adding the skipped ecological ticks. Clock commands neither age trees nor emit a wave directly, but the ensuing natural wrap counts as a dawn: this is an intentional administrator shortcut. A saved successful-birth sequence spans waves, while frequency remains a durable local Settings preference governed by the LAN host. This replaces sky-world passive attempts every few seconds, including on existing maps, but does not alter their initial population or species tables. The strongest simpler alternative, `world.time % (24_000 * interval)`, was rejected because sleep changes the visible day without advancing that clock and reload-sensitive interval state can cause missed or repeated waves.
 - Bounded replenishment: at most 128 candidate sites refill the existing land/ambient/water caps of 18/15/5 near living authoritative players. Habitat failures do not spend H,H,C positions; species are weighted within the required land diet group rather than weighting whole packs. Air and aquatic profiles retain their existing rules. Ancient Seas has no land-herbivore roster and therefore no invented 2:1 marine diet claim. Full/disabled/refused waves do not create catch-up debt. Paused, inactive, or closed worlds do not earn offline dawns; frozen daylight pauses the sky-world calendar.
@@ -132,6 +136,23 @@ Structures use a region grid (`spacing`/`separation`/`salt`) with a `check` pred
 - Loading and growth tradeoff: incomplete tree neighborhoods defer inspection/removal, and due work catches up within fixed budgets when the area reloads. Pausing/closing stops ecological aging; Overworld daylight freeze stops deterioration, while skyless trees age by active simulation ticks. Sapling growth stages its generated footprint, checks loaded cells/collisions first, and refuses an obstructed or unavailable footprint rather than overwriting solids/containers. This favors preservation over guaranteed regrowth in crowded forests.
 - Verification scope: focused tests cover schedule persistence/sleep/freeze, Settings recovery and Options controls, actual spawn admission/caps/diet sequence/determinism, refusal-heavy work bounds, provenance/support/seedling behavior, and safe regrowth. Native Options and gameplay inspection, reviewed intentional spawning-golden changes, warning-free builds, release gates, installed identity, commit, and remote parity remain separate acceptance evidence; unit tests alone do not establish a satisfactory live forest or population pace.
 - Revisit if: dawn work visibly hitches, legitimate habitats rarely refill, player constructions lose blocks, tree neighborhoods remain indefinitely deferred, or gameplay shows that an explicit Ancient Seas roster expansion is preferable to its present no-land-herbivore exception. Implementation: [`EcologyCalendar.swift`](Sources/ElysiumCore/World/EcologyCalendar.swift), [`CreatureRespawn.swift`](Sources/ElysiumCore/Entity/CreatureRespawn.swift), [`TreeEcology.swift`](Sources/ElysiumCore/Systems/TreeEcology.swift), [`CreatureRespawnTests.swift`](Tests/ElysiumCoreTests/CreatureRespawnTests.swift), and [`EcologyCalendarTests.swift`](Tests/ElysiumCoreTests/EcologyCalendarTests.swift).
+
+### Decision: denser dinosaur maps and complete herbivore pods — September 27, 2026
+
+- Outcome: at least double the previous dinosaur-map spawning targets and make
+  new herbivore encounters complete 8–10-member pods, including saved-map refills.
+- All prehistoric revisions receive this population policy without changing their
+  terrain IDs or saved entities. Normal-map generation and refill caps stay unchanged.
+- Bootstrap pack probability rises from 0.28 to 0.56. Herbivore placement stages
+  up to ten spaced positions, bounded to 128 tries per chunk, publishing only if
+  eight pass. Adoption repeats clearance and rejects fragmented pods.
+- Dawn caps become 48/30/10 (land/air/water), with 128/64/64 candidates. Land pods
+  get at most 96 placement tries and all land placement shares a 1,024-check budget.
+  Every overlapping player region reserves capacity before publication. The live
+  local diet census targets roughly 2:1 herbivores/predators; the old per-birth
+  alternation cannot create coherent pods. Existing sequence fields remain readable.
+- Higher AI/rendering cost and fewer viable giant-herbivore sites are material
+  risks. Revisit if real terrain refuses most pods or loaded-game frame time regresses.
 
 ### Decision: exact active-domain structure planning — September 15, 2026
 

@@ -819,7 +819,7 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
         // enough deterministic bootstrap packs to be noticeable before the
         // runtime natural-spawn loop has had time to fill the area.
         let passiveBootstrapChance = settings.preset == .moderateHillsResourceRich ? 0.35
-            : settings.preset.isPrehistoric ? 0.28 : 0.1
+            : settings.preset.isPrehistoric ? 0.56 : 0.1
         // Do not bootstrap an animal or dinosaur inside the first-night hut
         // itself. The site is pure/cached and therefore agrees with the stamp
         // on hosts, LAN clients, and independently generated neighbor chunks.
@@ -833,7 +833,13 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
             if !list.isEmpty {
                 let entry = mobRng.pickWeighted(list) { $0.weight }
                 let pack = entry.minPack + mobRng.nextInt(entry.maxPack - entry.minPack + 1)
-                for spawnOrdinal in 0..<pack {
+                let definition = PrehistoricCreatureDefinition.named(entry.mob)
+                let isPod = definition?.isLandHerdHerbivore == true
+                var pod: [EntitySpec] = []
+                // Stage a complete pod before publishing any members. Refused cells
+                // get bounded retries instead of silently shrinking an 8-10 pod.
+                for spawnOrdinal in 0..<(isPod ? 128 : pack) {
+                    if isPod && pod.count == pack { break }
                     let px = cx * 16 + mobRng.nextInt(16), pz = cz * 16 + mobRng.nextInt(16)
                     let py = sink.topY(px, pz)
                     // require real ground — topY over oceans returned the water
@@ -857,9 +863,15 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
                         } else {
                             data = [:]
                         }
-                        sink.addEntity(EntitySpec(mob: entry.mob, x: Double(px) + 0.5, y: Double(py), z: Double(pz) + 0.5, data: data))
+                        let spec = EntitySpec(mob: entry.mob, x: Double(px) + 0.5, y: Double(py), z: Double(pz) + 0.5, data: data)
+                        if isPod {
+                            let spacing = max(2, (definition?.collisionWidth ?? 1) + 0.5)
+                            guard !pod.contains(where: { abs($0.x-spec.x) < spacing && abs($0.z-spec.z) < spacing }) else { continue }
+                            pod.append(spec)
+                        } else { sink.addEntity(spec) }
                     }
                 }
+                if pod.count >= 8 { for spec in pod { sink.addEntity(spec) } }
             }
         }
         return GenOutput(blocks: sink.blocks, biomes: biomes,

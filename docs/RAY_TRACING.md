@@ -385,3 +385,16 @@ weather clouds, and continuous rain fog without a loaded-world silhouette.
 See the [verification record](ray-traced-worlds/build.md) for capture identities,
 release pipeline, installed identity, and publication status. No golden change
 is intended.
+
+### Branch reconciliation — September 27, 2026
+
+`codex/native-ray-detail` pointed to `2459587`, an ancestor of released main
+`64a854b`; it had no exclusive commits. Its uncommitted primary-frustum TLAS,
+secondary-lighting cache, opacity-split BLAS and 2560×1600 surface experiment
+was retired rather than merged. The opacity split had already been measured
+slower in the accepted `48380d9` comparison; the later native-water, 1920×1200
+surface and streaming implementation remains authoritative. There is no current
+measured benefit establishing that the remaining experiment improves that newer
+renderer. This is a decision against merging unproven complexity, not a claim
+that every isolated idea is intrinsically slower. The experiment was preserved
+as an external recovery patch before deleting the local branch.

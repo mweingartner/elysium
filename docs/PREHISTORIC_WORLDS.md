@@ -150,13 +150,23 @@ clearance checks. Prehistoric maps apply the category caps to each active player
 own neighbourhood (creatures within 128 blocks of that player), so herds parked at
 the edge of loaded terrain (beyond the simulation radius) cannot hold every slot
 while the area around the player empties, and in LAN play one player's full region
-cannot use up another's vacancies; regular maps keep counting the whole loaded world. Successful land-dinosaur births follow **herbivore, herbivore,
-carnivore**, with the next position saved across waves. Failed attempts do not
-advance that ratio, and mortality can change the ratio of survivors. **Ancient
+cannot use up another's vacancies; regular maps keep counting the whole loaded world.
+Dinosaur maps now allow **48 land, 30 air and 10 water creatures** per local region
+(previously 18/15/5). Dawn placement attempts double to 128/64/64. Land placement
+has an additional shared 1,024-check budget, including pod retries.
+Land herbivores spawn as complete, same-species **pods of 8–10** within a
+24-block-wide area. A site that cannot safely admit eight produces no partial
+pod. Dawn selects diets from the live local census, aiming for roughly two
+herbivores per predator, rather than alternating isolated H/H/C births. Tight
+capacity may admit individual predators; it never cuts down a herbivore pod.
+Mortality, existing saves and terrain can change the actual population and ratio. **Ancient
 Seas** deliberately has no land-herbivore table: its native pterosaur/marine
 roster and wild-fish prey still replenish, without relabeling marine reptiles as
-herbivores or importing land species. Initial generated chunk populations are
-unchanged. A full population, disabled mob spawning, or failed habitat checks
+herbivores or importing land species. Initial land-pack chance doubles from
+28% to 56% per newly generated chunk. Herbivore packs use the same 8–10 range,
+with at most 128 placement tries in that chunk and an all-or-none minimum of
+eight at both generation and adoption. Existing saved entities remain intact;
+existing maps receive the increased population through their enabled dawn refill. A full population, disabled mob spawning, or failed habitat checks
 does not bank an unbounded later wave; ordinary monsters and skyless-dimension
 spawning keep their established rules.
 

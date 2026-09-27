@@ -123,6 +123,80 @@ final class PrehistoricWorldsTests: XCTestCase {
         return world
     }
 
+    func testAllHerbivoreSpawnTablesUseEightToTenMemberPods() {
+        for profile in PrehistoricWorldProfile.allCases {
+            for entry in prehistoricSpawnEntries(profile: profile, category: "creature") {
+                let definition = PrehistoricCreatureDefinition.named(entry.mob)!
+                if definition.isLandHerdHerbivore {
+                    XCTAssertEqual(entry.minPack, 8)
+                    XCTAssertEqual(entry.maxPack, 10)
+                } else {
+                    XCTAssertEqual(entry.minPack, definition.minPack)
+                    XCTAssertEqual(entry.maxPack, definition.maxPack)
+                }
+            }
+        }
+    }
+
+    func testGeneratedHerbivoreEncountersAreCompletePodsOnRealTerrain() {
+        let settings = WorldGenerationSettings(preset: .prehistoricLostWorldV4)
+        var pods = 0
+        var creatures = 0
+        var previousCreatures = 0
+        let seed: UInt32 = 12345
+        let site = prehistoricStarterShelterSite(seed: seed, settings: settings)!
+        let centerX = floorDiv(site.x, 16), centerZ = floorDiv(site.z, 16)
+        for cz in (centerZ-3)...(centerZ+3) {
+            for cx in (centerX-3)...(centerX+3) {
+                let output = generateChunk(.overworld, seed, cx, cz, settings: settings)
+                // Replay the pre-change spawn policy over these exact generated
+                // blocks. Terrain and RNG seed are identical; only population
+                // probability and pod admission differ.
+                var oldRNG = chunkRandom(seed, cx, cz, 0xAB1E)
+                if oldRNG.nextFloat() < 0.28 {
+                    let entries = prehistoricSpawnEntries(profile: .lostWorld, category: "creature")
+                    let entry = oldRNG.pickWeighted(entries) { $0.weight }
+                    let definition = PrehistoricCreatureDefinition.named(entry.mob)!
+                    let count = definition.minPack + oldRNG.nextInt(definition.maxPack - definition.minPack + 1)
+                    let sink = ArraySink(cx: cx, cz: cz, blocks: output.blocks, minY: GEN_MIN_Y, maxY: GEN_MIN_Y + WORLD_H, heightFallback: { _, _ in 64 })
+                    for _ in 0..<count {
+                        let x = cx * 16 + oldRNG.nextInt(16), z = cz * 16 + oldRNG.nextInt(16)
+                        let y = sink.topY(x, z)
+                        let ground = sink.get(x, y-1, z), id = ground >> 4
+                        if y > 50 && y < 200 && ground > 0 && id != Int(B.water) && id != Int(B.lava)
+                            && blockDefs[id].solid && !site.containsProtectedSpawnColumn(x, z)
+                            && prehistoricBootstrapHasClearance(sink, definition: definition, x: x, y: y, z: z) {
+                            previousCreatures += 1
+                        }
+                    }
+                }
+                let herbs = output.entities.filter { PrehistoricCreatureDefinition.named($0.mob)?.isLandHerdHerbivore == true }
+                if !herbs.isEmpty {
+                    pods += 1
+                    XCTAssertTrue((8...10).contains(herbs.count), "chunk \(cx),\(cz)")
+                    XCTAssertEqual(Set(herbs.map(\.mob)).count, 1)
+                }
+                creatures += output.entities.count
+            }
+        }
+        print("[dinosaur-populations] generated 49 real chunks: baseline \(previousCreatures), now \(creatures) creatures in \(pods) herbivore pods")
+        XCTAssertGreaterThan(pods, 0)
+        XCTAssertGreaterThan(previousCreatures, 0)
+        XCTAssertGreaterThanOrEqual(creatures, previousCreatures * 2)
+    }
+
+    func testAdoptionRefusesFragmentedHerbivorePods() {
+        let world = makeWorld(.prehistoricLostWorldV4)
+        var specs: [EntitySpec] = []
+        for index in 0..<8 {
+            let x = 20.5 + Double(index % 4) * 2
+            let z = 3.5 + Double(index / 4) * 2
+            specs.append(EntitySpec(mob: "prehistoric.dryosaurus", x: x, y: 64, z: z, data: [:]))
+        }
+        XCTAssertEqual(GameCore.admittedGeneratedEntities(specs, in: world).count, 8)
+        XCTAssertEqual(GameCore.admittedGeneratedEntities(Array(specs.prefix(7)), in: world).count, 0)
+    }
+
     func testVersionedProfilesCoverTheCanonicalRosterWithoutChangingNormalPreset() {
         XCTAssertEqual(PrehistoricCreatureDefinition.allIDs, PrehistoricWorldProfile.allCreatureIDs)
         XCTAssertEqual(PrehistoricCreatureDefinition.all.count, 36)

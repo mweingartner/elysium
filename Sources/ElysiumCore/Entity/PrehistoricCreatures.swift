@@ -398,7 +398,8 @@ public func prehistoricSpawnEntries(
     let roster: [SpawnEntry] = PrehistoricCreatureDefinition.all.compactMap { definition in
         guard definition.medium == medium, permitted.contains(definition.id) else { return nil }
         return (mob: definition.id, weight: definition.spawnWeight,
-                minPack: definition.minPack, maxPack: definition.maxPack)
+                minPack: definition.isLandHerdHerbivore ? 8 : definition.minPack,
+                maxPack: definition.isLandHerdHerbivore ? 10 : definition.maxPack)
     }
     // Wild fish are a deliberately narrow ecosystem resource, not a return to
     // modern domestic fauna. They give the roster's fish-focused swimmers and

@@ -3426,8 +3426,8 @@ public final class GameCore {
                 }
             }
         } else if let entitySpecs {
-            for es in entitySpecs {
-                guard Self.shouldMaterializeGeneratedEntity(es, in: w) else { continue }
+            let admitted = Self.admittedGeneratedEntities(entitySpecs, in: w)
+            for es in admitted {
                 let m = spawnMob(w, es.mob, es.x, es.y, es.z, spawnOptsFrom(es.data))
                 m?.persistent = true
                 if let m { adopted.append(m) }
@@ -3441,6 +3441,17 @@ public final class GameCore {
     /// their full body can span neighboring chunks, legacy structure occupants
     /// must not cross the profile boundary, and a direct bootstrap spec must
     /// never phase a large creature through unloaded terrain.
+    static func admittedGeneratedEntities(_ specs: [EntitySpec], in world: World) -> [EntitySpec] {
+        let admitted = specs.filter { shouldMaterializeGeneratedEntity($0, in: world) }
+        guard world.generationSettings.preset.isPrehistoric else { return admitted }
+        // A neighbor may still be unloaded at adoption. Never publish the
+        // surviving fragment of a herbivore pod after that second clearance check.
+        return admitted.filter { spec in
+            guard PrehistoricCreatureDefinition.named(spec.mob)?.isLandHerdHerbivore == true else { return true }
+            return admitted.filter { $0.mob == spec.mob }.count >= 8
+        }
+    }
+
     static func shouldMaterializeGeneratedEntity(_ spec: EntitySpec, in world: World) -> Bool {
         let definition = PrehistoricCreatureDefinition.named(spec.mob)
         // A retained landmark may carry direct villagers, domestic animals, or

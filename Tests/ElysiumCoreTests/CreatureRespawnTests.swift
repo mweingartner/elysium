@@ -138,32 +138,46 @@ final class CreatureRespawnTests: XCTestCase {
         XCTAssertEqual(world.entities.compactMap { $0 as? Mob }.filter { $0.category == "creature" }.count, 18)
     }
 
-    func testSuccessfulLandBirthsFollowHerbivoreHerbivoreCarnivoreAcrossWaves() throws {
-        let (world, player) = fixture(.prehistoricLostWorldV2)
-        var residents: [Entity] = []
-        for _ in 0..<17 { residents.append(try XCTUnwrap(spawnMob(world, "cow", 0, 64, 0))) }
-        var rng = RandomX(0xCA11)
-        let first = replenishCreaturesAtDawn(world, [player], &rng)
-        XCTAssertEqual(first.creaturesSpawned, 1)
-        let firstBirth = try XCTUnwrap(world.entities.compactMap { $0 as? PrehistoricCreature }.first { $0.definition.medium == .land })
-        XCTAssertTrue(firstBirth.definition.isLandHerdHerbivore)
-        XCTAssertEqual(world.creatureRespawnSequence, 1)
-
-        // Two vacancies continue the saved sequence rather than starting a
-        // fresh H,H,C wave and starving carnivores whenever capacity is tight.
-        world.removeEntity(residents.removeLast())
-        world.removeEntity(residents.removeLast())
-        let oldIDs = Set(world.entities.compactMap { ($0 as? Entity)?.id })
-        let second = replenishCreaturesAtDawn(world, [player], &rng)
-        XCTAssertEqual(second.creaturesSpawned, 2)
-        let births = world.entities.compactMap { $0 as? PrehistoricCreature }
-            .filter { $0.definition.medium == .land && !oldIDs.contains($0.id) }
-        XCTAssertEqual(births.count, 2)
-        if births.count == 2 {
-            XCTAssertTrue(births[0].definition.isLandHerdHerbivore)
-            XCTAssertTrue(births[1].definition.isLandPredator)
+    func testDinosaurMapsRefillMoreThanTwiceTheOldCapInCompletePods() {
+        for preset in [WorldPreset.prehistoricLostWorld, .prehistoricLostWorldV4,
+                       .prehistoricJurassicGiantsV4, .prehistoricCretaceousFrontiersV4] {
+            let (world, player) = fixture(preset)
+            var rng = RandomX(0xCA11)
+            let report = replenishCreaturesAtDawn(world, [player], &rng)
+            XCTAssertEqual(report.creaturesSpawned, 48, "\(preset)")
+            XCTAssertLessThanOrEqual(report.candidateAttempts, 256)
+            XCTAssertLessThanOrEqual(report.siteAdmissionChecks, 1152)
+            let land = world.entities.compactMap { $0 as? PrehistoricCreature }.filter { $0.definition.medium == .land }
+            // Spawns are published together. Walk each consecutive same-species
+            // herbivore cohort and prove its spatial extent as well as its size.
+            var index = 0
+            while index < land.count {
+                let first = land[index]
+                guard first.definition.isLandHerdHerbivore else { index += 1; continue }
+                var end = index + 1
+                while end < land.count && land[end].type == first.type { end += 1 }
+                let pod = Array(land[index..<end])
+                XCTAssertTrue((8...10).contains(pod.count))
+                XCTAssertLessThanOrEqual(pod.map(\.x).max()! - pod.map(\.x).min()!, 24)
+                XCTAssertLessThanOrEqual(pod.map(\.z).max()! - pod.map(\.z).min()!, 24)
+                for member in pod {
+                    XCTAssertTrue(spawnPlacementIsValid(world, member.type, ifloor(member.x), ifloor(member.y), ifloor(member.z)))
+                }
+                index = end
+            }
+            let again = replenishCreaturesAtDawn(world, [player], &rng)
+            XCTAssertEqual(again.creaturesSpawned, 0)
         }
-        XCTAssertEqual(world.creatureRespawnSequence, 0)
+    }
+
+    func testTightCapacityNeverPublishesAPartialHerbivorePod() throws {
+        let (world, player) = fixture(.prehistoricLostWorldV4)
+        for _ in 0..<43 { _ = try XCTUnwrap(spawnMob(world, "prehistoric.velociraptor", 0, 64, 0)) }
+        let before = world.entities.count
+        var rng = RandomX(0xCA11)
+        let report = replenishCreaturesAtDawn(world, [player], &rng)
+        XCTAssertEqual(report.creaturesSpawned, 5)
+        XCTAssertFalse(world.entities.dropFirst(before).compactMap { $0 as? PrehistoricCreature }.contains { $0.definition.isLandHerdHerbivore })
     }
 
     func testPrehistoricDietFilterDoesNotMisclassifySeaOrAirCreatures() {
@@ -191,7 +205,7 @@ final class CreatureRespawnTests: XCTestCase {
         XCTAssertEqual(report.creaturesSpawned, 0)
         XCTAssertGreaterThan(report.ambientSpawned, 0)
         XCTAssertEqual(world.creatureRespawnSequence, 0)
-        XCTAssertLessThanOrEqual(report.candidateAttempts, 64, "empty land roster spends no attempts")
+        XCTAssertLessThanOrEqual(report.candidateAttempts, 128, "empty land roster spends no attempts")
         XCTAssertTrue(world.entities.compactMap { $0 as? PrehistoricCreature }.allSatisfy {
             PrehistoricWorldProfile.ancientSeas.creatureIDs.contains($0.type) && $0.definition.medium != .land
         })
@@ -202,7 +216,7 @@ final class CreatureRespawnTests: XCTestCase {
         player.setPos(0.5, 80, 0.5)
         var rng = RandomX(0x5EA)
         let report = replenishCreaturesAtDawn(world, [player], &rng)
-        XCTAssertEqual(report.waterSpawned, 5)
+        XCTAssertEqual(report.waterSpawned, 10)
         XCTAssertEqual(report.creaturesSpawned, 0)
         XCTAssertEqual(report.ambientSpawned, 0)
         let allowed = prehistoricSpawnEntries(profile: .ancientSeas, category: "water").map(\.mob)
@@ -244,7 +258,7 @@ final class CreatureRespawnTests: XCTestCase {
         let report = replenishCreaturesAtDawn(world, [player], &rng)
         let duration = start.duration(to: .now)
         print("[creature-respawn] refusal-heavy dawn: \(report.candidateAttempts) candidates, \(report.siteAdmissionChecks) admission checks, \(duration)")
-        XCTAssertEqual(report.candidateAttempts, 128)
+        XCTAssertEqual(report.candidateAttempts, 256)
         XCTAssertGreaterThan(report.siteAdmissionChecks, 32)
         XCTAssertEqual(report.totalSpawned, 0)
         XCTAssertEqual(world.creatureRespawnSequence, 1)
@@ -278,7 +292,7 @@ final class CreatureRespawnTests: XCTestCase {
         let report = replenishCreaturesAtDawn(world, [player], &rng)
         XCTAssertGreaterThan(report.creaturesSpawned, 0,
                              "far loaded dinosaurs must not occupy the region's refill vacancies")
-        XCTAssertLessThanOrEqual(report.creaturesSpawned, 18)
+        XCTAssertLessThanOrEqual(report.creaturesSpawned, 48)
         let parkedIDs = Set(parked.map(\.id))
         let births = world.entities.compactMap { $0 as? PrehistoricCreature }
             .filter { !parkedIDs.contains($0.id) && $0.definition.medium == .land }
@@ -287,14 +301,14 @@ final class CreatureRespawnTests: XCTestCase {
             let dx = birth.x - player.x, dz = birth.z - player.z
             let horizontal = (dx * dx + dz * dz).squareRoot()
             XCTAssertGreaterThanOrEqual(horizontal, 23, "births stay outside the 24-block player margin")
-            XCTAssertLessThanOrEqual(horizontal, 105, "births come from the 24...104-block sampling ring")
+            XCTAssertLessThanOrEqual(horizontal, 122, "births come from the sampling ring plus the 12-block pod offset")
         }
     }
 
     func testLocalPrehistoricPopulationStillFillsTheCap() throws {
         let (world, player) = fixture(.prehistoricLostWorldV3)
         let dryosaurus = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.dryosaurus"))
-        for index in 0..<18 {
+        for index in 0..<48 {
             let creature = PrehistoricCreature(world: world, definition: dryosaurus)
             // Right at the census edge, inside the radius on the diagonal.
             let offset = PREHISTORIC_DAWN_CENSUS_RADIUS / 2.0.squareRoot() - 1 - Double(index % 3)
@@ -371,7 +385,7 @@ final class CreatureRespawnTests: XCTestCase {
                              "the two players' regions must not overlap the census radius")
 
         let dryosaurus = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.dryosaurus"))
-        for index in 0..<18 {
+        for index in 0..<48 {
             let creature = PrehistoricCreature(world: world, definition: dryosaurus)
             creature.setPos(playerA.x + Double(index % 6), 64, playerA.z)
             world.addEntity(creature)

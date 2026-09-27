@@ -328,7 +328,12 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # bac98960847ed8da6628ac5f54aa25568f6362a36db4189347b7b1ba02d098f2 for one line: precipitation
 # particles ask World.precipitationIsSnow, so a v4 world rains instead of snowing. No SQL, storage
 # API, Saves codec or player-record access changes; see docs/PREHISTORIC_WORLDS.md.
-EXPECTED_GAME_CORE_SOURCE_SHA256='f364c3adc7757a4ed725f0e5b85d5a6cbc330ab02d3bfbd5316e6761a8629eab'
+# Dinosaur population/pod admission (September 27, 2026): GameCore only stages
+# admitted generated pods before spawn publication. Storage/CAS callers and APIs
+# are unchanged; Core and both linked products move with the gameplay changes.
+# Normalized Storage/TextInput objects remain byte-identical. See
+# docs/dinosaur-populations.md for runtime, regression and pin evidence.
+EXPECTED_GAME_CORE_SOURCE_SHA256='3262a3e6a8d751eb3163bec26f0e5ce0e2515428d0989e5330b9bb0c77ca7ca0'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -393,7 +398,7 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='f364c3adc7757a4ed725f0e5b85d5a6cbc330ab02d3bfb
 # warm-biome remap, skipped snow pass, PrehistoricVolcanoSiting, World.precipitationIsSnow and the
 # AI placement search (ring sweep, open-sky rule, mixed groups, placement budget). Disposable-copy
 # strip -S -x keeps ElysiumStorage.o and ElysiumTextInput.o byte-identical.
-EXPECTED_CORE_OBJECT_SHA256='6250f2763c4dbaff39f579725b1f6b184ee8b84971d2c4145429a3dbb9434b2c'
+EXPECTED_CORE_OBJECT_SHA256='ebc0186e079acace627813835fee69135d310de9bd47bc50d1052fe0b06c6698'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -434,8 +439,8 @@ EXPECTED_CORE_OBJECT_SHA256='6250f2763c4dbaff39f579725b1f6b184ee8b84971d2c414542
 # The same Core change renews the linked products from 561430af23190308b2b32a1fc6bbb5884de97651923dda68f83009da1911689d
 # (Elysium) and 47973dfa8d0fae05554f331bb16ef34acdda2a965da4ecc7bd2d2dab53b03927 (elysmoke), built
 # warning-free in this checkout; no app-target source changed.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='8b02fa857626d8295b1e1368b65e5574a617a8f56dc610155ed87236f9a47dcd'
-EXPECTED_SMOKE_PRODUCT_SHA256='34ccc6d8860774ef91903c409355466c9d4931ff888b940504f06db42d96d8ee'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='912319da853bb83d1464acbce5b0b783f4d18a630a3f8a204566f57efea4bb3c'
+EXPECTED_SMOKE_PRODUCT_SHA256='b0ae954aee93e6dc893fe8efeb52b710ecda4900eea7c9ac18f96e38925d6f86'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
