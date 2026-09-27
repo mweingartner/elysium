@@ -153,20 +153,28 @@ final class AIAgentAreaSpawnTerrainTests: XCTestCase {
         }
     }
 
-    func testPlacementWorkIsBoundedWhenNothingFits() throws {
-        // A Brachiosaurus cannot fit a two-block-high crawlspace, so every search fails.
-        let world = sealedCaveWorld(ceiling: 51)
-        let budget = AIAgentPlacementBudget()
-        XCTAssertThrowsError(try spawnedCreatures("8 brachiosaurus", in: world, at: (0.5, 50, 0.5), budget: budget)) {
-            guard case .areaSpawnFailed? = $0 as? AIAgentError else { return XCTFail("\($0)") }
+    func testPlacementWorkStopsAtItsBudgetWhenNothingFits() throws {
+        // A Brachiosaurus cannot fit a two-block-high crawlspace, so every search fails and
+        // only the budget ends the work early. One check never charges more than a
+        // sauropod's clearance envelope or one full column scan.
+        let slack = 13 * 13 * 7 + 400
+        for limit in [1_000, 25_000, 400_000] {
+            let budget = AIAgentPlacementBudget(limit: limit)
+            XCTAssertThrowsError(try spawnedCreatures("8 brachiosaurus", in: sealedCaveWorld(ceiling: 51),
+                                                      at: (0.5, 50, 0.5), budget: budget)) {
+                guard case .areaSpawnFailed? = $0 as? AIAgentError else { return XCTFail("\($0)") }
+            }
+            XCTAssertTrue(budget.exhausted, "limit \(limit)")
+            XCTAssertLessThanOrEqual(budget.spent, limit + slack, "limit \(limit) overshot")
         }
-        XCTAssertLessThanOrEqual(budget.spent, budget.limit + 1_000, "one request stays within its placement budget")
-
-        // A tight budget stops the search early instead of scanning on.
-        let tight = AIAgentPlacementBudget(limit: 2_000)
-        _ = try? spawnedCreatures("8 brachiosaurus", in: sealedCaveWorld(ceiling: 51), at: (0.5, 50, 0.5), budget: tight)
-        XCTAssertTrue(tight.exhausted)
-        XCTAssertLessThanOrEqual(tight.spent, tight.limit + 1_000)
+        // Sea reptiles on dry ground: every column's seabed scan is charged as well.
+        let marine = AIAgentPlacementBudget(limit: 5_000)
+        XCTAssertThrowsError(try spawnedCreatures("8 mosasaurus", in: syntheticWorld { _, _, _ in },
+                                                  at: (0.5, 64, 0.5), budget: marine))
+        XCTAssertTrue(marine.exhausted)
+        XCTAssertLessThanOrEqual(marine.spent, marine.limit + slack)
+        // Requests from chat use the production limit.
+        XCTAssertEqual(AIAgentPlacementBudget().limit, AIAgentAreaSpawnPlacementBudget)
     }
 
     func testVariousDinosaursNearMeSucceedsOnRealRuggedAndWoodedTerrain() throws {

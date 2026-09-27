@@ -19,9 +19,10 @@ public let AIAgentAreaSpawnMaxPerItem = 8
 let AIAgentAreaSpawnSiteAttempts = 24
 /// Blocks above or below the player's feet that a land creature's standing cell may be.
 let AIAgentAreaSpawnVerticalReach = 24
-/// Placement work one area-spawn request may do (see `AIAgentPlacementBudget`). The
-/// heaviest request measured on real and adversarial terrain spent about 13 million.
-let AIAgentAreaSpawnPlacementBudget = 40_000_000
+/// Placement work one area-spawn request may do (see `AIAgentPlacementBudget`). The heaviest
+/// requests measured spent about 33 million on real terrain and 91 million on adversarial
+/// terrain, each under 0.4 s in a debug build, so the cap only stops unforeseen runaways.
+let AIAgentAreaSpawnPlacementBudget = 120_000_000
 /// Boss-tier mobs are summoned only where the player deliberately aims (the
 /// cursor), never scattered around the player by an area request.
 let AIAgentAreaSpawnExcludedEntities: Set<String> = ["wither", "ender_dragon", "warden", "elder_guardian"]
@@ -344,12 +345,15 @@ private func aiAgentAreaSpawnY(_ world: World, _ entity: String, _ x: Int, _ z: 
                                pass: AIAgentPlacementPass, budget: AIAgentPlacementBudget) -> Int? {
     guard !budget.exhausted else { return nil }
     let lowest = world.info.minY + 1, highest = world.info.minY + world.info.height - 2
-    let clearance = PrehistoricCreatureDefinition.named(entity)?.bodyClearanceRadius ?? 0
-    let validityCost = (2 * clearance + 1) * (2 * clearance + 1) * 2
+    // One validity check reads the body's whole clearance envelope.
+    let definition = PrehistoricCreatureDefinition.named(entity)
+    let footprint = 2 * (definition?.bodyClearanceRadius ?? 0) + 1
+    let validityCost = footprint * footprint * max(2, definition?.bodyClearanceHeight ?? 2)
     switch spawnPlacementMedium(forMob: entity) {
     case .water:
         // Start at the seabed and rise through the water column until the body fits.
         let floor = world.surfaceY(x, z)
+        budget.charge(world.info.minY + world.info.height - floor)
         for y in floor..<(floor + 8) where y >= lowest && y <= highest {
             guard !budget.exhausted else { return nil }
             budget.charge(validityCost)
@@ -456,7 +460,7 @@ func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: Int?, ra
     // as in the starter hut, gets company outside at or below their own floor, never on the
     // roof over them; only when nothing open is in reach, such as deep in a cave, does a
     // second pass use covered ground.
-    let playerCovered = !aiAgentOpenToSky(world, ifloor(player.x), ifloor(player.y), ifloor(player.z))
+    let playerCovered = !aiAgentOpenToSky(world, ifloor(player.x), ifloor(player.y), ifloor(player.z), budget: budget)
     let passes = playerCovered
         ? [AIAgentPlacementPass(allowCovered: false, maxRise: 2),
            AIAgentPlacementPass(allowCovered: true, maxRise: AIAgentAreaSpawnVerticalReach)]
