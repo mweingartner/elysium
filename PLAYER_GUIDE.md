@@ -986,10 +986,14 @@ that's still thinking.
 The AI can summon any dinosaur, pterosaur or marine reptile by name, including nicknames such as
 "T. rex", "raptor" or "trike": `/ai summon a triceratops at the cursor`. To populate the area around
 you, name groups or species: `/ai spawn some predators and herbivores in my area`,
-`/ai spawn 2 raptors and a stegosaurus around me`, or `/ai spawn some dinosaurs`. Elysium picks a
-random amount of each group, species from your map's roster, and safe spots between about 8 and 28
-blocks away (predators a little farther out), up to 16 creatures per request; land creatures never go
-into water and sea reptiles only into it. Bosses such as the Wither or Warden can only be summoned where you aim,
+`/ai spawn 2 raptors and a stegosaurus around me`, or `/ai spawn various dinosaurs near me`. Elysium
+picks a random amount of each group, species from your map's roster, and safe spots between about 8 and
+28 blocks away (predators a little farther out), up to 16 creatures per request. Asking for "various",
+"assorted", "mixed", or "all kinds of" creatures brings several species rather than one big pack. On
+rugged or wooded ground it searches farther, up to about 48 blocks, and swaps in smaller species when a
+large one has no room; if some still find no spot, the reply says how many. When you are outdoors,
+creatures land under open sky (tree cover is fine) rather than in caves below you. Land creatures never
+go into water and sea reptiles only into it. Bosses such as the Wither or Warden can only be summoned where you aim,
 never scattered around you. These spawns run for the host player; a LAN guest's `/ai`
 request goes to the scripting assistant, which cannot spawn creatures.
 

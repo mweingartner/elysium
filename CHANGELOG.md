@@ -10,6 +10,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   Small surface volcanoes are roughly twenty times as common. Existing v1-v3 dinosaur maps keep
   their original terrain and climate.
 
+- `/ai spawn various dinosaurs near me` works on rugged, wooded, and coastal ground: placement
+  searches farther, spaces large bodies, falls back to smaller species, keeps an outdoor player's
+  creatures under open sky, and "various" brings a mix of species.
+
 - Bumped the release and exact-LAN-compatibility version to 1.3.0 for four
   versioned **Prehistoric Worlds** profiles. They add a 36-creature native
   roster, profile-bound terrain and population, and preserve normal saves while

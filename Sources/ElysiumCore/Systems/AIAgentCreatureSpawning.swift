@@ -8,11 +8,14 @@ import Foundation
 
 /// Largest horizontal radius around the player an area spawn may use.
 public let AIAgentMaxAreaSpawnRadius = 32
+/// When nothing fits inside the requested radius (steep peaks, a small island), the
+/// site search keeps sweeping outward to this distance before giving up.
+public let AIAgentAreaSpawnFallbackRadius = 48
 /// Most groups or species one area request may name.
 public let AIAgentAreaSpawnMaxItems = 4
 /// Most creatures one named group or species contributes.
 public let AIAgentAreaSpawnMaxPerItem = 8
-/// Candidate sites tried per pack before it is reported as unplaced.
+/// Random candidate sites tried per pack before the deterministic ring sweep.
 let AIAgentAreaSpawnSiteAttempts = 24
 /// Boss-tier mobs are summoned only where the player deliberately aims (the
 /// cursor), never scattered around the player by an area request.
@@ -109,6 +112,17 @@ public enum AIAgentCreatureGroup: String, CaseIterable, Sendable {
         return aliases[name]
     }
 
+    /// "1 predator" rather than "1 predators".
+    public var singularName: String {
+        switch self {
+        case .predators: return "predator"
+        case .herbivores: return "herbivore"
+        case .dinosaurs: return "dinosaur"
+        case .flyers: return "pterosaur"
+        case .marineReptiles: return "marine reptile"
+        }
+    }
+
     public var displayName: String {
         switch self {
         case .predators: return "predators"
@@ -160,16 +174,29 @@ public struct AIAgentSpawnRequest: Equatable, Sendable {
     }
     public let subject: Subject
     public let count: Int?
+    /// The player asked for a mix ("various dinosaurs"): a group then spreads
+    /// across several species instead of one large pack.
+    public let mixed: Bool
+
+    public init(subject: Subject, count: Int?, mixed: Bool = false) {
+        self.subject = subject
+        self.count = count
+        self.mixed = mixed
+    }
 }
 
 private let aiAgentSpawnSeparatorWords: Set<String> = ["and", "plus", "with", "also", "then"]
 /// Quantity words that mean "the engine picks how many".
 private let aiAgentVagueQuantityWords: Set<String> = [
     "some", "few", "several", "bunch", "lots", "lot", "many", "random", "number", "amount",
-    "group", "herd", "pack", "flock", "school", "pod", "handful", "more", "extra", "various",
+    "group", "herd", "pack", "flock", "school", "pod", "handful", "more", "extra",
+]
+/// Words asking for a mix of species; they also leave the amount to the engine.
+private let aiAgentVarietyWords: Set<String> = [
+    "various", "assorted", "mixed", "different", "diverse", "varied", "variety", "kinds", "sorts", "types",
 ]
 /// Filler words that never name a creature.
-private let aiAgentSpawnFillerWords: Set<String> = ["a", "an", "the", "of", "any", "kind", "kinds", "type", "types"]
+private let aiAgentSpawnFillerWords: Set<String> = ["a", "an", "the", "of", "any", "all", "kind", "type", "sort"]
 private let aiAgentExactQuantityWords: [String: Int] = ["couple": 2, "pair": 2, "dozen": 12]
 
 /// Splits a request such as "some predators and herbivores" or "2 raptors, a t-rex"
@@ -181,7 +208,8 @@ public func parseAIAgentSpawnList(_ raw: String) throws -> [AIAgentSpawnRequest]
     var segments: [[String]] = [[]]
     func hasName(_ segment: [String]) -> Bool {
         segment.contains { word in
-            !aiAgentVagueQuantityWords.contains(word) && !aiAgentSpawnFillerWords.contains(word)
+            !aiAgentVagueQuantityWords.contains(word) && !aiAgentVarietyWords.contains(word)
+                && !aiAgentSpawnFillerWords.contains(word)
                 && aiAgentExactQuantityWords[word] == nil && spelledAIAgentNumber(word) == nil && Int(word) == nil
         }
     }
@@ -202,6 +230,7 @@ public func parseAIAgentSpawnList(_ raw: String) throws -> [AIAgentSpawnRequest]
     return try segments.map { segment in
         var count: Int?
         var vague = false
+        var mixed = false
         var sawArticle = false
         var nameWords: [String] = []
         for word in segment {
@@ -210,6 +239,7 @@ public func parseAIAgentSpawnList(_ raw: String) throws -> [AIAgentSpawnRequest]
             if word == "a" || word == "an" { sawArticle = true; continue }
             if let spelled = spelledAIAgentNumber(word) { count = spelled; continue }
             if aiAgentVagueQuantityWords.contains(word) { vague = true; continue }
+            if aiAgentVarietyWords.contains(word) { vague = true; mixed = true; continue }
             if aiAgentSpawnFillerWords.contains(word) { continue }
             nameWords.append(word)
         }
@@ -223,12 +253,12 @@ public func parseAIAgentSpawnList(_ raw: String) throws -> [AIAgentSpawnRequest]
                 ("school", .marineReptiles),
             ]
             if let group = collectives.first(where: { segment.contains($0.0) })?.1 {
-                return AIAgentSpawnRequest(subject: .group(group), count: count)
+                return AIAgentSpawnRequest(subject: .group(group), count: count, mixed: mixed)
             }
             throw AIAgentError.missingEntity
         }
         if let group = AIAgentCreatureGroup.named(phrase) {
-            return AIAgentSpawnRequest(subject: .group(group), count: count)
+            return AIAgentSpawnRequest(subject: .group(group), count: count, mixed: mixed)
         }
         guard let entity = resolveAIAgentEntityName(phrase) else { throw AIAgentError.unknownEntity(phrase) }
         guard !AIAgentAreaSpawnExcludedEntities.contains(entity) else { throw AIAgentError.areaSpawnNotAllowed(entity) }
@@ -259,12 +289,28 @@ private struct AIAgentSpawnTally {
     var summary: String {
         guard let group else { return "\(placed) \(label)" }
         let species = bySpecies.map { $0.count > 1 ? "\($0.count) \($0.name)" : $0.name }.joined(separator: ", ")
-        return "\(placed) \(group.displayName) (\(species))"
+        return "\(placed) \(placed == 1 ? group.singularName : group.displayName) (\(species))"
     }
 }
 
+/// Whether nothing but tree canopy or trunks stands above feet cell (x, y, z).
+private func aiAgentOpenToSky(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+    let top = world.heightAt(x, z)
+    guard top >= y else { return true }
+    for cy in y...top {
+        let id = world.getBlock(x, cy, z) >> 4
+        if id > 0, id < blockDefs.count, blockDefs[id].solid, !isTreeCanopyOrTrunk(blockDefs[id].name) { return false }
+    }
+    return true
+}
+
 /// The feet cell to put `entity` at in column (x, z), or nil when the column has none.
-private func aiAgentAreaSpawnY(_ world: World, _ entity: String, _ x: Int, _ z: Int) -> Int? {
+/// Land bodies use the admitted standing cell nearest the player's own height, so a
+/// forest floor under the canopy counts, not only the topmost ground. Unless the player
+/// is under cover themselves, that cell must be open to the sky: a creature sealed in a
+/// cave below an outdoor player would be out of sight and out of reach.
+private func aiAgentAreaSpawnY(_ world: World, _ entity: String, _ x: Int, _ z: Int, nearY: Int,
+                               allowRoofed: Bool) -> Int? {
     let lowest = world.info.minY + 1, highest = world.info.minY + world.info.height - 2
     switch spawnPlacementMedium(forMob: entity) {
     case .water:
@@ -275,9 +321,16 @@ private func aiAgentAreaSpawnY(_ world: World, _ entity: String, _ x: Int, _ z: 
         }
         return nil
     case .land, .amphibious, .object:
-        guard let y = world.dryGroundY(x, z), y >= lowest, y <= highest,
-              spawnPlacementIsValid(world, entity, x, y, z) else { return nil }
-        return y
+        for distance in 0...24 {
+            for y in distance == 0 ? [nearY] : [nearY - distance, nearY + distance] where y >= lowest && y <= highest {
+                let ground = world.getBlock(x, y - 1, z) >> 4
+                guard ground > 0, ground < blockDefs.count, blockDefs[ground].solid,
+                      !isTreeCanopyOrTrunk(blockDefs[ground].name) else { continue }
+                if spawnPlacementIsValid(world, entity, x, y, z),
+                   allowRoofed || aiAgentOpenToSky(world, x, y, z) { return y }
+            }
+        }
+        return nil
     }
 }
 
@@ -291,11 +344,54 @@ private func aiAgentSpawnAt(_ world: World, _ entity: String, _ x: Int, _ y: Int
                     SpawnOpts(persistent: true, prehistoricSeedSalt: salt))
 }
 
-/// Offsets for a pack around its anchor, nearest first, in a fixed order.
-private let aiAgentPackOffsets: [(Int, Int)] = [
-    (0, 0), (3, 0), (0, 3), (-3, 0), (0, -3), (3, 3), (-3, 3), (3, -3), (-3, -3),
-    (6, 0), (0, 6), (-6, 0), (0, -6), (6, 3), (-6, 3), (6, -3), (-6, -3),
-]
+/// Blocks kept between two creatures of one request, so large bodies do not overlap.
+private func aiAgentPackSpacing(_ entity: String) -> Int {
+    max(3, (PrehistoricCreatureDefinition.named(entity)?.bodyClearanceRadius ?? 1) + 2)
+}
+
+/// Offsets for a pack around its anchor: square rings `spacing` apart, nearest first.
+private func aiAgentPackOffsets(spacing: Int) -> [(Int, Int)] {
+    var offsets: [(Int, Int)] = [(0, 0)]
+    for ring in 1...3 {
+        for j in -ring...ring {
+            for i in -ring...ring where max(abs(i), abs(j)) == ring {
+                offsets.append((i * spacing, j * spacing))
+            }
+        }
+    }
+    return offsets
+}
+
+/// A column around the player where `entity` fits, clear of creatures this request
+/// already placed. Random draws in the ring come first; if they all fail, a sweep of
+/// rings every three blocks still finds a site on rugged or wooded ground.
+private func aiAgentAreaAnchor(_ world: World, _ player: Player, _ entity: String, minDistance: Double,
+                               radius: Double, occupied: [(x: Int, z: Int)], spacing: Int,
+                               allowRoofed: Bool) -> (x: Int, z: Int)? {
+    func admits(_ x: Int, _ z: Int) -> Bool {
+        guard world.isLoadedAt(x, z),
+              !occupied.contains(where: { abs($0.x - x) < spacing && abs($0.z - z) < spacing }) else { return false }
+        return aiAgentAreaSpawnY(world, entity, x, z, nearY: ifloor(player.y), allowRoofed: allowRoofed) != nil
+    }
+    for _ in 0..<AIAgentAreaSpawnSiteAttempts {
+        let distance = minDistance + world.rng.nextFloat() * (radius - minDistance)
+        let angle = world.rng.nextFloat() * .pi * 2
+        let x = ifloor(player.x + detCos(angle) * distance), z = ifloor(player.z + detSin(angle) * distance)
+        if admits(x, z) { return (x, z) }
+    }
+    let start = world.rng.nextFloat() * .pi * 2
+    var distance = minDistance
+    while distance <= max(radius, Double(AIAgentAreaSpawnFallbackRadius)) {
+        let steps = max(8, Int((2 * .pi * distance / 3).rounded(.up)))
+        for step in 0..<steps {
+            let angle = start + Double(step) / Double(steps) * .pi * 2
+            let x = ifloor(player.x + detCos(angle) * distance), z = ifloor(player.z + detSin(angle) * distance)
+            if admits(x, z) { return (x, z) }
+        }
+        distance += 3
+    }
+    return nil
+}
 
 /// Populates the area around `player` with the named groups or species. Counts not
 /// given are random within each group's range; species, sites and pack sizes come
@@ -307,6 +403,9 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
     var remaining = AIAgentMaxSpawnCount
     var serial = 0
     var tallies: [AIAgentSpawnTally] = []
+    var occupied: [(x: Int, z: Int)] = []
+    // A player in a cave or under a roof gets company there; outdoors, creatures stay under the sky.
+    let allowRoofed = !aiAgentOpenToSky(world, ifloor(player.x), ifloor(player.y), ifloor(player.z))
 
     for request in requests where remaining > 0 {
         let explicit = requests.count == 1 ? (request.count ?? requestedCount) : request.count
@@ -332,6 +431,9 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
         remaining -= planned
         tally.planned = planned
 
+        // A mixed group takes at most half its creatures from any one pack.
+        let packCap = request.mixed ? max(1, (planned + 1) / 2) : planned
+        var usedSpecies: [String] = []
         var left = planned
         while left > 0 {
             // Choose this pack's species and size.
@@ -346,37 +448,62 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
                     let side = pool.filter { wantHerbivore ? $0.isLandHerdHerbivore : $0.isLandPredator }
                     if !side.isEmpty { candidates = side }
                 }
+                if request.mixed {
+                    let fresh = candidates.filter { !usedSpecies.contains($0.id) }
+                    if !fresh.isEmpty { candidates = fresh }
+                }
                 let species = world.rng.pickWeighted(candidates) { $0.spawnWeight }
                 entity = species.id
                 let low = max(1, species.minPack), high = max(low, species.maxPack)
-                packSize = min(left, world.rng.nextIntBetween(low, high))
+                packSize = min(left, packCap, world.rng.nextIntBetween(low, high))
             case .entity(let id):
                 entity = id
             }
-            let predator = PrehistoricCreatureDefinition.named(entity)?.isPredatory == true
-            // Keep predators a little farther out than grazers.
-            let minDistance = min(radius - 4, predator ? 14.0 : 8.0)
-            var anchor: (x: Int, z: Int)?
-            for _ in 0..<AIAgentAreaSpawnSiteAttempts {
-                let distance = minDistance + world.rng.nextFloat() * (radius - minDistance)
-                let angle = world.rng.nextFloat() * .pi * 2
-                let x = ifloor(player.x + detCos(angle) * distance)
-                let z = ifloor(player.z + detSin(angle) * distance)
-                guard world.isLoadedAt(x, z), aiAgentAreaSpawnY(world, entity, x, z) != nil else { continue }
-                anchor = (x, z)
-                break
+            // A group falls back to its smaller-bodied species when the chosen one does not fit
+            // anywhere nearby (a mix tries species it has not used yet first); an explicitly
+            // named species is never swapped.
+            var speciesOrder = [entity]
+            if case .group(let group) = request.subject {
+                let chosen = entity
+                func fallbackRank(_ item: (offset: Int, element: PrehistoricCreatureDefinition)) -> (Int, Int, Int) {
+                    (request.mixed && usedSpecies.contains(item.element.id) ? 1 : 0,
+                     item.element.bodyClearanceRadius, item.offset)
+                }
+                speciesOrder += pool.enumerated()
+                    .filter { $0.element.id != chosen }
+                    .sorted { fallbackRank($0) < fallbackRank($1) }
+                    .prefix(request.mixed ? 3 : 2).map(\.element.id)
+                // With only water in reach, "dinosaurs" still brings the prehistoric sea's smallest reptile.
+                if group == .dinosaurs, let swimmer = AIAgentCreatureGroup.marineReptiles.pool(for: world)
+                    .enumerated().min(by: { ($0.element.bodyClearanceRadius, $0.offset) < ($1.element.bodyClearanceRadius, $1.offset) }) {
+                    speciesOrder.append(swimmer.element.id)
+                }
             }
-            if let anchor {
-                var placedInPack = 0
-                for (dx, dz) in aiAgentPackOffsets where placedInPack < packSize {
-                    let x = anchor.x + dx, z = anchor.z + dz
-                    let ddx = Double(x) + 0.5 - player.x, ddz = Double(z) + 0.5 - player.z
-                    guard ddx * ddx + ddz * ddz >= minDistance * minDistance * 0.5,
-                          world.isLoadedAt(x, z), let y = aiAgentAreaSpawnY(world, entity, x, z) else { continue }
-                    serial += 1
-                    if aiAgentSpawnAt(world, entity, x, y, z, serial: serial) != nil {
-                        tally.record(entity)
-                        placedInPack += 1
+            var remainingInPack = packSize
+            for species in speciesOrder where remainingInPack > 0 {
+                let predator = PrehistoricCreatureDefinition.named(species)?.isPredatory == true
+                // Keep predators a little farther out than grazers.
+                let minDistance = min(radius - 4, predator ? 14.0 : 8.0)
+                let spacing = aiAgentPackSpacing(species)
+                // A pack that did not fully fit may start again at a second site.
+                for _ in 0..<2 where remainingInPack > 0 {
+                    guard let anchor = aiAgentAreaAnchor(world, player, species, minDistance: minDistance, radius: radius,
+                                                         occupied: occupied, spacing: spacing,
+                                                         allowRoofed: allowRoofed) else { break }
+                    for (dx, dz) in aiAgentPackOffsets(spacing: spacing) where remainingInPack > 0 {
+                        let x = anchor.x + dx, z = anchor.z + dz
+                        let ddx = Double(x) + 0.5 - player.x, ddz = Double(z) + 0.5 - player.z
+                        guard ddx * ddx + ddz * ddz >= minDistance * minDistance * 0.5, world.isLoadedAt(x, z),
+                              !occupied.contains(where: { abs($0.x - x) < spacing && abs($0.z - z) < spacing }),
+                              let y = aiAgentAreaSpawnY(world, species, x, z, nearY: ifloor(player.y),
+                                                        allowRoofed: allowRoofed) else { continue }
+                        serial += 1
+                        if aiAgentSpawnAt(world, species, x, y, z, serial: serial) != nil {
+                            tally.record(species)
+                            occupied.append((x, z))
+                            remainingInPack -= 1
+                            if !usedSpecies.contains(species) { usedSpecies.append(species) }
+                        }
                     }
                 }
             }
@@ -392,7 +519,8 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
     let planned = tallies.reduce(0) { $0 + $1.planned }
     var message = "Spawned " + tallies.filter { $0.placed > 0 }.map(\.summary).joined(separator: " and ") + " around you."
     if planned > placed {
-        message += " \(planned - placed) found no safe spot nearby."
+        let missing = planned - placed
+        message += " \(missing) more found no safe spot nearby."
     }
     return AIAgentExecutionResult(message: message, changedWorld: true)
 }
