@@ -4603,7 +4603,7 @@ public final class GameCore {
                 let top = Double(w.heightAt(bx, bz) + 1)
                 if top > p.y + 14 || top < p.y - 20 { continue }
                 let biome = w.biomeAt(bx, ifloor(p.y), bz)
-                if snowsAt(biome, Int(top)) {
+                if w.precipitationIsSnow(biome: biome, y: Int(top)) {
                     host?.spawnPrecipitation("snow", x, p.y + 8 + Double.random(in: 0..<4), z, 0)
                 } else if (BIOMES[biome]?.downfall ?? 1) > 0.05 {
                     host?.spawnPrecipitation("rain", x, top + 4 + Double.random(in: 0..<8), z, top)

@@ -381,6 +381,26 @@ public func selectBiome(_ cl: Climate) -> Biome {
     return rare > 0.7 ? .bambooJungle : .jungle
 }
 
+/// Warm-climate prehistoric worlds (v4+) never generate a snow or ice
+/// section. Every biome that carries snow cover, frozen water, or an ice
+/// feature becomes its nearest warm counterpart. This remaps the *selected*
+/// biome rather than the climate input because the high-peak family
+/// (`jaggedPeaks`/`frozenPeaks`) is chosen from erosion and peaks-valleys
+/// alone, independent of temperature.
+public func prehistoricWarmBiome(_ biome: Biome) -> Biome {
+    switch biome {
+    case .frozenOcean: return .ocean
+    case .deepFrozenOcean: return .deepOcean
+    case .frozenRiver: return .river
+    case .snowyBeach: return .beach
+    case .snowyPlains, .iceSpikes: return .plains
+    case .snowyTaiga, .grove: return .taiga
+    case .snowySlopes: return .meadow
+    case .jaggedPeaks, .frozenPeaks: return .stonyPeaks
+    default: return biome
+    }
+}
+
 public func biomeDef(_ b: Int) -> BiomeDef {
     if b >= 0, b < BIOMES.count, let def = BIOMES[b] { return def }
     return BIOMES[Biome.plains.rawValue]!

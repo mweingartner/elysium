@@ -156,7 +156,7 @@ public func weatherRandomTick(_ world: World, _ x: Int, _ z: Int) {
     if world.rainLevel < 0.5 { return }
     let y = world.heightAt(x, z) + 1
     let biome = world.biomeAt(x, y, z)
-    if snowsAt(biome, y) {
+    if world.precipitationIsSnow(biome: biome, y: y) {
         let at = world.getBlock(x, y, z)
         let below = world.getBlock(x, y - 1, z)
         if at == 0 && (below >> 4) != 0 && blockDefs[below >> 4].fullCube {

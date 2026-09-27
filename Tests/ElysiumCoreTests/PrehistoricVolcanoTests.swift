@@ -181,6 +181,91 @@ final class PrehistoricVolcanoTests: XCTestCase {
         XCTAssertEqual(origins.first?.1, first.1)
     }
 
+    func testVersionThreeSitingIsFrozenWhileVersionFourIsDenser() throws {
+        let v3 = try XCTUnwrap(PrehistoricVolcanoSiting.forPreset(.prehistoricLostWorldV3))
+        XCTAssertEqual(v3.placement, StructurePlacement(spacing: 24, separation: 8))
+        XCTAssertEqual(v3.siteOffsets.map { [$0.x, $0.z] }, [[0, 0]])
+        XCTAssertEqual(v3.maxRelief, 6)
+        let v4 = try XCTUnwrap(PrehistoricVolcanoSiting.forPreset(.prehistoricLostWorldV4))
+        XCTAssertEqual(v4.placement, StructurePlacement(spacing: 12, separation: 4))
+        XCTAssertEqual(v4.siteOffsets.first.map { [$0.x, $0.z] }, [0, 0], "the centred site is tried first")
+        XCTAssertEqual(v4.maxRelief, 8)
+        XCTAssertNil(PrehistoricVolcanoSiting.forPreset(.prehistoricLostWorldV2))
+        XCTAssertNil(PrehistoricVolcanoSiting.forPreset(.normal))
+
+        // Every nearby site keeps the widest cone inside the two-chunk structure radius.
+        let def = prehistoricVolcanoStructureDefinition()
+        for offset in v4.siteOffsets {
+            for edge in [-14, 14] {
+                let x = CHUNK_W / 2 + offset.x + edge, z = CHUNK_W / 2 + offset.z + edge
+                XCTAssertTrue((-def.maxRadiusChunks...def.maxRadiusChunks).contains(floorDiv(x, CHUNK_W)))
+                XCTAssertTrue((-def.maxRadiusChunks...def.maxRadiusChunks).contains(floorDiv(z, CHUNK_W)))
+            }
+        }
+        for preset in [WorldPreset.prehistoricLostWorldV3, .prehistoricAncientSeasV4] {
+            let context = try XCTUnwrap(structurePlanningContext(seed: seed, dim: .overworld,
+                                                                 settings: .init(preset: preset)))
+            XCTAssertEqual(def.placement(context), PrehistoricVolcanoSiting.forPreset(preset)?.placement)
+        }
+    }
+
+    func testReliefLimitAdmitsAGentleSlopeOnlyWhenTheSitingAllowsIt() {
+        // Ground rises one block every three, an eight-block spread across the cone.
+        let slope: (Int, Int) -> ExactTerrainSurface? = { x, _ in
+            ExactTerrainSurface(feetY: 72 + floorDiv(x + 12, 3), isDry: true)
+        }
+        XCTAssertNil(planPrehistoricVolcano(seed: seed, x: 0, z: 0, radius: 12, height: 10, craterRadius: 3,
+                                            surfaceAt: slope, cellAt: { _, _, _ in Int(cell(B.stone)) }),
+                     "v3's six-block limit stays in force")
+        XCTAssertNotNil(planPrehistoricVolcano(seed: seed, x: 0, z: 0, radius: 12, height: 10, craterRadius: 3,
+                                               maxRelief: 8,
+                                               surfaceAt: slope, cellAt: { _, _, _ in Int(cell(B.stone)) }))
+    }
+
+    func testVersionFourRaisesManyMoreSurfaceVolcanoesOverTheSameGround() throws {
+        let def = prehistoricVolcanoStructureDefinition()
+        let sampleSeed: UInt32 = 0x5EED_0002
+        var admitted: [WorldPreset: [StructurePlan]] = [:]
+        for preset in [WorldPreset.prehistoricLostWorldV3, .prehistoricLostWorldV4] {
+            let context = try XCTUnwrap(structurePlanningContext(seed: sampleSeed, dim: .overworld,
+                                                                 settings: .init(preset: preset)))
+            let placement = try XCTUnwrap(def.placement(context))
+            let regions = 96 / placement.spacing  // the same 96x96-chunk ground for both lattices
+            var plans: [StructurePlan] = []
+            for rz in 0..<regions { for rx in 0..<regions {
+                let origin = structureOriginFor(def, placement: placement, seed: sampleSeed, regionX: rx, regionZ: rz)
+                guard let plan = getPlan(def, context, origin.0, origin.1),
+                      surfaceStructurePlanWins(def, plan, context, origin.0, origin.1,
+                                               collisionDefinitions: context.activeStructureDefinitions ?? [])
+                else { continue }
+                plans.append(plan)
+            } }
+            admitted[preset] = plans
+        }
+        let v3Count = admitted[.prehistoricLostWorldV3]?.count ?? 0
+        let v4Plans = admitted[.prehistoricLostWorldV4] ?? []
+        XCTAssertGreaterThanOrEqual(v4Plans.count, 12, "v4 must admit plenty of surface volcanoes")
+        XCTAssertGreaterThanOrEqual(v4Plans.count, 5 * max(v3Count, 1), "v3 \(v3Count), v4 \(v4Plans.count)")
+
+        // A v4 volcano still materializes as a dry cone holding only its crater pool.
+        let settings = WorldGenerationSettings(preset: .prehistoricLostWorldV4)
+        let bounds = try XCTUnwrap(v4Plans.first?.ref)
+        var lavaCount = 0
+        for cz in floorDiv(bounds.z0, CHUNK_W)...floorDiv(bounds.z1, CHUNK_W) {
+            for cx in floorDiv(bounds.x0, CHUNK_W)...floorDiv(bounds.x1, CHUNK_W) {
+                let chunk = generateChunk(.overworld, sampleSeed, cx, cz, settings: settings)
+                lavaCount += chunk.blocks.enumerated().filter { index, value in
+                    let y = GEN_MIN_Y + index / (CHUNK_W * CHUNK_W)
+                    let x = cx * CHUNK_W + index % CHUNK_W, z = cz * CHUNK_W + (index / CHUNK_W) % CHUNK_W
+                    return y >= bounds.y0 && y <= bounds.y1 && x >= bounds.x0 && x <= bounds.x1
+                        && z >= bounds.z0 && z <= bounds.z1 && value >> 4 == B.lava
+                }.count
+                XCTAssertTrue(chunk.structRefs.contains { $0.id == prehistoricVolcanoStructureID })
+            }
+        }
+        XCTAssertTrue([13, 29].contains(lavaCount), "only the contained crater pool should hold surface lava")
+    }
+
     func testProductionRegionEmitsACompleteDryVolcano() throws {
         let settings = WorldGenerationSettings(preset: .prehistoricLostWorldV3)
         let context = try XCTUnwrap(structurePlanningContext(seed: seed, dim: .overworld, settings: settings))

@@ -24,9 +24,9 @@ recordings.
 
 ## Player outcome
 
-World creation offers the current v3 revision of the four profiles alongside
+World creation offers the current v4 revision of the four profiles alongside
 the existing presets. Selecting one is persisted in the world record and
-changes only that new world's profile domain. Explicit v1 and v2 preset IDs remain
+changes only that new world's profile domain. Explicit v1, v2, and v3 preset IDs remain
 loadable with their original terrain and combat contract, but are not offered as a
 second set of duplicate create-world choices. Ancient Seas additionally applies a coast-heavy
 terrain treatment to its own continuous continentalness sample before terrain
@@ -46,10 +46,29 @@ deterministic starter shelter while keeping the ordered creature roster stable.
 It uses a distinct cache and LAN content identity; a v1 save continues to
 resolve to its v1 profile and cannot silently gain the new behavior. Historical
 unversioned import aliases retain their v1 meaning, while the create-world
-selector writes explicit v3 IDs. Version 3 retains v2's ecology and starter
+selector writes explicit v4 IDs. Version 3 retains v2's ecology and starter
 shelter while adding more caves, more inland underground lava areas, and rare
-small volcanoes with exposed crater lava. Version 1 and 2 terrain remains
-unchanged, including in newly explored chunks of those older worlds.
+small volcanoes with exposed crater lava. Version 4 keeps all of that, gives the
+map a warm climate with no snow or ice, and raises many more surface volcanoes.
+Version 1, 2, and 3 terrain remains unchanged, including in newly explored
+chunks of those older worlds.
+
+### Warm climate (v4)
+
+Dinosaur maps created as v4 never generate a snow or ice section. Surface-biome
+selection keeps the ordinary climate table, then replaces each cold result with
+its nearest warm counterpart (`prehistoricWarmBiome`): frozen and deep frozen
+oceans become ocean and deep ocean, frozen rivers become rivers, snowy beaches
+become beaches, snowy plains and ice spikes become plains, snowy taiga and
+groves become taiga, snowy slopes become meadow, and jagged or frozen peaks
+become stony peaks. The mapping acts on the selected biome rather than the
+climate input because the high-peak family is chosen from erosion and
+peaks-valleys alone. Terrain height is unchanged. Chunk generation also skips
+the altitude snow-and-ice pass, which would otherwise still cap high taiga and
+windswept hills, and weather in a v4 world rains instead of snowing, so it
+never layers snow or freezes still water. Only the deep-dark ancient city's
+ice-box room keeps its packed ice. v1-v3 maps keep their original climate,
+including in newly explored chunks, so they show no climate seams.
 
 ### Caves and volcanic terrain
 
@@ -62,12 +81,17 @@ islands rather than replacing its water with lava.
 Small volcanoes are occasional surface landmarks, not eruptions. They use
 existing rock blocks and contain exposed lava in a crater. A cone spans 21–29
 blocks and rises 8–11 blocks above the highest surveyed ground; its lava pool
-has a 2–3-block radius and a raised rock rim. Each 24×24-chunk region has one
-candidate, not one guaranteed volcano. Placement requires
+has a 2–3-block radius and a raised rock rim. In v3 each 24×24-chunk region
+has one centred candidate, not one guaranteed volcano. v4
+(`PrehistoricVolcanoSiting`) uses 12×12-chunk regions, tries the centre and then
+eight nearby sites 12 blocks away, and accepts up to eight blocks of ground
+relief instead of six. Across four sampled 96×96-chunk areas that raised the
+admitted volcanoes from 4 to 79 (about one per 21×21 chunks). Placement requires
 a dry, supported footprint and rejects unsuitable slopes, water, the entire
 starter shelter/grove neighborhood, and conflicts with existing structures.
 Trees and snow respect an accepted volcano's footprint. No volcanoes are added
-to v1/v2 worlds, ordinary presets, or the Nether. Saved full-block chunks are
+to v1/v2 worlds, ordinary presets, or the Nether, and v3 keeps its sparse
+lattice. Saved full-block chunks are
 never rewritten; v1/v2 also retain their original generator when unmodified
 chunks saved only as entity records are regenerated.
 
@@ -268,7 +292,7 @@ performance, and real-renderer acceptance work.
 Old world records with no prehistoric preset decode as normal worlds. New
 prehistory entity fields are optional, bounded, and ignored for unrelated
 entities. Explicit v1 and v2 identifiers and identities remain accepted for existing
-worlds; v3 identifiers select the current terrain and simulation contract. Unknown future
+worlds, as do v3 identifiers; v4 identifiers select the current terrain and simulation contract. Unknown future
 prehistoric preset IDs fail closed at save and LAN decode boundaries rather
 than being normalized to a normal world. LAN summaries carry both the
 normalized profile preset and its versioned content identity, so a joining

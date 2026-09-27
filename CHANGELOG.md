@@ -5,6 +5,11 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- New dinosaur maps (**v4** Lost World, Jurassic Giants, Cretaceous Frontiers, and Ancient Seas)
+  have a warm climate: no snow or ice generates anywhere, and weather rains instead of snowing.
+  Small surface volcanoes are roughly twenty times as common. Existing v1-v3 dinosaur maps keep
+  their original terrain and climate.
+
 - Bumped the release and exact-LAN-compatibility version to 1.3.0 for four
   versioned **Prehistoric Worlds** profiles. They add a 36-creature native
   roster, profile-bound terrain and population, and preserve normal saves while

@@ -41,7 +41,8 @@ requirements and installation, start with the [Elysium project overview](README.
    - **Single Biome** adds a separate **Biome** choice.
    - **Nether World** starts you in the Nether beside an active portal, with basic iron tools and oak logs.
    - **Lost World**, **Jurassic Giants**, **Cretaceous Frontiers**, and **Ancient Seas** offer prehistoric
-     wildlife, a supplied starter hut, extra caves and underground lava, and occasional small volcanoes.
+     wildlife, a supplied starter hut, extra caves and underground lava, a warm climate with no snow or
+     ice, and plenty of small surface volcanoes.
    - **Reality Derived** opens an interactive Arnis map. Search for a location, draw or resize a
      rectangle, leave **Include buildings** checked to import OpenStreetMap and supplemental Overture
      buildings or clear it to omit buildings, then choose **Generate Map**. Real terrain and other mapped
@@ -294,13 +295,15 @@ after a successful kill. Herds defend their members, but a predator that is badl
 already fed retreats and leaves herds alone for a while, and herds stop defending once it backs off, so
 neither side wipes the other out. Injured dinosaurs slowly heal when left alone.
 
-New dinosaur maps also have more underground caves and lava regions. Look for occasional small rocky
-volcanoes on dry land, with exposed lava inside their craters. They do not erupt, but their lava is still
+New dinosaur maps also have more underground caves and lava regions, and a warm climate: no snowfields,
+frozen lakes, or icy peaks, and rain never turns to snow. Small rocky volcanoes dot the dry land, roughly
+one every few hundred blocks, with exposed lava inside their craters. They do not erupt, but their lava is still
 dangerous—keep creatures and wooden builds away. Ancient Seas retains its oceans; volcanoes appear only
 where there is suitable dry land. The starter hut and its nearby trees are kept clear of volcanoes.
 
-These dinosaur terrain features belong to newly created **v3** maps. Existing v1/v2 dinosaur maps keep
-their original terrain even as you explore. Rich Resources improvements apply whenever terrain is
+These dinosaur terrain features belong to newly created **v4** maps. Existing v1-v3 dinosaur maps keep
+their original terrain and climate even as you explore, so an existing map keeps its snow and its rarer
+volcanoes; create a new map for the warm climate. Rich Resources improvements apply whenever terrain is
 generated, including previously explored, unmodified areas saved only as entity records. Chunks saved
 with their full block data remain intact, so boundaries can show a change in cave patterns.
 

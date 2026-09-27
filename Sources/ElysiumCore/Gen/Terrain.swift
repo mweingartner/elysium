@@ -162,7 +162,8 @@ public final class OverworldGen {
 
     private func terrainSurfaceBiome(_ cl: Climate) -> Biome {
         if settings.preset == .singleBiomeSurface { return settings.singleBiome }
-        return selectBiome(terrainClimate(cl))
+        let biome = selectBiome(terrainClimate(cl))
+        return settings.preset.supportsWarmClimate ? prehistoricWarmBiome(biome) : biome
     }
 
     private func terrainBaseHeight(_ cl: Climate) -> Double {

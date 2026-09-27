@@ -793,13 +793,17 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
         // the open body space of a planned village pen or stamp over a door,
         // road, or roof.  The same deterministic structure buffer used by
         // vegetation is authoritative for this final surface pass as well.
-        let snowExclusions = treeCanopyExclusions(forOriginChunk: cx, cz, context: ctx,
-                                                  structures: treeBlockingStructures,
-                                                  collisionDefinitions: overworldStructs)
-        gen.applySnowAndIce(cx, cz, &sink.blocks, base.surfaceBiomes,
-                            snowSiteAllowed: { x, z in
-                                !snowExclusions.contains { $0.contains(x, z) }
-                            })
+        // Warm-climate prehistoric worlds skip the pass entirely: altitude
+        // cooling would otherwise still cap high taiga and windswept hills.
+        if !settings.preset.supportsWarmClimate {
+            let snowExclusions = treeCanopyExclusions(forOriginChunk: cx, cz, context: ctx,
+                                                      structures: treeBlockingStructures,
+                                                      collisionDefinitions: overworldStructs)
+            gen.applySnowAndIce(cx, cz, &sink.blocks, base.surfaceBiomes,
+                                snowSiteAllowed: { x, z in
+                                    !snowExclusions.contains { $0.contains(x, z) }
+                                })
+        }
 
         // Version-two prehistoric maps own a physical first-night shelter.
         // Stamp only after every terrain, feature, and snow pass so no later

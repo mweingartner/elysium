@@ -17,10 +17,38 @@ func prehistoricVolcanoAvoidsShelter(x: Int, z: Int, radius: Int,
         || z - radius > shelter.z + protectedRadius
 }
 
+/// Where a region's surface volcano may stand. v3's sparse lattice, single
+/// centred site, and six-block relief limit are frozen for saved worlds. v4
+/// ("more surface volcanoes") halves the lattice spacing, which quadruples the
+/// candidate regions, and tries nearby ground before giving a region up.
+struct PrehistoricVolcanoSiting {
+    let placement: StructurePlacement
+    /// Offsets from the origin chunk's centre, tried in order; the first
+    /// admissible site wins. Each keeps the widest cone inside the
+    /// definition's two-chunk structure radius.
+    let siteOffsets: [(x: Int, z: Int)]
+    /// Largest ground-height difference a cone footprint may span.
+    let maxRelief: Int
+
+    static let v3 = PrehistoricVolcanoSiting(
+        placement: StructurePlacement(spacing: 24, separation: 8),
+        siteOffsets: [(0, 0)], maxRelief: 6)
+    static let v4 = PrehistoricVolcanoSiting(
+        placement: StructurePlacement(spacing: 12, separation: 4),
+        siteOffsets: [(0, 0), (12, 0), (-12, 0), (0, 12), (0, -12),
+                      (12, 12), (-12, -12), (12, -12), (-12, 12)],
+        maxRelief: 8)
+
+    static func forPreset(_ preset: WorldPreset) -> PrehistoricVolcanoSiting? {
+        guard preset.supportsVolcanicTerrain else { return nil }
+        return preset.supportsDenseVolcanicTerrain ? .v4 : .v3
+    }
+}
+
 /// An exact-surface seam keeps wet/unsupported/steep rejection testable
 /// without replacing the production planner with an approximate height map.
 func planPrehistoricVolcano(seed: UInt32, x: Int, z: Int, radius: Int,
-                            height: Int, craterRadius: Int,
+                            height: Int, craterRadius: Int, maxRelief: Int = 6,
                             surfaceAt: (Int, Int) -> ExactTerrainSurface?,
                             cellAt: (Int, Int, Int) -> Int?) -> StructurePlan? {
     guard (10...14).contains(radius), (8...11).contains(height),
@@ -49,7 +77,7 @@ func planPrehistoricVolcano(seed: UInt32, x: Int, z: Int, radius: Int,
             }
             low = min(low, surface.feetY)
             high = max(high, surface.feetY)
-            guard high - low <= 6 else { return nil }
+            guard high - low <= maxRelief else { return nil }
             columns.append(Column(x: px, z: pz, groundY: surface.feetY - 1, distance: distance))
         }
     }
@@ -95,30 +123,43 @@ func planPrehistoricVolcano(seed: UInt32, x: Int, z: Int, radius: Int,
 
 func prehistoricVolcanoStructureDefinition() -> StructureDef {
     StructureDef(
-        id: prehistoricVolcanoStructureID, spacing: 24, separation: 8,
+        // The registered tuple is frozen structure identity (cache keys and
+        // tie-breaks); each preset's actual lattice comes from `placement`.
+        id: prehistoricVolcanoStructureID,
+        spacing: PrehistoricVolcanoSiting.v3.placement.spacing,
+        separation: PrehistoricVolcanoSiting.v3.placement.separation,
         salt: 0x701C_A103, maxRadiusChunks: 2,
         placement: { context in
             guard context.dim == Dim.overworld.rawValue,
-                  context.terrainOracle?.settings.preset.supportsVolcanicTerrain == true else { return nil }
-            return StructurePlacement(spacing: 24, separation: 8)
+                  let preset = context.terrainOracle?.settings.preset else { return nil }
+            return PrehistoricVolcanoSiting.forPreset(preset)?.placement
         },
         check: { context, _, _, _ in
             context.dim == Dim.overworld.rawValue
                 && context.terrainOracle?.settings.preset.supportsVolcanicTerrain == true
         },
         plan: { context, ocx, ocz, rng in
-            guard let oracle = context.terrainOracle else { return nil }
-            let x = ocx * CHUNK_W + CHUNK_W / 2
-            let z = ocz * CHUNK_W + CHUNK_W / 2
+            guard let oracle = context.terrainOracle,
+                  let siting = PrehistoricVolcanoSiting.forPreset(oracle.settings.preset) else { return nil }
+            let centreX = ocx * CHUNK_W + CHUNK_W / 2
+            let centreZ = ocz * CHUNK_W + CHUNK_W / 2
+            // Every shape draw happens before any terrain-dependent check.
             let radius = 10 + rng.nextInt(5)
             let height = 8 + rng.nextInt(4)
             let craterRadius = 2 + rng.nextInt(2)
             let shelter = prehistoricStarterShelterSite(seed: context.seed, settings: oracle.settings)
-            guard prehistoricVolcanoAvoidsShelter(x: x, z: z, radius: radius, shelter: shelter) else { return nil }
-            return planPrehistoricVolcano(seed: context.seed, x: x, z: z, radius: radius,
-                                          height: height, craterRadius: craterRadius,
-                                          surfaceAt: oracle.exactSurface,
-                                          cellAt: oracle.cell)
+            for offset in siting.siteOffsets {
+                let x = centreX + offset.x, z = centreZ + offset.z
+                guard prehistoricVolcanoAvoidsShelter(x: x, z: z, radius: radius, shelter: shelter) else { continue }
+                if let plan = planPrehistoricVolcano(seed: context.seed, x: x, z: z, radius: radius,
+                                                     height: height, craterRadius: craterRadius,
+                                                     maxRelief: siting.maxRelief,
+                                                     surfaceAt: oracle.exactSurface,
+                                                     cellAt: oracle.cell) {
+                    return plan
+                }
+            }
+            return nil
         })
 }
 

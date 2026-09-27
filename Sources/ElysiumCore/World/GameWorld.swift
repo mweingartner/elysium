@@ -704,6 +704,12 @@ public final class World {
         return c.biomeAt(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W))
     }
 
+    /// Whether weather at this biome and height falls as snow (layering snow
+    /// and freezing still water). Warm-climate prehistoric worlds never snow.
+    public func precipitationIsSnow(biome: Int, y: Int) -> Bool {
+        !generationSettings.preset.supportsWarmClimate && snowsAt(biome, y)
+    }
+
     // MARK: - block entities
     public func getBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> BlockEntityData? {
         getChunkAt(x, z)?.getBlockEntity(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W))

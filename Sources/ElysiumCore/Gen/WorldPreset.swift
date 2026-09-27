@@ -11,7 +11,7 @@ public enum WorldPreset: String, CaseIterable, Equatable {
     case debugAllBlockStates = "minecraft:debug_all_block_states"
     /// Version-one prehistoric worlds stay loadable with their original
     /// simulation rules. They are intentionally omitted from the create-world
-    /// cycle now that the current version-three profiles are available.
+    /// cycle now that the current version-four profiles are available.
     case prehistoricLostWorld = "elysium:prehistoric_lost_world_v1"
     case prehistoricJurassicGiants = "elysium:prehistoric_jurassic_giants_v1"
     case prehistoricCretaceousFrontiers = "elysium:prehistoric_cretaceous_frontiers_v1"
@@ -28,11 +28,17 @@ public enum WorldPreset: String, CaseIterable, Equatable {
     case prehistoricJurassicGiantsV3 = "elysium:prehistoric_jurassic_giants_v3"
     case prehistoricCretaceousFrontiersV3 = "elysium:prehistoric_cretaceous_frontiers_v3"
     case prehistoricAncientSeasV3 = "elysium:prehistoric_ancient_seas_v3"
+    /// Warm climate (no snow or ice) and denser surface volcanoes; v3 terrain,
+    /// climate, and volcano siting remain frozen for saved worlds.
+    case prehistoricLostWorldV4 = "elysium:prehistoric_lost_world_v4"
+    case prehistoricJurassicGiantsV4 = "elysium:prehistoric_jurassic_giants_v4"
+    case prehistoricCretaceousFrontiersV4 = "elysium:prehistoric_cretaceous_frontiers_v4"
+    case prehistoricAncientSeasV4 = "elysium:prehistoric_ancient_seas_v4"
 
     public static let normalCycle: [WorldPreset] = [
         .normal, .flat, .largeBiomes, .amplified, .moderateHillsResourceRich, .singleBiomeSurface,
-        .netherWorld, .prehistoricLostWorldV3, .prehistoricJurassicGiantsV3,
-        .prehistoricCretaceousFrontiersV3, .prehistoricAncientSeasV3,
+        .netherWorld, .prehistoricLostWorldV4, .prehistoricJurassicGiantsV4,
+        .prehistoricCretaceousFrontiersV4, .prehistoricAncientSeasV4,
     ]
 
     public static let extendedCycle: [WorldPreset] = normalCycle + [.debugAllBlockStates]
@@ -55,10 +61,14 @@ public enum WorldPreset: String, CaseIterable, Equatable {
         case .prehistoricJurassicGiantsV2: return "Jurassic Giants (v2)"
         case .prehistoricCretaceousFrontiersV2: return "Cretaceous Frontiers (v2)"
         case .prehistoricAncientSeasV2: return "Ancient Seas (v2)"
-        case .prehistoricLostWorldV3: return "Lost World"
-        case .prehistoricJurassicGiantsV3: return "Jurassic Giants"
-        case .prehistoricCretaceousFrontiersV3: return "Cretaceous Frontiers"
-        case .prehistoricAncientSeasV3: return "Ancient Seas"
+        case .prehistoricLostWorldV3: return "Lost World (v3)"
+        case .prehistoricJurassicGiantsV3: return "Jurassic Giants (v3)"
+        case .prehistoricCretaceousFrontiersV3: return "Cretaceous Frontiers (v3)"
+        case .prehistoricAncientSeasV3: return "Ancient Seas (v3)"
+        case .prehistoricLostWorldV4: return "Lost World"
+        case .prehistoricJurassicGiantsV4: return "Jurassic Giants"
+        case .prehistoricCretaceousFrontiersV4: return "Cretaceous Frontiers"
+        case .prehistoricAncientSeasV4: return "Ancient Seas"
         }
     }
 
@@ -130,10 +140,10 @@ private func hasUnsupportedPrehistoricProfileMarker(_ raw: String?) -> Bool {
     guard !tokens.isEmpty else { return false }
 
     // Tokenizing every non-alphanumeric separator catches copied/imported
-    // forms such as `other:prehistoric.lost_world_v4` and nested namespace
+    // forms such as `other:prehistoric.lost_world_v5` and nested namespace
     // forms without broadening the normal fallback for unrelated IDs.
     // A copied future identifier can collapse camel-case into one token once
-    // it is lowercased (for example `prehistoricLostWorldV4`).  The explicit
+    // it is lowercased (for example `prehistoricLostWorldV5`).  The explicit
     // marker remains authoritative in that form too; otherwise the normal
     // fallback would silently reinterpret its generation domain.
     if tokens.contains(where: { $0.hasPrefix("prehistoric") }) { return true }
@@ -155,7 +165,7 @@ private func hasUnsupportedPrehistoricProfileMarker(_ raw: String?) -> Bool {
     ]
     for index in tokens.indices where tokens[index] == "elysium" {
         // Join remaining lexical units so the official namespace catches both
-        // `lost_world_v4` and a camel-cased/squashed `lostWorldV4` sibling.
+        // `lost_world_v5` and a camel-cased/squashed `lostWorldV5` sibling.
         let suffix = tokens[tokens.index(after: index)...].map(String.init).joined()
         if compactProfileBases.contains(where: { suffix.hasPrefix($0) }) {
             return true
@@ -199,7 +209,7 @@ public func normalizedWorldPreset(_ raw: String?) -> WorldPreset {
     case "debug", "debug_mode", "debug_all_block_states", "debug all block states":
         return .debugAllBlockStates
     // Unversioned aliases are historical input and must keep selecting v1;
-    // the create-world cycle emits the explicit v3 IDs for new worlds.
+    // the create-world cycle emits the explicit v4 IDs for new worlds.
     case "lost_world", "lost world", "lost_world_v1", "lost world v1",
          "prehistoric_lost_world", "prehistoric_lost_world_v1":
         return .prehistoricLostWorld
@@ -228,6 +238,14 @@ public func normalizedWorldPreset(_ raw: String?) -> WorldPreset {
         return .prehistoricCretaceousFrontiersV3
     case "ancient_seas_v3", "ancient seas v3", "prehistoric_ancient_seas_v3":
         return .prehistoricAncientSeasV3
+    case "lost_world_v4", "lost world v4", "prehistoric_lost_world_v4":
+        return .prehistoricLostWorldV4
+    case "jurassic_giants_v4", "jurassic giants v4", "prehistoric_jurassic_giants_v4":
+        return .prehistoricJurassicGiantsV4
+    case "cretaceous_frontiers_v4", "cretaceous frontiers v4", "prehistoric_cretaceous_frontiers_v4":
+        return .prehistoricCretaceousFrontiersV4
+    case "ancient_seas_v4", "ancient seas v4", "prehistoric_ancient_seas_v4":
+        return .prehistoricAncientSeasV4
     default:
         return .normal
     }
