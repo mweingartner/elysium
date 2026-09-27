@@ -404,8 +404,11 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
     var serial = 0
     var tallies: [AIAgentSpawnTally] = []
     var occupied: [(x: Int, z: Int)] = []
-    // A player in a cave or under a roof gets company there; outdoors, creatures stay under the sky.
-    let allowRoofed = !aiAgentOpenToSky(world, ifloor(player.x), ifloor(player.y), ifloor(player.z))
+    // Creatures stand under open sky first (tree cover is fine), so a player in the starter
+    // hut still gets company outside. Only a player who is under cover themselves, such as
+    // in a cave, falls back to covered ground when nothing open is in reach.
+    let playerCovered = !aiAgentOpenToSky(world, ifloor(player.x), ifloor(player.y), ifloor(player.z))
+    let coverPasses = playerCovered ? [false, true] : [false]
 
     for request in requests where remaining > 0 {
         let explicit = requests.count == 1 ? (request.count ?? requestedCount) : request.count
@@ -487,16 +490,22 @@ public func executeAIAgentAreaSpawn(_ rawEntity: String, count requestedCount: I
                 let spacing = aiAgentPackSpacing(species)
                 // A pack that did not fully fit may start again at a second site.
                 for _ in 0..<2 where remainingInPack > 0 {
-                    guard let anchor = aiAgentAreaAnchor(world, player, species, minDistance: minDistance, radius: radius,
-                                                         occupied: occupied, spacing: spacing,
-                                                         allowRoofed: allowRoofed) else { break }
+                    var site: (anchor: (x: Int, z: Int), allowRoofed: Bool)?
+                    for allowRoofed in coverPasses {
+                        if let anchor = aiAgentAreaAnchor(world, player, species, minDistance: minDistance, radius: radius,
+                                                          occupied: occupied, spacing: spacing, allowRoofed: allowRoofed) {
+                            site = (anchor, allowRoofed)
+                            break
+                        }
+                    }
+                    guard let site else { break }
                     for (dx, dz) in aiAgentPackOffsets(spacing: spacing) where remainingInPack > 0 {
-                        let x = anchor.x + dx, z = anchor.z + dz
+                        let x = site.anchor.x + dx, z = site.anchor.z + dz
                         let ddx = Double(x) + 0.5 - player.x, ddz = Double(z) + 0.5 - player.z
                         guard ddx * ddx + ddz * ddz >= minDistance * minDistance * 0.5, world.isLoadedAt(x, z),
                               !occupied.contains(where: { abs($0.x - x) < spacing && abs($0.z - z) < spacing }),
                               let y = aiAgentAreaSpawnY(world, species, x, z, nearY: ifloor(player.y),
-                                                        allowRoofed: allowRoofed) else { continue }
+                                                        allowRoofed: site.allowRoofed) else { continue }
                         serial += 1
                         if aiAgentSpawnAt(world, species, x, y, z, serial: serial) != nil {
                             tally.record(species)
