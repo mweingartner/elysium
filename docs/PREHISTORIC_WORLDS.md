@@ -375,6 +375,28 @@ near the player were alive three minutes later. `bash scripts/pipeline.sh` passe
 nine stages from `/Users/mweingar/dev/pebble` (2,823 tests, 491 golden checks); the
 installed `/Applications/Elysium.app` executable SHA-256 is `0a6418f3aa8d30088b4cd946a3a73524aefe17013c6205e264e3f1ec38d378f4`.
 
+### Warm climate, volcanoes and AI area spawns — September 26, 2026
+
+New maps are v4. For seed 1592590338 the generator census over 195 chunks around
+the spawn found 78,438 snow and ice blocks at y >= 0 in v3 (12,621 snow-covered
+surfaces) and none in v4, where the same ground is meadow, taiga and bare stony
+peaks. Across four 96x96-chunk samples v3 admitted 4 volcanoes and v4 admitted 79.
+In the built app a new v4 Lost World at that seed showed a flowered meadow where
+v3 has snowy slopes, and a basalt cone with a lava crater about 130 blocks from the
+starter hut.
+
+`/ai spawn various dinosaurs near me` failed with "Found no safe place" on rugged,
+wooded and coastal ground. On 20 generated v4 sites it now errors nowhere for
+"various dinosaurs"; the remaining shortfalls are steep mountain ground the shared
+spawn validator refuses, and the reply counts them. In the built app, asked from
+inside the starter hut, it replied "Spawned 3 dinosaurs (2 Pachycephalosaurus,
+Triceratops) around you", with the player under the hut's plank roof and every
+creature standing under open sky. The heaviest placement search measured took 24 ms
+on real terrain and 36 ms on adversarial terrain in a release build.
+`bash scripts/pipeline.sh` passed all nine stages from `/Users/mweingar/dev/pebble`
+(2,842 tests, 491 golden checks); the installed `/Applications/Elysium.app` executable
+SHA-256 is `34c42bc623249710cc65acf0c1361e243e3fe612628802d63e9aeaa7c910a668`.
+
 ## Revisit conditions
 
 Revisit this design if a model exceeds the rigid-part budget, body-aware
