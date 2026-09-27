@@ -34,11 +34,14 @@ height and surface-biome selection: mid-continent margins become navigable
 water while high terrain remains dry island landfalls. It uses no global
 terrain mutator, so ordinary saves, legacy entity ordinals, normal biome spawn
 tables, and normal-world generation paths remain unchanged. Prehistoric
-profiles suppress modern passive/ambient/monster spawn tables, legacy
-structure-spawner ticks and direct legacy structure occupants, patrol
-scheduling, and human village/pillager-outpost plans; roster predators provide
-their own host-authoritative danger while the rest of the Overworld structure
-domain remains available.
+profiles suppress modern passive/ambient/surface-monster spawn tables, direct
+legacy structure occupants, patrol scheduling, and human village/pillager-outpost
+plans. Dungeon, mineshaft, stronghold and fortress spawners now function on these
+maps too, and unlit caves/tunnels receive bounded monster attempts every five
+simulated seconds at night. Peaceful and disabled mob spawning suppress both.
+Roster predators continue to provide the surface danger; saved chunks need no
+regeneration to activate their existing spawners. See the [monster spawning
+verification record](monster-spawning.md).
 
 Each profile is versioned in its `WorldPreset` raw identifier and cache
 identity. Version 2 adds the predator/prey and herd-defense simulation plus a

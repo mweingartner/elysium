@@ -4474,6 +4474,7 @@ public final class GameCore {
         tickFangs(w)
         // (updateDaylightDetectors is a no-op — detectors self-schedule ticks)
         naturalSpawnTick(w, [p], &w.rng)
+        spawnNightCaveMonsters(w, activeEntities, &w.rng)
         if Self.shouldRunRaidEvents(in: w) {
             raidManager.tick(w)
         }

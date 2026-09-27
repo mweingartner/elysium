@@ -201,9 +201,9 @@ public func naturalSpawnTick(_ world: World, _ players: [Player], _ rng: inout R
         guard let bdef = BIOMES[Int(biome)] else { continue }
         let list: [SpawnEntry]
         if let profile = world.generationSettings.preset.prehistoricProfile {
-            // A prehistoric profile owns its entire natural-population domain:
-            // no modern passive animals and no ordinary fantasy/night-monster
-            // table. Predatory roster members provide its host-owned danger.
+            // Dinosaur surface populations stay profile-owned. Dungeon spawners
+            // and the separate bounded nighttime cave pass deliberately admit
+            // ordinary monsters underground on these maps as well.
             // The ordinary branch below stays byte-for-byte isolated for every
             // non-prehistoric save.
             list = cat == "monster" ? [] : prehistoricSpawnEntries(profile: profile, category: cat)

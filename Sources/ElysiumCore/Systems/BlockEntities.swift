@@ -311,38 +311,7 @@ public func registerBlockEntityHandlers() {
     }
 
     beTickHandlers["spawner"] = { world, be in
-        // Prehistoric worlds own their creature population. Keep every
-        // retained legacy spawner inert before it advances its delay or draws
-        // from the authoritative gameplay RNG; this covers dungeon,
-        // mineshaft, stronghold, and Nether-fortress spawners without changing
-        // the landmark geometry or ordinary-world behavior.
-        guard !world.generationSettings.preset.isPrehistoric else { return }
-        // require player within 16
-        let near = !world.getEntitiesNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 16, filter: { ($0 as? Entity)?.isPlayer ?? false }).isEmpty
-        if !near { return }
-        if world.difficulty == 0 { return }
-        if world.time % 10 == 0 {
-            world.hooks.addParticles("flame", Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 1, 0.4, 0)
-            world.hooks.addParticles("smoke", Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 1, 0.4, 0)
-        }
-        be.delay = (be.delay ?? 0) - 1
-        if (be.delay ?? 0) > 0 { return }
-        be.delay = 200 + gameRng.nextInt(600)
-        let mob = be.mob ?? "zombie"
-        // count nearby same-type
-        let count = world.getEntitiesNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 9, filter: { ($0 as? Entity)?.type == mob }).count
-        if count >= 6 { return }
-        let n = 1 + gameRng.nextInt(4)
-        for _ in 0..<n {
-            let px = Double(be.x) + 0.5 + (gameRng.nextFloat() - 0.5) * 7
-            let pz = Double(be.z) + 0.5 + (gameRng.nextFloat() - 0.5) * 7
-            let py = be.y + gameRng.nextInt(3) - 1
-            let at = world.getBlock(ifloor(px), py, ifloor(pz))
-            if at != 0 { continue }
-            _ = spawnMob(world, mob, px, Double(py), pz, SpawnOpts())
-            world.hooks.addParticles("flame", px, Double(py) + 0.5, pz, 8, 0.4, 0)
-        }
-        world.hooks.playSound("block.spawner.spawn", Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 1, 1)
+        tickMonsterSpawner(world, be)
     }
 
     beTickHandlers["beacon"] = { world, be in

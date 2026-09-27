@@ -258,6 +258,19 @@ In Survival, manage health, hunger, shelter, equipment, and food. Sleeping, farm
 enchanting, brewing, death, respawn, bosses, and Advancements are part of the main progression. Creative
 is intended for building and exploration without the ordinary Survival damage and consumption loop.
 
+Dungeon spawners work on ordinary and dinosaur maps when a living player is
+within 16 blocks. They spawn on clear, supported floors and stop at six nearby
+monsters of their type. Lighting the room suppresses ordinary dungeon spawns;
+breaking the spawner stops it. Peaceful difficulty and disabled mob spawning
+suppress dungeon and natural monster spawning.
+
+At night, unlit caves and tunnels also receive monster-spawn attempts every five
+simulated seconds, including on dinosaur maps. These attempts search nearby
+floors, stay at least 24 blocks from players, and stop at a local population cap.
+Torches protect the area reached by their gameplay light. Existing worlds gain
+this behavior without regenerating their terrain; dinosaur surface wildlife and
+its dawn replenishment stay separate.
+
 Direct daylight is useful against ordinary hostile monsters: exposed ones ignite once dawn or daytime
 light is strong enough. Shelter, water, powder snow, protective headgear, or sufficiently heavy rain can
 prevent or interrupt burning in applicable cases. Creepers behave differently: qualifying daylight starts

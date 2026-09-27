@@ -522,7 +522,7 @@ final class PrehistoricWorldsTests: XCTestCase {
         XCTAssertEqual(patrolRNG.stateWords.3, patrolState.3)
     }
 
-    func testPrehistoricProfilesBlockLegacyStructureOccupantsAndSpawnersBeforeSideEffects() throws {
+    func testPrehistoricProfilesStillBlockLegacyGeneratedStructureOccupants() {
         let prehistoric = makeWorld(.prehistoricLostWorld)
         let normal = makeWorld(.normal)
         for mob in ["zombie_villager", "witch", "drowned", "elder_guardian", "vindicator", "cat"] {
@@ -534,30 +534,6 @@ final class PrehistoricWorldsTests: XCTestCase {
         }
         let curated = EntitySpec(mob: "prehistoric.triceratops", x: 24.5, y: 64, z: 8.5)
         XCTAssertTrue(GameCore.shouldMaterializeGeneratedEntity(curated, in: prehistoric))
-
-        prehistoric.difficulty = 2
-        let player = Player(world: prehistoric)
-        player.setPos(24.5, 64, 8.5)
-        prehistoric.addEntity(player)
-        let tickSpawner = try XCTUnwrap(beTickHandlers["spawner"])
-        defer { resetGameRng(0x6A57) }
-        for mob in ["zombie", "cave_spider", "silverfish", "blaze"] {
-            let spawner = makeSpawnerBE(24, 64, 8, mob)
-            spawner.delay = 0
-            resetGameRng(0x51A7_E100)
-            let rngBefore = gameRng.stateWords
-
-            tickSpawner(prehistoric, spawner)
-
-            XCTAssertEqual(spawner.delay, 0,
-                           "the prehistoric boundary must run before a \(mob) spawner mutates its timer")
-            XCTAssertEqual(gameRng.stateWords.0, rngBefore.0)
-            XCTAssertEqual(gameRng.stateWords.1, rngBefore.1)
-            XCTAssertEqual(gameRng.stateWords.2, rngBefore.2)
-            XCTAssertEqual(gameRng.stateWords.3, rngBefore.3)
-            XCTAssertFalse(prehistoric.entities.contains { ($0 as? Entity)?.type == mob },
-                           "the prehistoric boundary must reject the legacy \(mob) spawner")
-        }
     }
 
     func testEveryCreatureRegistersAnOriginalNativeMeshWithinRendererBudget() {

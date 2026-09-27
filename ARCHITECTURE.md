@@ -68,7 +68,7 @@ Nether World keeps the ordinary terrain generators but makes the Nether the init
 - Fixed constraints: opt-in versioned preset/cache identity; no legacy-save conversion or chunk rewrite; append-only entity registration; deterministic, bounded host simulation; no runtime external asset or audio dependency; and the existing 24-rigid-part renderer ABI remains frozen.
 - Chosen approach and strongest feasible alternative: `PrehistoricWorldProfile` is an ordered data catalog feeding the existing entity, worldgen, save, LAN, renderer, and synthesized-audio seams. All 36 creatures use source-authored, faceted low-poly triangle meshes attached to the existing rigid-part poses plus three bounded movement-family controllers. The alternative was the planning pack's proposed weighted-skin Blender/GLB package pipeline; it was rejected because the audited renderer has no safe native importer, skeleton palette, or skinned draw path, so claiming it would create an untested asset/runtime subsystem.
 - Reason and accepted downside: source-owned faceted meshes provide recognizable taxon silhouettes while remaining immutable, deterministic presentation data that fits the current GPU, packaging, and validation contracts. They do not supply the continuous deformation of a bespoke skeletal pipeline. A future weighted path must earn its own importer, bounds, synchronization, and real-render proof rather than silently changing legacy entities.
-- Evidence or probe result: the implementation keeps normal spawn tables on their existing branch, replaces the profile's complete fresh-population domain with its roster (natural tables, legacy structure spawners, and direct structure occupants), retains only a small wild-fish resource table for aquatic predator/prey behavior, checks large whole-body path clearance, stores a closed action state in save/LAN envelopes, and validates every roster model for finite source geometry, in-skin UVs, no cuboid fallback, a bounded triangle count, and the 24-part limit. The focused tests exercise roster/profile/domain behavior, persistence, controllers, model landmarks, and LAN sanitization.
+- Evidence or probe result: the implementation keeps normal spawn tables on their existing branch, originally replaced the profile's complete fresh-population domain with its roster (natural tables, legacy structure spawners, and direct structure occupants); the September 27 monster-spawning decision below supersedes the spawner and nighttime cave exclusions, retains only a small wild-fish resource table for aquatic predator/prey behavior, checks large whole-body path clearance, stores a closed action state in save/LAN envelopes, and validates every roster model for finite source geometry, in-skin UVs, no cuboid fallback, a bounded triangle count, and the 24-part limit. The focused tests exercise roster/profile/domain behavior, persistence, controllers, model landmarks, and LAN sanitization.
 - Unverified assumption: first-person visual quality and synthesized-call identity need actual installed-app review; source validation is not a human art or listening assessment.
 - Revisit if: normal-world goldens change, a body controller fails an edited-terrain recovery case, host/client profile identity differs, or native visual inspection shows an unacceptable silhouette/action.
 - Relevant implementation and verification links: [`PrehistoricWorldProfile.swift`](Sources/ElysiumCore/Gen/PrehistoricWorldProfile.swift), [`PrehistoricCreatures.swift`](Sources/ElysiumCore/Entity/PrehistoricCreatures.swift), [`PrehistoricModels.swift`](Sources/ElysiumCore/Render/PrehistoricModels.swift), [`PrehistoricWorldsTests.swift`](Tests/ElysiumCoreTests/PrehistoricWorldsTests.swift), and [`PREHISTORIC_WORLDS.md`](docs/PREHISTORIC_WORLDS.md).
@@ -153,6 +153,37 @@ the saved calendar retain this contract.
   alternation cannot create coherent pods. Existing sequence fields remain readable.
 - Higher AI/rendering cost and fewer viable giant-herbivore sites are material
   risks. Revisit if real terrain refuses most pods or loaded-game frame time regresses.
+
+### Decision: working dungeon spawners and recurring nighttime cave monsters — September 27, 2026
+
+- Outcome: a loaded dungeon with a nearby player produces live monsters, and a
+  dark cave/tunnel near an active player replenishes during successive nights.
+  The user explicitly requested the same behavior on dinosaur maps.
+- Findings: prehistoric spawners were deliberately inert; ordinary spawner
+  attempts checked only one cell and could miss a room's floor for a full
+  cooldown. The existing natural sampler chooses an arbitrary underground Y,
+  and its whole-loaded-world count can starve a player's cave.
+- Selected repair: reuse the registered block-entity tick, factories, collision
+  geometry and light engine; retry up to 32 columns around a spawner, cap nearby
+  same-type monsters at six, and publish only supported clear bodies. Empty
+  waves retry after 20 ticks; successful waves retain the 200–799-tick cooldown.
+  Any propagated block light suppresses ordinary dungeon births (blaze permits
+  up to 11). Daytime dungeon spawning still works; Peaceful, disabled spawning,
+  absent living players and client mirrors do not advance a spawner.
+- Add one host-owned nighttime pass beside natural spawning, every 100 ticks
+  at day times 13000..<23000. Search at most 16 columns and 33 heights per
+  column within 24–64 horizontal blocks and 16 vertical blocks of active
+  players. Require roof, zero sky/block light, dry supported full-body clearance,
+  and at least 24 blocks from every player. At most four births per pass and
+  16 monsters within each overlapping player's 80-block/24-height census.
+  Host-owned LAN player proxies participate. No catch-up wave or save migration.
+- Alternative: replace the existing natural sampler and global cap completely.
+  Keeping that surface/skyless behavior intact reduces the blast radius and
+  preserves its golden contract while adding an explicit underground allowance.
+- Risks: suitable floor area and illumination still determine actual births;
+  torch protection follows propagated gameplay light, not renderer brightness.
+  More nearby entities can cost frame time. Revisit on measured density/performance
+  regressions. Evidence: [monster-spawning.md](docs/monster-spawning.md).
 
 ### Decision: exact active-domain structure planning — September 15, 2026
 
