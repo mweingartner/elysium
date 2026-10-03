@@ -154,8 +154,8 @@ rank gates, actions, and legacy-save migration behavior.
 
 Each [GitHub release](https://github.com/mweingartner/elysium/releases/latest) attaches
 `Elysium-<version>-macOS-arm64.zip` and its `.sha256` checksum. The prebuilt app needs Apple silicon
-(it is not built for Intel Macs) and the macOS version its release notes state. The v1.3.0 release runs
-on macOS 14 or later; releases that include the native Skills window need macOS 26 or later.
+(it is not built for Intel Macs) and the macOS version its release notes state. Release 1.3.0 runs on
+macOS 14 or later; 1.4.0 and later, which include the native Skills window, need macOS 26 or later.
 
 1. Download the zip, optionally check it with `shasum -a 256 -c Elysium-<version>-macOS-arm64.zip.sha256`, and unzip it.
 2. Move `Elysium.app` into `/Applications`.

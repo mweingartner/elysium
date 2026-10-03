@@ -268,9 +268,13 @@ EXPECTED_STORAGE_OBJECT_SHA256='e38636a44a6357ab6b17195cbe81bf56c5ebf8157fb07c30
 # profile IDs at the persistence boundary, and GameCore/LAN content changes
 # relink the Core object and both production consumers. The reviewed AST
 # inventory hash moves with Saves; storage/text-input surfaces remain pinned.
-EXPECTED_SAVES_SOURCE_SHA256='21c80f8babbb2423a2bd65a2f5a3ae097ae5b46f4f9612c167904c2b363a3822'
+# Version 1.4.0 (native Atrium Skills window): Saves.swift changes only ELYSIUM_VERSION; was
+# 21c80f8babbb2423a2bd65a2f5a3ae097ae5b46f4f9612c167904c2b363a3822. See docs/release-1.4.0-build.md.
+EXPECTED_SAVES_SOURCE_SHA256='5b4a7a287800e2cb3788f3f09750d9fdff3db342151db4cbed7dd850c9463463'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
-EXPECTED_CORE_CAPABILITY_SHA256='377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb'
+# 1.4.0: only the Saves.swift compiler-AST inventory entry moves (version literal); was
+# 377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb.
+EXPECTED_CORE_CAPABILITY_SHA256='f922b1211186211a274de565ed7f68517693bbff9ac09efc1082760898e792e0'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444'
@@ -413,7 +417,8 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='c697261db513b3652729face7a5ba4f2eb531b1b274178
 # AI placement search (ring sweep, open-sky rule, mixed groups, placement budget). Disposable-copy
 # strip -S -x keeps ElysiumStorage.o and ElysiumTextInput.o byte-identical.
 # Deployment target 26: was 2f7ebaebc957252ceb8bd76b40fb91fb792b1d19e49b8baa18a66a12215fbd7f.
-EXPECTED_CORE_OBJECT_SHA256='58bcd44d924af3fd25d5a1f2eef5d7395402cb2a69b7074d0f40fa69611aec01'
+# 1.4.0 version literal: was 58bcd44d924af3fd25d5a1f2eef5d7395402cb2a69b7074d0f40fa69611aec01.
+EXPECTED_CORE_OBJECT_SHA256='22b62d8e311c04dc1a5f0a2f9a726f7d7ab2315a198ba11fe6daca0e7a714932'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -463,8 +468,10 @@ EXPECTED_CORE_OBJECT_SHA256='58bcd44d924af3fd25d5a1f2eef5d7395402cb2a69b7074d0f4
 # tree), so an Atrium change moves this pin. Products renew from
 # 3d7e12decf55ad9ee290d85a5cbc787f6a38a009487d4111df623090692b0927 (Elysium) and
 # 76aec3dddd9953f5fbf68101212aec4559f00cce0ad00a9780d558c733367134 (elysmoke, target change only).
-EXPECTED_ELYSIUM_PRODUCT_SHA256='ea6bd812173a239b4485b38799138f3eb0b2c7886efc83257082b2e1b87c930c'
-EXPECTED_SMOKE_PRODUCT_SHA256='e6d116dc5271be148115b56207ef52108317bfe717abf5dcbce43c1caefb7983'
+# 1.4.0 version literal relinks both products; were ea6bd812173a239b4485b38799138f3eb0b2c7886efc83257082b2e1b87c930c
+# (Elysium) and e6d116dc5271be148115b56207ef52108317bfe717abf5dcbce43c1caefb7983 (elysmoke).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='65d8bceba0152dffe13842b85a83d11f934a5cfc05fb94931114d50a7235289f'
+EXPECTED_SMOKE_PRODUCT_SHA256='a2f0e6fde18a01df2d764d45b68eab6cad30597568baca9fde690263c14cd08c'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
