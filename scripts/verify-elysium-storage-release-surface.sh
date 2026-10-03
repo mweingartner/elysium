@@ -252,7 +252,11 @@ artifact_sha256() {
 # byte-identical.
 #
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
-EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
+# Toolchain renewal (Swift 6.4.0.33.1 -> 6.4.0.34.1, Xcode 27.0): the ElysiumStorage symbol graph
+# differs only in its metadata.generator string (362 symbols and 462 relationships identical), so
+# symbolGraphSHA256 in the manifest renews and this file pin moves from
+# 08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b. No storage API change.
+EXPECTED_STORAGE_API_SHA256='511be0c59c5ca0228074819b8f9c6d737d83673634ac6369f5c117596feb7cb3'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
 # prehistoric-worlds 1.3.0: Saves now rejects unknown/future prehistoric
 # profile IDs at the persistence boundary, and GameCore/LAN content changes
@@ -442,8 +446,12 @@ EXPECTED_CORE_OBJECT_SHA256='2f7ebaebc957252ceb8bd76b40fb91fb792b1d19e49b8baa18a
 # The same Core change renews the linked products from 561430af23190308b2b32a1fc6bbb5884de97651923dda68f83009da1911689d
 # (Elysium) and 47973dfa8d0fae05554f331bb16ef34acdda2a965da4ecc7bd2d2dab53b03927 (elysmoke), built
 # warning-free in this checkout; no app-target source changed.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='83443cfc377e72ddfcabeeae49e799898ffd36b7f61db2e6c3af7e109dfea2d4'
-EXPECTED_SMOKE_PRODUCT_SHA256='0d2616fb1923166dc1e0494eaeee30b779f2221eb3b188be6fbfe6b2155d778e'
+# Toolchain renewal (Swift 6.4.0.33.1 -> 6.4.0.34.1, Xcode 27.0) with no source change since a9d4d7e:
+# normalized ElysiumStorage.o, ElysiumCore.o and ElysiumTextInput.o stay byte-identical; the linked
+# products renew from 83443cfc377e72ddfcabeeae49e799898ffd36b7f61db2e6c3af7e109dfea2d4 (Elysium)
+# and 0d2616fb1923166dc1e0494eaeee30b779f2221eb3b188be6fbfe6b2155d778e (elysmoke).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='3d7e12decf55ad9ee290d85a5cbc787f6a38a009487d4111df623090692b0927'
+EXPECTED_SMOKE_PRODUCT_SHA256='76aec3dddd9953f5fbf68101212aec4559f00cce0ad00a9780d558c733367134'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
