@@ -150,6 +150,27 @@ rank gates, actions, and legacy-save migration behavior.
 
 ## Install and run
 
+### Download a prebuilt app
+
+Each [GitHub release](https://github.com/mweingartner/elysium/releases/latest) attaches
+`Elysium-<version>-macOS-arm64.zip` and its `.sha256` checksum. The prebuilt app needs macOS 14 or
+later on Apple silicon; it is not built for Intel Macs.
+
+1. Download the zip, optionally check it with `shasum -a 256 -c Elysium-<version>-macOS-arm64.zip.sha256`, and unzip it.
+2. Move `Elysium.app` into `/Applications`.
+3. The app is ad-hoc signed, not signed with an Apple Developer ID or notarized, so Gatekeeper blocks the
+   first launch. Open it once, then choose **System Settings → Privacy & Security → Open Anyway**
+   (on macOS 14 you can instead Control-click the app and choose **Open**). Alternatively, remove the
+   download quarantine yourself:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Elysium.app
+   ```
+
+Only do this for a zip downloaded from this repository's releases page whose checksum matches.
+
+### Build from source
+
 Requirements:
 
 - macOS 14 or later
