@@ -866,8 +866,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     /// flow through the world semantic boundary; the menu only presents the same read-only tree.
     @objc @MainActor func openCharacterWindow(_ sender: Any?) {
         _ = sender
-        if ui.current() is SkillTreeScreen {
-            window.makeKeyAndOrderFront(nil)
+        if let skills = ui.current() as? SkillTreeScreen {
+            if !skills.bringNativeWindowToFront() { window.makeKeyAndOrderFront(nil) }
             return
         }
         _ = ui.dispatchRPGWorldSemanticCommand(.openCharacter, source: .keyboard, game: game)

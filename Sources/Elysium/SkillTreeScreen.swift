@@ -1,7 +1,10 @@
-// SkillTreeScreen — a compact, canvas-based workspace for the four usage-based
-// advancement trees.  It deliberately takes its state and action hooks as
+// SkillTreeScreen — the in-game Skills workspace for the four usage-based
+// advancement trees.  The ordinary product presents it as a native Atrium
+// window (`SkillsNativeUI`); the canvas renderer below is the fail-safe for an
+// unavailable AppKit host.  It deliberately takes its state and action hooks as
 // closures: the screen is presentation-only and never reaches through to a
-// player/save/LAN authority on its own.
+// player/save/LAN authority on its own.  Beyond the closures it reads only
+// immutable registry tables (recipe outputs, item names) and the LAN role.
 
 import Foundation
 import ElysiumCore
@@ -108,6 +111,14 @@ final class SkillTreeScreen: Screen {
     private var actionButtons: [SkillTreeActionID: Button] = [:]
     private var doneButton: Button?
     private var statusText: String?
+    private var nativeWindowController: SkillsWindowController?
+    private var nativePresentationAvailable = false
+    /// The inputs of the last presentation sent to the native window, so it re-renders only
+    /// when progress, fast-bar slots or LAN role actually change.
+    private var lastNativeInputs: SkillsNativeInputs?
+    /// Output item ID per crafting recipe index. The registry is append-only and complete before
+    /// a world is playable, so one capture per screen is enough.
+    private var recipeOutputItemIDs: [Int]?
 
     /// The caller should provide its guarded game-core operation, for example:
     ///
@@ -136,6 +147,11 @@ final class SkillTreeScreen: Screen {
         fields.removeAll()
         slots.removeAll()
         actionButtons.removeAll(keepingCapacity: true)
+
+        // The native window is the product surface. Canvas controls are only built when it is
+        // unavailable, so a click on the dimmed game behind the window cannot reach a hidden
+        // canvas button.
+        if presentNativeWindow(ui, game) { return }
 
         let layout = makeLayout(ui)
         maximumScrollOffset = max(0, layout.contentH - layout.viewportH)
@@ -180,6 +196,10 @@ final class SkillTreeScreen: Screen {
         scrollOffset = min(max(0, scrollOffset), maximumScrollOffset)
 
         ui.drawDarkBg(0.70)
+        if nativePresentationAvailable {
+            MainActor.assumeIsolated { refreshNativeWindow(game) }
+            return
+        }
         ui.drawPanel(layout.panelX, layout.panelY, layout.panelW, layout.panelH)
         guard let state = stateProvider(game) else {
             drawUnavailable(in: layout, ui: ui)
@@ -209,8 +229,88 @@ final class SkillTreeScreen: Screen {
         }
     }
 
+    override func onClose(_ ui: UIManager, _ game: GameCore) {
+        MainActor.assumeIsolated { nativeWindowController?.dismissFromScreen() }
+        nativeWindowController = nil
+        nativePresentationAvailable = false
+        lastNativeInputs = nil
+    }
+
+    /// Brings the native window forward (the Skills… menu item while Skills is already open).
+    /// Returns `false` when only the canvas fallback is showing.
+    @MainActor
+    func bringNativeWindowToFront() -> Bool {
+        nativeWindowController?.bringToFront() ?? false
+    }
+
+    @MainActor
+    private func makeNativePresentation(_ game: GameCore) -> (SkillsNativeInputs, SkillsPresentation)? {
+        guard let state = stateProvider(game) else { return nil }
+        let inputs = SkillsNativeInputs(
+            state: state,
+            quickSlots: SKILL_TREE_ACTION_DESCRIPTORS.map { quickSlotProvider(game, $0.id) },
+            isLANGuest: game.isLANClientWorld)
+        if recipeOutputItemIDs == nil {
+            recipeOutputItemIDs = craftingRecipes.map { craftingRecipeOutput($0).id }
+        }
+        let context = SkillsPresentationContext(
+            quickSlot: { [quickSlotProvider, weak game] id in
+                guard let game else { return nil }
+                return quickSlotProvider(game, id)
+            },
+            recipeOutputItemIDs: recipeOutputItemIDs ?? [],
+            itemName: { id in
+                id >= 0 && id < itemDefs.count ? itemDef(id).displayName : "Unknown item"
+            },
+            isLANGuest: inputs.isLANGuest)
+        return (inputs, makeSkillsPresentation(state: state, context: context))
+    }
+
+    private func presentNativeWindow(_ ui: UIManager, _ game: GameCore) -> Bool {
+        nativePresentationAvailable = MainActor.assumeIsolated {
+            let built = makeNativePresentation(game)
+            let controller = nativeWindowController ?? SkillsWindowController(requestClose: {
+                [weak self, weak ui, weak game] in
+                guard let self, let ui, let game else { return }
+                // Close only while this screen is still on top, through the UI authority. If
+                // another screen opened above Skills, step the window aside instead; revealing
+                // this screen again re-presents it.
+                guard ui.current() === self else {
+                    self.nativeWindowController?.stepAside()
+                    return
+                }
+                ui.closeTop(game)
+            })
+            nativeWindowController = controller
+            let presented = controller.present(built?.1, parent: ui.textInputView?.window)
+            if presented { lastNativeInputs = built?.0 }
+            return presented
+        }
+        return nativePresentationAvailable
+    }
+
+    @MainActor
+    private func refreshNativeWindow(_ game: GameCore) {
+        guard let controller = nativeWindowController else { return }
+        guard let state = stateProvider(game) else {
+            if lastNativeInputs != nil {
+                lastNativeInputs = nil
+                controller.update(nil)
+            }
+            return
+        }
+        let probe = SkillsNativeInputs(
+            state: state,
+            quickSlots: SKILL_TREE_ACTION_DESCRIPTORS.map { quickSlotProvider(game, $0.id) },
+            isLANGuest: game.isLANClientWorld)
+        guard probe != lastNativeInputs, let built = makeNativePresentation(game) else { return }
+        lastNativeInputs = built.0
+        controller.update(built.1)
+    }
+
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
-        guard maximumScrollOffset > 0 else { return false }
+        // The native window scrolls itself; the dimmed game behind it has nothing to scroll.
+        guard !nativePresentationAvailable, maximumScrollOffset > 0 else { return false }
         let previous = scrollOffset
         // A notch is intentionally modest: a tree card can be read without
         // losing its title or its five-rank rows on ordinary trackpads.
@@ -221,6 +321,17 @@ final class SkillTreeScreen: Screen {
     }
 
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        if nativePresentationAvailable {
+            // Controller focus moves and arrow keys routed through the game choose a tree.
+            switch key {
+            case "ArrowUp":
+                return MainActor.assumeIsolated { nativeWindowController?.selectAdjacentTree(-1) ?? false }
+            case "ArrowDown":
+                return MainActor.assumeIsolated { nativeWindowController?.selectAdjacentTree(1) ?? false }
+            default:
+                return false
+            }
+        }
         let delta: Double
         switch key {
         case "ArrowUp": delta = -42
@@ -588,6 +699,14 @@ final class SkillTreeScreen: Screen {
         }
         return result
     }
+}
+
+/// Everything the native Skills presentation is derived from; equal inputs give an equal
+/// presentation, so the window only re-renders when one of these changes.
+struct SkillsNativeInputs: Equatable {
+    let state: SkillTreeState
+    let quickSlots: [Int?]
+    let isLANGuest: Bool
 }
 
 /// One construction path for every in-game Skills entry point.  The screen

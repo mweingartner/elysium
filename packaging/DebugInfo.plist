@@ -11,7 +11,7 @@
     <key>CFBundleVersion</key><string>1.3.0</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>NSLocalNetworkUsageDescription</key><string>Elysium Debug uses the local network only to discover, host, and join player-started LAN multiplayer worlds. Its debug-control service accepts authenticated connections from this Mac only.</string>
     <key>NSBonjourServices</key>
     <array>

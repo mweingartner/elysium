@@ -18,8 +18,9 @@ Even better than a report is a PR with the fix — the rest of this file tells y
 ## Setup
 
 ```bash
-xcode-select --install        # Swift toolchain (Swift 6, macOS 14+ SDK)
+xcode-select --install        # Swift toolchain (Swift 6.2, macOS 26 SDK)
 git clone https://github.com/mweingartner/elysium.git && cd elysium
+# Atrium (the native-window design system) must also be checked out at ../Atrium; see README.
 swift build                   # debug build, ~35s clean
 python3 scripts/test-impact.py --run # reviewed regression scope, or full fallback
 swift run -c release elysmoke # the golden suite — must print "491 passed, 0 failed"

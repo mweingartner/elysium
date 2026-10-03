@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 // Elysium — a native Swift + Metal block-survival game for macOS.
 // CLI-only workflow: swift build -c release. No .xcodeproj.
 
@@ -11,11 +11,17 @@ import PackageDescription
 let debugControlBuild = Context.environment["ELYSIUM_DEBUG_CONTROL_BUILD"] == "1"
 let elysiumDependencies: [Target.Dependency] = [
     "ElysiumCore", "ElysiumTextInput", "ElysiumAppSupport",
+    .product(name: "Atrium", package: "Atrium"),
 ] + (debugControlBuild ? ["ElysiumDebugProtocol"] : [])
 
 let package = Package(
     name: "Elysium",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v26)],
+    // Atrium is Michael's local HIG-based design system (~/dev/Atrium, a sibling checkout). The
+    // app target alone uses it, for native windows such as Skills; the engine never does.
+    dependencies: [
+        .package(path: "../Atrium"),
+    ],
     targets: [
         // shared pure text-ingress kernels; deliberately not exposed as a product
         .target(

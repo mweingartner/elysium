@@ -153,8 +153,9 @@ rank gates, actions, and legacy-save migration behavior.
 ### Download a prebuilt app
 
 Each [GitHub release](https://github.com/mweingartner/elysium/releases/latest) attaches
-`Elysium-<version>-macOS-arm64.zip` and its `.sha256` checksum. The prebuilt app needs macOS 14 or
-later on Apple silicon; it is not built for Intel Macs.
+`Elysium-<version>-macOS-arm64.zip` and its `.sha256` checksum. The prebuilt app needs Apple silicon
+(it is not built for Intel Macs) and the macOS version its release notes state. The v1.3.0 release runs
+on macOS 14 or later; releases that include the native Skills window need macOS 26 or later.
 
 1. Download the zip, optionally check it with `shasum -a 256 -c Elysium-<version>-macOS-arm64.zip.sha256`, and unzip it.
 2. Move `Elysium.app` into `/Applications`.
@@ -173,8 +174,10 @@ Only do this for a zip downloaded from this repository's releases page whose che
 
 Requirements:
 
-- macOS 14 or later
-- Xcode command-line tools (`xcode-select --install`)
+- macOS 26 or later
+- Xcode 26 or later, or its command-line tools (`xcode-select --install`), for Swift 6.2
+- [Atrium](#atrium-design-system), the design-system package behind Elysium's native windows, checked out
+  next to this repository as `../Atrium`
 - Rust and Cargo (only when building Elysium from source; the installed app bundles its pinned Arnis helper)
 - Apple silicon recommended
 
@@ -191,6 +194,10 @@ elysium run       Launch the installed app
 elysium update    Fast-forward the checkout, rebuild, and replace the installed app
 elysium test      Run XCTest and the golden smoke suite
 ```
+
+<a id="atrium-design-system"></a>Elysium's native windows, such as Skills, are built with Atrium, a
+HIG-based SwiftUI design system that SwiftPM resolves from the sibling path `../Atrium`. Atrium is not
+yet published, so a fresh clone cannot build until it is available there.
 
 Run directly from a checkout with:
 
