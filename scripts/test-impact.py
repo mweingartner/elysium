@@ -101,7 +101,8 @@ VERSION_PLISTS = {"packaging/Info.plist", "packaging/DebugInfo.plist"}
 APP_SOURCE_PREFIX = "Sources/Elysium/"
 APP_TEST_PREFIX = "Tests/ElysiumResourcePackTests/"
 CORE_TESTS = "Tests/ElysiumCoreTests"
-XCTEST_CLASS = re.compile(r"^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b", re.MULTILINE)
+XCTEST_CLASS = re.compile(r"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|internal|package|open|final)\s+)*"
+                          r"class\s+(\w+)\s*:\s*XCTestCase\b", re.MULTILINE)
 VERSION_SOURCE = "Sources/ElysiumCore/Game/Saves.swift"
 VERSION_DECL = re.compile(rb'^public let ELYSIUM_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$')
 
@@ -155,15 +156,27 @@ def git(root, *args):
 
 
 def core_source_readers(root, paths):
-    """Core XCTest classes whose files mention a changed app-target source path."""
+    """Core XCTest classes that read a changed app-target source: files naming the path, any
+    directory containing it below Sources/Elysium, or the whole "Sources" tree. Returns None
+    (widen to the full suite) when a reading file has no recognisable XCTestCase class."""
     wanted = [p for p in paths if p.startswith(APP_SOURCE_PREFIX)]
     classes = set()
     if not wanted:
         return classes
+    needles = {'"Sources"'}
+    for path in wanted:
+        needles.add(path)
+        parent = Path(path).parent
+        while str(parent).startswith(APP_SOURCE_PREFIX):
+            needles.add('"' + str(parent) + '"')
+            parent = parent.parent
     for test in sorted((Path(root) / CORE_TESTS).glob("*.swift")):
         text = test.read_text(encoding="utf-8", errors="strict")
-        if any(path in text for path in wanted):
-            classes.update(XCTEST_CLASS.findall(text))
+        if any(needle in text for needle in needles):
+            found = XCTEST_CLASS.findall(text)
+            if not found:
+                return None
+            classes.update(found)
     return classes
 
 
@@ -207,8 +220,12 @@ def plan(root, requested_base=None, full=False):
         result = classify(paths, version_only=VERSION_SOURCE in paths and
                           version_literal_only(root, base))
         if result["mode"] == "scoped":
-            readers = sorted(core_source_readers(root, paths))
-            if readers:
+            found = core_source_readers(root, paths)
+            if found is None:
+                result.update(mode="full", groups=[], patterns=[],
+                              reason="app source reader without a recognisable XCTest class")
+            readers = sorted(found or [])
+            if readers and result["mode"] == "scoped":
                 result["groups"] = sorted(set(result["groups"]) | {"core-source-readers"})
                 result["patterns"] = sorted(set(result["patterns"]) |
                                             {r"ElysiumCoreTests\." + name + "/" for name in readers})

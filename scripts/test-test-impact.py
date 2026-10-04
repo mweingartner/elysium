@@ -185,6 +185,25 @@ class ImpactTests(unittest.TestCase):
         self.assertNotIn(r"ElysiumCoreTests\.UnrelatedTests/", selection["patterns"])
         self.assertIn("core-source-readers", selection["groups"])
 
+    def test_directory_and_whole_tree_readers_are_selected_and_unknown_readers_widen(self):
+        lister = "Tests/ElysiumCoreTests/NativeListerTests.swift"
+        scanner = "Tests/ElysiumCoreTests/TreeScanTests.swift"
+        self.write(lister, '@MainActor final class NativeListerTests: XCTestCase {\n  let d = "Sources/Elysium/RPGNativeUI"\n}\n')
+        self.write(scanner, 'final class TreeScanTests: XCTestCase {\n  let s = root.appendingPathComponent("Sources")\n}\n')
+        self.commit(lister, scanner)
+        base = self.git("rev-parse", "HEAD")
+        changed = "Sources/Elysium/RPGNativeUI/RPGOverviewView.swift"
+        self.write(changed); self.commit(changed)
+        selection = impact.plan(self.root, base)
+        self.assertEqual(selection["mode"], "scoped")
+        self.assertIn(r"ElysiumCoreTests\.NativeListerTests/", selection["patterns"])
+        self.assertIn(r"ElysiumCoreTests\.TreeScanTests/", selection["patterns"])
+        # A reader whose class declaration the selector cannot recognise fails closed.
+        odd = "Tests/ElysiumCoreTests/OddReader.swift"
+        self.write(odd, 'extension SomethingTests {\n  let p = "Sources/Elysium/RPGNativeUI/RPGOverviewView.swift"\n}\n')
+        self.commit(odd)
+        self.assertEqual(impact.plan(self.root, base)["mode"], "full")
+
     def test_saves_version_literal_only_detection_uses_the_real_diff(self):
         source = impact.VERSION_SOURCE
         self.write(source, 'let a = 1\npublic let ELYSIUM_VERSION = "1.4.0"\n'); self.commit(source)
