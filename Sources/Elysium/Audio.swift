@@ -1638,15 +1638,34 @@ struct DinosaurSampleBank {
         return samples[key]
     }
 
+    /// Every roster species has grazing, attack and injured clips.
+    static var expectedSampleCount: Int { PrehistoricCreatureDefinition.all.count * 3 }
+
     static func loadBundled() -> DinosaurSampleBank {
         if Bundle.main.bundleURL.pathExtension == "app" {
-            guard let resources = Bundle.main.resourceURL else { return DinosaurSampleBank() }
-            return load(directory: resources.appendingPathComponent("DinosaurSounds"))
+            guard let resources = Bundle.main.resourceURL else {
+                reportIncompleteBank(loaded: 0)
+                return DinosaurSampleBank()
+            }
+            let bank = load(directory: resources.appendingPathComponent("DinosaurSounds"))
+            if bank.samples.count != expectedSampleCount { reportIncompleteBank(loaded: bank.samples.count) }
+            return bank
         }
-        // SwiftPM development executable; packaged apps never fall back to an authoring path.
+#if DEBUG
+        // SwiftPM development executable and tests; release builds carry no authoring path.
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         return load(directory: root.appendingPathComponent("packaging/DinosaurSounds"))
+#else
+        return DinosaurSampleBank()
+#endif
+    }
+
+    /// A packaged app missing clips still plays the synthesized calls, but says so once instead
+    /// of degrading silently. The release validator normally prevents this from shipping.
+    private static func reportIncompleteBank(loaded: Int) {
+        FileHandle.standardError.write(Data(
+            "[audio] dinosaur recordings incomplete: loaded \(loaded) of \(expectedSampleCount); missing calls use synthesis\n".utf8))
     }
 
     static func load(directory: URL) -> DinosaurSampleBank {

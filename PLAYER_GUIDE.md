@@ -300,7 +300,8 @@ the Nether's playable width; its paired Overworld is eight times wider to preser
 
 The four optional **Prehistoric Worlds** profiles replace the ordinary natural population with their
 roster of prehistoric creatures. Each creature has its own calls and action sounds, including attacks and
-movement. A player-attributed kill gives ordinary experience based on that creature's configured combat
+movement. Feeding calls, attacks, and injury cries use recorded voices edited for each species; creature
+sounds fade with distance and can be heard up to 40 blocks away. A player-attributed kill gives ordinary experience based on that creature's configured combat
 difficulty—health, active damage, and predator/charge behaviour—not merely its apparent size. This is
 separate from the usage-based Melee and Ranged skill-tree XP described below. On v2 and v3 maps land
 predators hunt only herbivores up to about one and a half times their own length and rest for half a day
