@@ -34,7 +34,8 @@ height and surface-biome selection: mid-continent margins become navigable
 water while high terrain remains dry island landfalls. It uses no global
 terrain mutator, so ordinary saves, legacy entity ordinals, normal biome spawn
 tables, and normal-world generation paths remain unchanged. Prehistoric
-profiles suppress modern passive/ambient/surface-monster spawn tables, direct
+profiles suppress modern passive/ambient/surface-monster spawn tables (keeping only
+wild fish and chickens as deliberate resources, below), direct
 legacy structure occupants, patrol scheduling, and human village/pillager-outpost
 plans. Dungeon, mineshaft, stronghold and fortress spawners now function on these
 maps too, and unlit caves/tunnels receive bounded monster attempts every five
@@ -138,7 +139,9 @@ eight land spawns, in flocks of 2–4. Chickens are the only ordinary land anima
 on dinosaur maps: their feathers fletch arrows. They appear at chunk generation
 (the generated-entity admission accepts any mob the profile itself spawns),
 through natural spawning, and in dawn refills alongside the herbivores, one bird
-per pick; they never count toward the herbivore/predator diet census. Ancient
+per pick, capped at six chickens in each player's census area so they cannot crowd
+dinosaurs out of pod-hostile ground; they never count toward the herbivore/predator
+diet census. Ancient
 Seas has no land table and so no chickens. True dinosaurs (theropods,
 ceratopsians, hadrosaurs, armoured dinosaurs, sauropods and the unusual
 herbivores) also drop 0–2 feathers, plus looting, like a chicken; pterosaurs

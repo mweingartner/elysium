@@ -276,6 +276,18 @@ final class CreatureRespawnTests: XCTestCase {
                       "\(births.map(\.type))")
     }
 
+    func testChickensCannotCrowdDinosaursOutOfAPodHostileRegion() {
+        // Unsupported ground refuses every dinosaur pod but lets single chickens stand, the
+        // case where uncapped chicken picks could fill the region's whole land cap.
+        let (world, player) = fixture(.prehistoricLostWorldV2, unsupported: true)
+        var rng = RandomX(0xC41C)
+        for _ in 0..<4 { replenishCreaturesAtDawn(world, [player], &rng) }
+        let chickens = world.entities.compactMap { $0 as? Mob }.filter { $0.type == PREHISTORIC_CHICKEN_MOB }
+        XCTAssertGreaterThan(chickens.count, 0, "chickens still refill")
+        XCTAssertLessThanOrEqual(chickens.count, PREHISTORIC_DAWN_CHICKEN_CAP)
+        XCTAssertEqual(PREHISTORIC_DAWN_CHICKEN_CAP, 48 / 8)
+    }
+
     // MARK: - local dawn census (prehistoric profiles)
 
     /// Eighteen land dinosaurs parked in the fixture's loaded corners, more

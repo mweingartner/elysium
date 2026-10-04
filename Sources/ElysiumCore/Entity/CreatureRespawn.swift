@@ -34,6 +34,9 @@ func prehistoricDawnLandEntries(profile: PrehistoricWorldProfile, sequence: Int)
 /// no longer hold every slot and starve the region around the player.
 let PREHISTORIC_DAWN_CENSUS_RADIUS = 128.0
 
+/// Most chickens a dawn refill keeps in one player's census area: an eighth of the 48 land cap.
+let PREHISTORIC_DAWN_CHICKEN_CAP = 6
+
 /// Whether `mob` counts against a dawn refill's category caps. Ordinary worlds
 /// keep the historical whole-loaded-world census; prehistoric profiles count
 /// only the population local to an eligible player. Pure distance arithmetic:
@@ -84,6 +87,7 @@ public func replenishCreaturesAtDawn(
     var localCounts: [[String: Int]] = Array(repeating: [:], count: eligiblePlayers.count)
     var herbivores = Array(repeating: 0, count: eligiblePlayers.count)
     var predators = Array(repeating: 0, count: eligiblePlayers.count)
+    var chickens = Array(repeating: 0, count: eligiblePlayers.count)
     for entity in world.entities {
         guard let mob = entity as? Mob, !mob.dead, mob.health > 0 else { continue }
         guard profile != nil else { counts[mob.category, default: 0] += 1; continue }
@@ -92,6 +96,8 @@ public func replenishCreaturesAtDawn(
             if let dinosaur = mob as? PrehistoricCreature {
                 if dinosaur.definition.isLandHerdHerbivore { herbivores[index] += 1 }
                 if dinosaur.definition.isLandPredator { predators[index] += 1 }
+            } else if mob.type == PREHISTORIC_CHICKEN_MOB {
+                chickens[index] += 1
             }
         }
     }
@@ -133,9 +139,9 @@ public func replenishCreaturesAtDawn(
                 let dx = $0.x - (Double(x) + 0.5), dy = $0.y - Double(y), dz = $0.z - (Double(z) + 0.5)
                 return dx * dx + dy * dy + dz * dz < 24 * 24
             }) else { continue }
-            let entries: [SpawnEntry]
+            let candidates: [SpawnEntry]
             if let profile {
-                entries = category.name == "creature"
+                candidates = category.name == "creature"
                     ? prehistoricDawnLandEntries(profile: profile, sequence:
                         herbivores[playerIndex] < 2 * max(1, predators[playerIndex])
                         && category.cap - localCounts[playerIndex][category.name, default: 0] >= 8 ? 0 : 2)
@@ -143,9 +149,15 @@ public func replenishCreaturesAtDawn(
             } else {
                 let biomeID = world.biomeAt(x, y, z)
                 guard BIOMES.indices.contains(biomeID), let biome = BIOMES[biomeID] else { continue }
-                entries = category.name == "creature" ? biome.creatures
+                candidates = category.name == "creature" ? biome.creatures
                     : category.name == "water" ? biome.waterCreatures : biome.ambient
             }
+            // Chickens never despawn and need one free spot where a pod needs eight, so on
+            // pod-hostile ground they could fill a region's whole land cap. Hold each player's
+            // area to an eighth of the cap in chickens; the dinosaurs keep the rest.
+            let entries = profile != nil && category.name == "creature"
+                && chickens[playerIndex] >= PREHISTORIC_DAWN_CHICKEN_CAP
+                ? candidates.filter { $0.mob != PREHISTORIC_CHICKEN_MOB } : candidates
             guard !entries.isEmpty else { continue }
             let entry = rng.pickWeighted(entries) { $0.weight }
             let definition = PrehistoricCreatureDefinition.named(entry.mob)
@@ -206,6 +218,7 @@ public func replenishCreaturesAtDawn(
                         localCounts[index][category.name, default: 0] += 1
                         if definition?.isLandHerdHerbivore == true { herbivores[index] += 1 }
                         if definition?.isLandPredator == true { predators[index] += 1 }
+                        if entry.mob == PREHISTORIC_CHICKEN_MOB { chickens[index] += 1 }
                     }
                 }
                 switch category.name {
