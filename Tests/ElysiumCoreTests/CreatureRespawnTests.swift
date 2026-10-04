@@ -190,7 +190,14 @@ final class CreatureRespawnTests: XCTestCase {
                     XCTAssertFalse(entries.isEmpty)
                 }
                 for entry in entries {
-                    let definition = PrehistoricCreatureDefinition.named(entry.mob)!
+                    // Chickens refill alongside the herbivores (they fletch arrows), never as predators.
+                    if entry.mob == PREHISTORIC_CHICKEN_MOB {
+                        XCTAssertNotEqual(sequence, 2)
+                        continue
+                    }
+                    guard let definition = PrehistoricCreatureDefinition.named(entry.mob) else {
+                        XCTFail("unexpected dawn land entry \(entry.mob)"); continue
+                    }
                     XCTAssertEqual(definition.medium, .land)
                     XCTAssertEqual(sequence == 2 ? definition.isLandPredator : definition.isLandHerdHerbivore, true)
                 }
@@ -253,6 +260,7 @@ final class CreatureRespawnTests: XCTestCase {
         XCTAssertFalse(prehistoricHasClearance(world, definition: giant, x: 32, y: 64, z: 32, requireGround: true),
                        "a clear-looking centre is not whole-body ground support")
         world.creatureRespawnSequence = 1
+        let before = world.entities.count
         var rng = RandomX(0xF411)
         let start = ContinuousClock.now
         let report = replenishCreaturesAtDawn(world, [player], &rng)
@@ -260,8 +268,12 @@ final class CreatureRespawnTests: XCTestCase {
         print("[creature-respawn] refusal-heavy dawn: \(report.candidateAttempts) candidates, \(report.siteAdmissionChecks) admission checks, \(duration)")
         XCTAssertEqual(report.candidateAttempts, 256)
         XCTAssertGreaterThan(report.siteAdmissionChecks, 32)
-        XCTAssertEqual(report.totalSpawned, 0)
-        XCTAssertEqual(world.creatureRespawnSequence, 1)
+        // No dinosaur body is admitted onto unsupported ground. Small chickens may still find
+        // a footing there; they are the only births and never count as herd herbivores.
+        let births = world.entities.dropFirst(before).compactMap { $0 as? Mob }
+        XCTAssertEqual(births.count, report.totalSpawned)
+        XCTAssertTrue(births.allSatisfy { $0.type == PREHISTORIC_CHICKEN_MOB },
+                      "\(births.map(\.type))")
     }
 
     // MARK: - local dawn census (prehistoric profiles)

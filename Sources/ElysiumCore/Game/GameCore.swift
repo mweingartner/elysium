@@ -3459,7 +3459,10 @@ public final class GameCore {
         // loot, but only its explicitly curated roster may materialize from a
         // fresh generated EntitySpec. Existing saved entities remain
         // authoritative through the separate saved-record branch above.
-        if world.generationSettings.preset.isPrehistoric, definition == nil { return false }
+        if let profile = world.generationSettings.preset.prehistoricProfile, definition == nil,
+           !prehistoricProfileSpawnsMob(profile, spec.mob) {
+            return false
+        }
         guard let definition else {
             // Ordinary structure occupants keep their authored cell (it may
             // legitimately hold a door or carpet), but a land creature whose

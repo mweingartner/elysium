@@ -34,6 +34,19 @@ public enum PrehistoricCreatureFamily: String, CaseIterable, Sendable {
         self == .ceratopsian || self == .largeTheropod || self == .shorePredator
     }
 
+    /// True dinosaurs, the bird lineage: theropods, ceratopsians, hadrosaurs, armoured
+    /// dinosaurs, sauropods and the unusual herbivores. Pterosaurs, marine reptiles and the
+    /// crocodilian shore predator are prehistoric reptiles but not dinosaurs.
+    var isDinosaur: Bool {
+        switch self {
+        case .smallTheropod, .largeTheropod, .ceratopsian, .hadrosaur, .armoredHerbivore,
+             .sauropod, .unusualHerbivore:
+            return true
+        case .flyer, .ichthyosaur, .longNeckedSwimmer, .marinePredator, .shorePredator:
+            return false
+        }
+    }
+
     /// The land-only herbivore families that participate in the V2 herd
     /// ecology. Do not infer this from `!isPredatory`: that would accidentally
     /// classify flyers and non-predatory marine reptiles as herd prey.
@@ -412,7 +425,27 @@ public func prehistoricSpawnEntries(
             ("tropical_fish", 2, 2, 4),
         ]
     }
+    // Chickens are the one ordinary land animal kept on dinosaur maps: their feathers fletch
+    // arrows. They take about an eighth of the profile's land table, in small flocks.
+    if medium == .land, !roster.isEmpty {
+        return roster + [(PREHISTORIC_CHICKEN_MOB, prehistoricChickenWeight(roster), 2, 4)]
+    }
     return roster
+}
+
+public let PREHISTORIC_CHICKEN_MOB = "chicken"
+
+/// Weight giving chickens roughly one in eight land spawns for this roster.
+func prehistoricChickenWeight(_ roster: [SpawnEntry]) -> Double {
+    max(1, roster.reduce(0) { $0 + $1.weight } / 7)
+}
+
+/// Mobs a prehistoric profile spawns itself: its curated roster plus the deliberate
+/// non-roster resources (wild fish in the water, chickens on land).
+public func prehistoricProfileSpawnsMob(_ profile: PrehistoricWorldProfile, _ mob: String) -> Bool {
+    ["creature", "ambient", "water"].contains { category in
+        prehistoricSpawnEntries(profile: profile, category: category).contains { $0.mob == mob }
+    }
 }
 
 /// Bounded semantic/action fields exposed on saves and LAN snapshots.
@@ -1861,7 +1894,13 @@ public final class PrehistoricCreature: Animal {
     public override func drops() -> [DropEntry] {
         switch definition.medium {
         case .land:
-            return [DropEntry("bone", min: 1, max: definition.isPredatory ? 3 : 2)]
+            var loot = [DropEntry("bone", min: 1, max: definition.isPredatory ? 3 : 2)]
+            // Dinosaurs are the bird lineage and many were feathered: they shed feathers
+            // like a chicken does, with the same looting bonus.
+            if definition.family.isDinosaur {
+                loot.append(DropEntry("feather", min: 0, max: 2, lootingBonus: 1))
+            }
+            return loot
         case .air:
             return [DropEntry("feather", min: 1, max: 2)]
         case .aquatic:

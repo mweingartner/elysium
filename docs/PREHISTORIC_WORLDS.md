@@ -133,6 +133,18 @@ are non-domestic prey/resource species, not restored modern passive fauna;
 they give fish-focused swimmers a live in-profile food source and keep the
 water population bounded by the existing category cap.
 
+Land profiles likewise end with one `chicken` entry, weighted to about one in
+eight land spawns, in flocks of 2–4. Chickens are the only ordinary land animal
+on dinosaur maps: their feathers fletch arrows. They appear at chunk generation
+(the generated-entity admission accepts any mob the profile itself spawns),
+through natural spawning, and in dawn refills alongside the herbivores, one bird
+per pick; they never count toward the herbivore/predator diet census. Ancient
+Seas has no land table and so no chickens. True dinosaurs (theropods,
+ceratopsians, hadrosaurs, armoured dinosaurs, sauropods and the unusual
+herbivores) also drop 0–2 feathers, plus looting, like a chicken; pterosaurs
+keep their existing feather drop, while marine reptiles and the crocodilian
+Deinosuchus drop none. These changes apply to every profile revision.
+
 ### Dawn replenishment and forest renewal
 
 **Options... → World → Creature Respawn** controls replenishment on all supported

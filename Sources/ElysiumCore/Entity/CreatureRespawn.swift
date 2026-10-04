@@ -19,6 +19,8 @@ public struct CreatureRespawnReport: Equatable, Sendable {
 func prehistoricDawnLandEntries(profile: PrehistoricWorldProfile, sequence: Int) -> [SpawnEntry] {
     let wantsHerbivore = sequence != 2
     return prehistoricSpawnEntries(profile: profile, category: "creature").filter { entry in
+        // Chickens refill with the herbivores, one bird per pick, so hunted flocks recover.
+        if entry.mob == PREHISTORIC_CHICKEN_MOB { return wantsHerbivore }
         guard let definition = PrehistoricCreatureDefinition.named(entry.mob) else { return false }
         return wantsHerbivore ? definition.isLandHerdHerbivore : definition.isLandPredator
     }

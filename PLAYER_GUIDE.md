@@ -300,7 +300,9 @@ Overworld route is never dependent on finding and completing a rare ruined frame
 the Nether's playable width; its paired Overworld is eight times wider to preserve normal portal scaling.
 
 The four optional **Prehistoric Worlds** profiles replace the ordinary natural population with their
-roster of prehistoric creatures. Each creature has its own calls and action sounds, including attacks and
+roster of prehistoric creatures, plus small flocks of chickens so you can still get feathers for arrows.
+Dinosaurs are the bird lineage, and killing one can also drop up to two feathers (more with Looting);
+pterosaurs drop feathers too, while marine reptiles and Deinosuchus do not. Each creature has its own calls and action sounds, including attacks and
 movement. Feeding calls, attacks, and injury cries use recorded voices edited for each species; creature
 sounds fade with distance and can be heard up to 40 blocks away. A player-attributed kill gives ordinary experience based on that creature's configured combat
 difficulty—health, active damage, and predator/charge behaviour—not merely its apparent size. This is

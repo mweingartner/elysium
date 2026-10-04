@@ -126,6 +126,8 @@ final class PrehistoricWorldsTests: XCTestCase {
     func testAllHerbivoreSpawnTablesUseEightToTenMemberPods() {
         for profile in PrehistoricWorldProfile.allCases {
             for entry in prehistoricSpawnEntries(profile: profile, category: "creature") {
+                // Chickens are the deliberate non-roster land resource with ordinary flocks.
+                if entry.mob == PREHISTORIC_CHICKEN_MOB { continue }
                 let definition = PrehistoricCreatureDefinition.named(entry.mob)!
                 if definition.isLandHerdHerbivore {
                     XCTAssertEqual(entry.minPack, 8)
@@ -154,7 +156,9 @@ final class PrehistoricWorldsTests: XCTestCase {
                 // probability and pod admission differ.
                 var oldRNG = chunkRandom(seed, cx, cz, 0xAB1E)
                 if oldRNG.nextFloat() < 0.28 {
+                    // The pre-change table had only the dinosaur roster (no chickens).
                     let entries = prehistoricSpawnEntries(profile: .lostWorld, category: "creature")
+                        .filter { PrehistoricCreatureDefinition.named($0.mob) != nil }
                     let entry = oldRNG.pickWeighted(entries) { $0.weight }
                     let definition = PrehistoricCreatureDefinition.named(entry.mob)!
                     let count = definition.minPack + oldRNG.nextInt(definition.maxPack - definition.minPack + 1)
@@ -456,7 +460,9 @@ final class PrehistoricWorldsTests: XCTestCase {
         let lostLand = prehistoricSpawnEntries(profile: .lostWorld, category: "creature")
         let lostAir = prehistoricSpawnEntries(profile: .lostWorld, category: "ambient")
         let lostWater = prehistoricSpawnEntries(profile: .lostWorld, category: "water")
-        XCTAssertEqual(lostLand.map(\.mob), PrehistoricWorldProfile.landCreatureIDs)
+        // The roster, then chickens as the one ordinary land resource (feathers for arrows).
+        XCTAssertEqual(Array(lostLand.dropLast().map(\.mob)), PrehistoricWorldProfile.landCreatureIDs)
+        XCTAssertEqual(lostLand.last?.mob, "chicken")
         XCTAssertEqual(lostAir.map(\.mob), PrehistoricWorldProfile.airCreatureIDs)
         XCTAssertEqual(Array(lostWater.prefix(PrehistoricWorldProfile.aquaticCreatureIDs.count).map(\.mob)),
                        PrehistoricWorldProfile.aquaticCreatureIDs)
