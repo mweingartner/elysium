@@ -19,6 +19,23 @@ final class TextEntrySourceTests: XCTestCase {
         })
     }
 
+    func testAppKitGateClicksStayInsideTheBoundGameView() throws {
+        let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
+        let start = try XCTUnwrap(driver.range(of: "func logicalPoint(x: Double, y: Double)"))
+        let end = try XCTUnwrap(driver.range(of: "func validateBeforeAction()",
+                                             range: start.upperBound..<driver.endIndex))
+        let logicalPoint = String(driver[start.lowerBound..<end.lowerBound])
+        // Click geometry comes from the game view, which must sit inside the bound window, and
+        // every computed point must land inside the game view.
+        XCTAssertTrue(logicalPoint.contains("let content = try currentGroup()"))
+        XCTAssertTrue(logicalPoint.contains("let window = try currentWindow()"))
+        XCTAssertTrue(logicalPoint.contains("CGRect(origin: windowPosition, size: windowSize).contains("))
+        XCTAssertTrue(logicalPoint.contains("CGRect(origin: position, size: size).contains(point)"))
+        let title = try XCTUnwrap(driver.range(of: "gateStage = \"title-navigation\""))
+        let titleBlock = String(driver[title.lowerBound...].prefix(1_500))
+        XCTAssertTrue(titleBlock.contains("CGRect(origin: windowOrigin, size: windowExtent).contains("))
+    }
+
     func testCanonicalKeyDownOwnsOrdinaryTextAndPreflightDoesNotFingerprintIt() throws {
         let router = try source("Sources/Elysium/AppInputRouterM.swift")
         XCTAssertTrue(router.contains("if source == .performKeyEquivalent"))

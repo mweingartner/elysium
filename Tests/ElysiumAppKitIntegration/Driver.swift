@@ -4584,9 +4584,19 @@ do {
         // Measure the game view (the "Elysium menus and actions" group), not the window frame:
         // the game lays its UI out in the content area, and the title bar's height differs
         // between window chrome generations (macOS 26-linked apps use a taller one).
+        // The game view must be a finite, non-empty frame inside the bound window, and every
+        // click must land inside it, so a click can never leave the verified window.
+        let window = try currentWindow()
         let content = try currentGroup()
-        guard let position = axPoint(content, kAXPositionAttribute as CFString),
+        guard let windowPosition = axPoint(window, kAXPositionAttribute as CFString),
+              let windowSize = axSize(window, kAXSizeAttribute as CFString),
+              let position = axPoint(content, kAXPositionAttribute as CFString),
               let size = axSize(content, kAXSizeAttribute as CFString),
+              [windowPosition.x, windowPosition.y, windowSize.width, windowSize.height,
+               position.x, position.y, size.width, size.height].allSatisfy(\.isFinite),
+              windowSize.width > 0, windowSize.height > 0, size.width > 0, size.height > 0,
+              CGRect(origin: windowPosition, size: windowSize).contains(
+                  CGRect(origin: position, size: size)),
               let screen = NSScreen.screens.first(where: { $0.frame.intersects(CGRect(origin: position, size: size)) }) else {
             throw GateError.failed("window geometry")
         }
@@ -4594,8 +4604,13 @@ do {
         let drawableWidth = Double(size.width * backing)
         let drawableHeight = Double(size.height * backing)
         let scale = max(1, min(floor(drawableWidth / 380), floor(drawableHeight / 240)))
-        return CGPoint(x: position.x + x * scale / backing,
-                       y: position.y + y * scale / backing)
+        let point = CGPoint(x: position.x + x * scale / backing,
+                            y: position.y + y * scale / backing)
+        guard point.x.isFinite, point.y.isFinite,
+              CGRect(origin: position, size: size).contains(point) else {
+            throw GateError.failed("logical point outside the game view")
+        }
+        return point
     }
     func validateBeforeAction() throws {
         guard app.processIdentifier == cleanup.expectedPID, app.isActive,
@@ -5133,7 +5148,15 @@ do {
     let contentGroup = try currentGroup()
     let window = presentationBinding.axWindow
     let size = try { () -> CGSize in
-        guard let value = axSize(contentGroup, kAXSizeAttribute as CFString) else { throw GateError.failed("size") }
+        guard let value = axSize(contentGroup, kAXSizeAttribute as CFString),
+              let origin = axPoint(contentGroup, kAXPositionAttribute as CFString),
+              let windowOrigin = axPoint(window, kAXPositionAttribute as CFString),
+              let windowExtent = axSize(window, kAXSizeAttribute as CFString),
+              [value.width, value.height, origin.x, origin.y, windowOrigin.x, windowOrigin.y,
+               windowExtent.width, windowExtent.height].allSatisfy(\.isFinite),
+              value.width > 0, value.height > 0, windowExtent.width > 0, windowExtent.height > 0,
+              CGRect(origin: windowOrigin, size: windowExtent).contains(
+                  CGRect(origin: origin, size: value)) else { throw GateError.failed("size") }
         return value
     }()
     let backing = NSScreen.main?.backingScaleFactor ?? 2
