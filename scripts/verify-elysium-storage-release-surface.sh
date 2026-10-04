@@ -274,7 +274,8 @@ EXPECTED_STORAGE_OBJECT_SHA256='e38636a44a6357ab6b17195cbe81bf56c5ebf8157fb07c30
 # 5b4a7a287800e2cb3788f3f09750d9fdff3db342151db4cbed7dd850c9463463. See docs/release-1.4.1-build.md.
 # 1.4.2 (Minecraft bow pose, quieter dungeon mobs): only ELYSIUM_VERSION changes; was
 # 9294a42711cfc62b6debb79bb334790ce202bcd480b413e8f21962e2c01940a5.
-EXPECTED_SAVES_SOURCE_SHA256='38b646c1ea1983c0f7104c3d9df353a04cea05b39442180415cf4484dba06479'
+# 1.4.3: only ELYSIUM_VERSION changes; was 38b646c1ea1983c0f7104c3d9df353a04cea05b39442180415cf4484dba06479.
+EXPECTED_SAVES_SOURCE_SHA256='e87d37bbf5cf4d763fbc020d39cc2b7da2caad4a4cb92da1c2205a0968efc461'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
 # 1.4.0: only the Saves.swift compiler-AST inventory entry moves (version literal); was
 # 377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb.
@@ -282,7 +283,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd
 # f922b1211186211a274de565ed7f68517693bbff9ac09efc1082760898e792e0.
 # 1.4.2: only the Saves.swift compiler-AST entry moves (version literal); was
 # ca7196757bf56adc022268b203057a15286c1cf0314f7c8005c597bd940d7350.
-EXPECTED_CORE_CAPABILITY_SHA256='ae4018b1c271741c0768684c81ec4fdbb3725e9b12774511033e155eb34a6375'
+# 1.4.3: only the Saves.swift compiler-AST entry moves (version literal); was
+# ae4018b1c271741c0768684c81ec4fdbb3725e9b12774511033e155eb34a6375.
+EXPECTED_CORE_CAPABILITY_SHA256='62dec84f63f0199c776aaa6b936f4e2e53bcd6493863c372fa4578acb0f394c0'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444'
@@ -359,7 +362,10 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='d1edea9616bbc18445df21194e4f8f085f25a0466122c
 # dungeon-cave-spawning: host cave tick and supported spawner admission renew
 # GameCore/Core/linked products only; Storage/TextInput remain byte-identical.
 # Measured hashes and native proof: docs/monster-spawning.md.
-EXPECTED_GAME_CORE_SOURCE_SHA256='c697261db513b3652729face7a5ba4f2eb531b1b27417816176bdd0aaa7801ed'
+# 1.4.3 (feathered dinosaurs, chickens on dinosaur maps): shouldMaterializeGeneratedEntity admits a
+# generated non-roster mob only when the prehistoric profile's own spawn table lists it (chickens);
+# no checked-player caller changes. Was c697261db513b3652729face7a5ba4f2eb531b1b27417816176bdd0aaa7801ed.
+EXPECTED_GAME_CORE_SOURCE_SHA256='a3df1d3ae3f1039361b3b59205ec7a6cb16832dc1d916b4002b305ae14b58d6d'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -428,7 +434,9 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='c697261db513b3652729face7a5ba4f2eb531b1b274178
 # 1.4.0 version literal: was 58bcd44d924af3fd25d5a1f2eef5d7395402cb2a69b7074d0f40fa69611aec01.
 # 1.4.1 version literal: was 22b62d8e311c04dc1a5f0a2f9a726f7d7ab2315a198ba11fe6daca0e7a714932.
 # 1.4.2 version literal: was db906dc579360ddbeafb4845260b62b121ab8854b761a63cbef5fd3875e30a8d.
-EXPECTED_CORE_OBJECT_SHA256='77d2c36ddba3ddc64297574b02f18da85b376b023c705b8626f01bd327d11f1b'
+# 1.4.3: dinosaur feather drops, profile chicken spawns, dawn chicken cap and the admission rule,
+# plus the version literal; was 77d2c36ddba3ddc64297574b02f18da85b376b023c705b8626f01bd327d11f1b.
+EXPECTED_CORE_OBJECT_SHA256='a936716f2e339b401a4c226a2c46df1bb42ff3ec9e4c49f386c24735cb2978bf'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -488,8 +496,10 @@ EXPECTED_CORE_OBJECT_SHA256='77d2c36ddba3ddc64297574b02f18da85b376b023c705b8626f
 # prehistoric-only 40-block creature range with soft zombie groans (Audio.swift); Atrium still at
 # 19eb9407e5cee1e511d2cd3df7e5c4eaacbff7e0. Were de83e175aa15e97a6ce3e154123bd551fc080171891b80b629fdbd45b5c2f700
 # (Elysium) and 1b364a0e8a74affcf13a955bea11471181e7e08947839fbf62d4a720cf0eba84 (elysmoke, version literal).
-EXPECTED_ELYSIUM_PRODUCT_SHA256='1613ad21da3116752c4325990c9e65e46991e4a3a5cb75784bf5d57f77afa6fe'
-EXPECTED_SMOKE_PRODUCT_SHA256='3d57c43a95bbad67cd935f145bb7e03a91a6097c5df39f3498342f6e9801ae71'
+# 1.4.3: both products relink the Core changes above; were 1613ad21da3116752c4325990c9e65e46991e4a3a5cb75784bf5d57f77afa6fe
+# (Elysium) and 3d57c43a95bbad67cd935f145bb7e03a91a6097c5df39f3498342f6e9801ae71 (elysmoke). Atrium still 19eb940.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='883a0240e55faa7661dae0dfea9ca7104c3c64e276146ee86a40ec222549e151'
+EXPECTED_SMOKE_PRODUCT_SHA256='edf92a0ed3d32b5c3280b54198ae31660a3bfa97b36d68c0c03f1c03c175dcf4'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
