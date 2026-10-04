@@ -270,6 +270,9 @@ final class UICanvas {
         heldItemTextures.removeAll(keepingCapacity: true)
     }
 
+    /// A held-only pack texture by its file name (for example `bow_pulling_1`), when loaded.
+    func viewmodelPackImage(_ name: String) -> RGBAImage? { heldPackItemImages[name] }
+
     /// Immutable, native-resolution source for the 3D viewmodel. Never use an already
     /// projected/baked held sprite as geometry input: that would extrude its perspective.
     func viewmodelItemImage(_ definition: ItemDef, data: StackData?) -> RGBAImage {

@@ -20,8 +20,10 @@ constant. Holding input repeats; release completes the current cycle. Existing
 lower/raise swaps, the previously requested 360-degree equip flip, and Reduce Motion
 behavior remain. Combat, mining, item consumption, and projectile authority are unchanged.
 
-The reference inventory did not contain a bow or shield. Their specialized Elysium
-anatomy/mechanics are retained, not claimed as newly matched to Minecraft. The charging
+The reference inventory did not contain a bow or shield. The bow has since been rebuilt
+(October 2026) to Minecraft Java Edition's documented first-person transforms — sprite only, own
+hand, vanilla draw curve and pulling textures; the shield's specialized anatomy is retained, not
+claimed as newly matched to Minecraft. The charging
 trident retains target convergence but now starts from its ordinary item socket, avoiding
 a jump to the former anatomical grip. No Mojang code or assets were copied.
 

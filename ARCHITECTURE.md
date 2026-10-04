@@ -668,15 +668,20 @@ a working point against the selected block/entity. Equipment still lowers before
 raises afterward. The previously requested cosmetic 360-degree equip flip is retained;
 it yields to real actions and Reduce Motion and was not established by the Minecraft comparison.
 
-Bow and shield anatomy is retained: fixed-length forearm/upper-arm segments, a closed wrist joint,
-fitted holding grips, and a separate hooked right-hand bow-string contact. Closed grips receive the
-hand-only local Y half-turn; the draw hook retains its own contact frame. Shield rear grip remains
-toward the wearer and its protective face outward. These paths, plus ranged aiming, were not redesigned
-from the ordinary-item comparison.
+The bow follows Minecraft Java Edition's first-person hand transforms
+([`FirstPersonBow.swift`](Sources/Elysium/FirstPersonBow.swift)): no arm; the extruded pack bow
+sprite in its own hand (main hand right, off hand left via the arm sign); `applyItemArmTransform`,
+then for a draw the vanilla swing-in/tilt, slight shake past 10% pull, pull-back and depth stretch on
+the `getPowerForTime` curve, then the bow model's first-person display transform. Only the drawing
+hand renders, and the texture steps through `bow_pulling_0/1/2` at whole-tick thresholds 13 and 18
+(the pack loader keeps those three texture-only frames as held images). The constants follow the
+published vanilla values; no Mojang code or assets are copied. Shield anatomy is retained:
+fixed-length forearm/upper-arm segments, a closed wrist joint and fitted holding grip, with its rear
+grip toward the wearer and protective face outward.
 
 `FirstPersonTarget` remains read-only for ranged presentation: it selects the simulation-eye hit,
 projects through the same interpolated/bobbed `CamState` as the world, and maps that screen point into
-the independent hand lens. Bow arrows and crossbow/charging-trident poses retain target convergence;
+the independent hand lens. Crossbow and charging-trident poses retain target convergence;
 the analytic muzzle/tip solve includes the offset from the grip. A charging trident uses at least
 three units of presentation depth, and depth changes ease over 60ms. These are bounded presentation
 proxies, not extra gameplay reach. Portal post-processing intentionally distorts the world after
@@ -688,7 +693,8 @@ The direct primary reference is **one running Minecraft 26.2 session**, with six
 and pickaxe, sword, and equipment-change motion observed. Its ordinary held items had no visible
 holding hand/arm. This supports the item-only silhouette and canonical repeated swing used here,
 not a claim of exhaustive Minecraft/version parity. Neither the inspected hotbar nor chest contained
-a bow or shield, so their retained Elysium anatomy is **not** claimed as a compared match.
+a bow or shield; the bow was later rebuilt to vanilla's documented first-person transforms, and the
+shield's retained Elysium anatomy is **not** claimed as a compared match.
 No Mojang assets or source code were copied. The redesigned native Metal renderer was inspected with
 pickaxe, axe, shovel, sword, bread, a block, and an empty slot; repeated pickaxe/sword strokes and
 release recovery were checked. Faithful silhouettes remain crisp and connected, with deliberate

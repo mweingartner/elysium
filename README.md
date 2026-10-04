@@ -245,15 +245,16 @@ The ordinary primary swing repeats continuously while the mouse button is held, 
 active cycle after release, and does not steer toward a selected block or entity. Its approximately
 0.20-second cycle follows the observed Minecraft reference rather than physical tip-to-target contact.
 Changing equipment lowers the outgoing item before raising the replacement; the cosmetic equip
-twirl rotates the whole prop and yields to actions and Reduce Motion. Bows and shields retain their
-separate anatomical presentation in the left hand, including the bow's right-hand draw and the
-shield's outward protective face. **G** and **H** toggle a torch or a shield from the inventory into the
+twirl rotates the whole prop and yields to actions and Reduce Motion. The bow follows Minecraft's
+first-person presentation: the resource-pack bow sprite with no arm, held in the hand it is in
+(main hand on the right, off hand mirrored on the left); shields keep their anatomical presentation
+and outward protective face. **G** and **H** toggle a torch or a shield from the inventory into the
 off hand and back, so you can carry a pickaxe and a torch
 to mine with light, or a sword and a shield to fight defensively; a held torch in either hand casts
-a soft, flickering warm light on the world around you. Holding use with a bow raises it, brings the
-right hand to the string, flexes the limbs as the string draws back, and fires on release using the same
-charge duration that determines arrow power; after the shot both hands relax back along the draw
-path. Holding use with a shield in the off hand and a sword, mace, or empty main hand raises the
+a soft, flickering warm light on the world around you. Holding use with a bow swings it in toward the crosshair, tilts and
+pulls it back as the draw builds, and steps through the pack's three pulling textures (at 13 and 18
+ticks); only the drawing hand is shown, and the shot uses the same charge duration that determines
+arrow power. Holding use with a shield in the off hand and a sword, mace, or empty main hand raises the
 shield to guard over the same quarter second the block takes
 to become active (and eases it back down on release), and while raised it stops a frontal melee or
 projectile hit — damage and knockback both — leaving flanking and environmental damage to land.

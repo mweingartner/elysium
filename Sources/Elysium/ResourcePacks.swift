@@ -1561,17 +1561,19 @@ func buildPackAtlas(packs: [ResourcePack],
     var itemIcons: [String: [UInt8]] = [:]
     var heldItemIcons: [String: RGBAImage] = [:]
     let registeredItemImages = Set(itemDefs.flatMap { [$0.name, $0.icon] })
+    // Texture-only frames with no item of their own: the first-person bow's draw stages.
+    let heldOnlyImages: Set<String> = ["bow_pulling_0", "bow_pulling_1", "bow_pulling_2"]
     for p in packs.reversed() {   // walk lowest→highest so highest priority wins
         for path in p.list(prefix: p.texRoot + "item/") where path.hasSuffix(".png") {
             guard budget.shouldContinue else { return nil }
             let base = String(path.components(separatedBy: "/").last!.dropLast(4))
-            guard registeredItemImages.contains(base) else { continue }
+            guard registeredItemImages.contains(base) || heldOnlyImages.contains(base) else { continue }
             guard let d = p.file(path), var img = decodePNG(d, budget: budget) else { continue }
             if img.height > img.width, img.height % img.width == 0 {
                 img = stripFrame(img, 0)
             }
             guard img.width == img.height else { continue }
-            itemIcons[base] = scaleBox(img, to: 16)
+            if !heldOnlyImages.contains(base) { itemIcons[base] = scaleBox(img, to: 16) }
             let heldResolution = min(64, img.width)
             heldItemIcons[base] = RGBAImage(
                 width: heldResolution, height: heldResolution,

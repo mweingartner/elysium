@@ -145,7 +145,8 @@ you mine without placing torches first. With a shield in the off hand and a swor
 main hand, holding the **use** action raises the shield: while raised it blocks a frontal melee or
 projectile hit outright, including its knockback, but not attacks from the side or behind, falling,
 fire, or other environmental damage. Ordinary tools use detailed, extruded resource-pack art
-without a visible holding hand; bows and shields retain their specialized hand animations.
+without a visible holding hand. Bows follow Minecraft's first-person pose in either hand, including
+the draw; shields keep their specialized hand animation.
 
 ### Fixed mouse and application shortcuts
 
