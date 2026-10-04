@@ -110,4 +110,54 @@ final class PrehistoricAudioTests: XCTestCase {
             XCTAssertTrue(speciesRecipes.allSatisfy { $0.category == expectedCategory })
         }
     }
+
+    /// End to end: a live dinosaur ticking in a world emits its own call, and that exact sound
+    /// renders as the bundled recording through the game mixer from 30 blocks away — beyond the
+    /// 18-block reach that made earlier synthesized calls inaudible at herd distances.
+    func testLiveDinosaurCallReachesTheMixerAsItsRecording() throws {
+        let world = World(dim: .overworld, seed: 0xC0DE,
+                          generationSettings: .init(preset: .prehistoricLostWorld))
+        for cz in -1...1 {
+            for cx in -1...1 {
+                let chunk = Chunk(cx: cx, cz: cz, minY: world.info.minY, height: world.info.height)
+                chunk.status = .lit
+                for z in 0..<CHUNK_W {
+                    for x in 0..<CHUNK_W {
+                        chunk.set(x, 62, z, cell(B.stone))
+                        chunk.set(x, 63, z, cell(B.grass_block))
+                    }
+                }
+                chunk.buildHeightmap()
+                world.setChunk(chunk)
+                world.light.initChunkLight(chunk)
+            }
+        }
+        let rex = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.tyrannosaurus"))
+        let creature = PrehistoricCreature(world: world, definition: rex)
+        creature.setPos(8.5, 64, 8.5)
+        world.addEntity(creature)
+        var emitted: [String] = []
+        world.hooks.playSound = { name, _, _, _, _, _ in emitted.append(name) }
+        for _ in 0..<600 where !emitted.contains(rex.soundName(for: .ambient)) {
+            creature.tick()
+        }
+        let call = rex.soundName(for: .ambient)
+        XCTAssertTrue(emitted.contains(call), "a live tyrannosaurus must call within 30 seconds")
+        XCTAssertNotNil(DinosaurSampleBank.loadBundled().sample(for: call),
+                        "its call must resolve to the approved recording, not synthesis")
+
+        let audio = AudioEngineM()
+        audio.initEngine(startDevice: false)
+        audio.setEnvironment(false, 0)
+        audio.setListener(38.5, 64, 8.5, 0) // 30 blocks away
+        audio.play(call, 8.5, 64, 8.5)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192))
+        buffer.frameLength = 8_192
+        audio.render(buffer.frameLength, buffer.mutableAudioBufferList)
+        let left = try XCTUnwrap(buffer.floatChannelData?[0])
+        let right = try XCTUnwrap(buffer.floatChannelData?[1])
+        let peak = (0..<8_192).map { max(abs(left[$0]), abs(right[$0])) }.max() ?? 0
+        XCTAssertGreaterThan(peak, 0.0005, "a call 30 blocks away must be audible")
+    }
 }
