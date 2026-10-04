@@ -33,3 +33,13 @@ links Atrium.
 `swift scripts/sqlite-boundary-scan.swift --root "$PWD" --self-test` passed for 285 production
 Swift files, and `bash scripts/verify-elysium-storage-release-surface.sh` verified every source,
 capability, caller-boundary, and normalized-artifact pin.
+
+## Window chrome and the AppKit gate
+
+SwiftPM records the deployment target as the binary's SDK version, so 1.4.0 (`minos 26.0`,
+`sdk 26.0`) gets the macOS 26 window chrome while 1.3.0 (`sdk 14.0`) got the legacy look. The new
+title bar is 32 pt tall. The packaged AppKit text-entry gate used to derive its click geometry
+from the whole window frame; with the taller title bar it computed the wrong integer UI scale and
+missed **Create World**. `Tests/ElysiumAppKitIntegration/Driver.swift` now measures the game view
+(the "Elysium menus and actions" group), exactly as the game lays out its UI. The gate passes
+against both the 1.4.0 and the 1.3.0 binaries.

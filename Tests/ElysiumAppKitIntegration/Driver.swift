@@ -4581,9 +4581,12 @@ do {
         throw GateError.failed("GameView group")
     }
     func logicalPoint(x: Double, y: Double) throws -> CGPoint {
-        let window = try currentWindow()
-        guard let position = axPoint(window, kAXPositionAttribute as CFString),
-              let size = axSize(window, kAXSizeAttribute as CFString),
+        // Measure the game view (the "Elysium menus and actions" group), not the window frame:
+        // the game lays its UI out in the content area, and the title bar's height differs
+        // between window chrome generations (macOS 26-linked apps use a taller one).
+        let content = try currentGroup()
+        guard let position = axPoint(content, kAXPositionAttribute as CFString),
+              let size = axSize(content, kAXSizeAttribute as CFString),
               let screen = NSScreen.screens.first(where: { $0.frame.intersects(CGRect(origin: position, size: size)) }) else {
             throw GateError.failed("window geometry")
         }
@@ -5125,10 +5128,12 @@ do {
         }
     }
     gateStage = "title-navigation"
-    _ = try currentGroup()
+    // Size the logical UI from the game view, as the game does, not from the window frame
+    // (see logicalPoint).
+    let contentGroup = try currentGroup()
     let window = presentationBinding.axWindow
     let size = try { () -> CGSize in
-        guard let value = axSize(window, kAXSizeAttribute as CFString) else { throw GateError.failed("size") }
+        guard let value = axSize(contentGroup, kAXSizeAttribute as CFString) else { throw GateError.failed("size") }
         return value
     }()
     let backing = NSScreen.main?.backingScaleFactor ?? 2
