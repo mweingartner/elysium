@@ -72,7 +72,9 @@ class ImpactTests(unittest.TestCase):
             docs = impact.classify(paths)
             self.assertEqual(docs["groups"], ["release-workflow"])
             self.assertTrue(docs["patterns"])
-        for path in ["Sources/Elysium/Unknown.swift", "Sources/ElysiumCore/Game/GameCore.swift", "Package.swift"]:
+        # An unmapped app-target file now scopes to the app bundle (see the app-target test);
+        # unmapped engine/manifest paths still widen.
+        for path in ["Sources/ElysiumCore/Game/GameCore.swift", "Package.swift"]:
             self.assertEqual(impact.classify([RENDER, path])["mode"], "full", path)
 
     def test_render_metadata_and_shared_shader_closures_are_explicit(self):
@@ -162,7 +164,26 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(impact.classify([impact.VERSION_SOURCE])["mode"], "full")
         self.assertIn("version", impact.classify([impact.VERSION_SOURCE], version_only=True)["groups"])
         # Any unmapped neighbour still widens the whole selection.
-        self.assertEqual(impact.classify(["Sources/Elysium/Audio.swift", "Sources/Elysium/main2.swift"])["mode"], "full")
+        self.assertEqual(impact.classify(["Sources/Elysium/Audio.swift", "Sources/ElysiumCore/Game/GameCore.swift"])["mode"], "full")
+
+    def test_app_target_sources_scope_to_app_bundle_and_their_core_source_readers(self):
+        self.assertEqual(impact.classify(["Sources/Elysium/FirstPersonBow.swift"])["groups"],
+                         ["app-shell", "release-workflow"])
+        self.assertEqual(impact.classify(["Tests/ElysiumResourcePackTests/FirstPersonBowTests.swift"])["mode"], "scoped")
+        # Core and other targets are not covered by this rule.
+        self.assertEqual(impact.classify(["Sources/ElysiumCore/Game/GameCore.swift"])["mode"], "full")
+        self.assertEqual(impact.classify(["Sources/Elysium/notes.txt"])["mode"], "full")
+        reader = "Tests/ElysiumCoreTests/CanvasSourceTests.swift"
+        self.write(reader, 'final class CanvasSourceTests: XCTestCase {\n  let p = "Sources/Elysium/UICanvas.swift"\n}\n')
+        self.write("Tests/ElysiumCoreTests/Unrelated.swift", "final class UnrelatedTests: XCTestCase {}\n")
+        self.commit(reader, "Tests/ElysiumCoreTests/Unrelated.swift")
+        base = self.git("rev-parse", "HEAD")
+        self.write("Sources/Elysium/UICanvas.swift"); self.commit("Sources/Elysium/UICanvas.swift")
+        selection = impact.plan(self.root, base)
+        self.assertEqual(selection["mode"], "scoped")
+        self.assertIn(r"ElysiumCoreTests\.CanvasSourceTests/", selection["patterns"])
+        self.assertNotIn(r"ElysiumCoreTests\.UnrelatedTests/", selection["patterns"])
+        self.assertIn("core-source-readers", selection["groups"])
 
     def test_saves_version_literal_only_detection_uses_the_real_diff(self):
         source = impact.VERSION_SOURCE

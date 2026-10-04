@@ -95,6 +95,13 @@ PACKAGING_PATHS = {"scripts/package-app.sh", "scripts/package-debug-app.sh"}
 # Release-pin manifests are verified by the gate scripts themselves, not by XCTest.
 PIN_MANIFESTS = {"scripts/elysium-core-storage-capability-v1.json", "scripts/elysium-storage-api-v1.json"}
 VERSION_PLISTS = {"packaging/Info.plist", "packaging/DebugInfo.plist"}
+# Dependency rule for the app target: Sources/Elysium is linked only by the app-target bundle
+# (ElysiumResourcePackTests); Core tests can only *read* such a file as source text, so those
+# readers are selected by scanning for its path.
+APP_SOURCE_PREFIX = "Sources/Elysium/"
+APP_TEST_PREFIX = "Tests/ElysiumResourcePackTests/"
+CORE_TESTS = "Tests/ElysiumCoreTests"
+XCTEST_CLASS = re.compile(r"^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b", re.MULTILINE)
 VERSION_SOURCE = "Sources/ElysiumCore/Game/Saves.swift"
 VERSION_DECL = re.compile(rb'^public let ELYSIUM_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$')
 
@@ -127,6 +134,11 @@ def classify(paths, version_only=False):
         elif parent == "Tests/ElysiumResourcePackTests" and (name in RENDER_TESTS or
                 (name.startswith("RayTracing") and name.endswith("Tests.swift"))):
             groups.add("renderer")
+        # Fallback after every reviewed mapping: app-target code reaches only the
+        # app bundle (plus Core source readers, added in plan()).
+        elif (path.startswith(APP_SOURCE_PREFIX) or path.startswith(APP_TEST_PREFIX)) and \
+                path.endswith(".swift"):
+            groups.add("app-shell")
         else:
             unknown.append(path)
     if unknown:
@@ -140,6 +152,19 @@ def classify(paths, version_only=False):
 
 def git(root, *args):
     return subprocess.check_output(["/usr/bin/git", "-C", str(root), *args], stderr=subprocess.PIPE)
+
+
+def core_source_readers(root, paths):
+    """Core XCTest classes whose files mention a changed app-target source path."""
+    wanted = [p for p in paths if p.startswith(APP_SOURCE_PREFIX)]
+    classes = set()
+    if not wanted:
+        return classes
+    for test in sorted((Path(root) / CORE_TESTS).glob("*.swift")):
+        text = test.read_text(encoding="utf-8", errors="strict")
+        if any(path in text for path in wanted):
+            classes.update(XCTEST_CLASS.findall(text))
+    return classes
 
 
 def version_literal_only(root, base):
@@ -181,6 +206,12 @@ def plan(root, requested_base=None, full=False):
         paths = changed_paths(root, base)
         result = classify(paths, version_only=VERSION_SOURCE in paths and
                           version_literal_only(root, base))
+        if result["mode"] == "scoped":
+            readers = sorted(core_source_readers(root, paths))
+            if readers:
+                result["groups"] = sorted(set(result["groups"]) | {"core-source-readers"})
+                result["patterns"] = sorted(set(result["patterns"]) |
+                                            {r"ElysiumCoreTests\." + name + "/" for name in readers})
         result.update(base=base, head=head, paths=paths)
     except (subprocess.CalledProcessError, UnicodeError, ValueError):
         result = {"mode": "full", "groups": [], "patterns": [], "reason": "base or change inventory unavailable"}
