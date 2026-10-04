@@ -96,7 +96,7 @@ PACKAGING_PATHS = {"scripts/package-app.sh", "scripts/package-debug-app.sh"}
 PIN_MANIFESTS = {"scripts/elysium-core-storage-capability-v1.json", "scripts/elysium-storage-api-v1.json"}
 VERSION_PLISTS = {"packaging/Info.plist", "packaging/DebugInfo.plist"}
 VERSION_SOURCE = "Sources/ElysiumCore/Game/Saves.swift"
-VERSION_LINE = re.compile(r'^[+-]public let ELYSIUM_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$')
+VERSION_DECL = re.compile(rb'^public let ELYSIUM_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$')
 
 
 def classify(paths, version_only=False):
@@ -143,11 +143,19 @@ def git(root, *args):
 
 
 def version_literal_only(root, base):
-    """True when the Saves.swift change since `base` is exactly the version literal."""
-    diff = git(root, "diff", "--no-ext-diff", "--unified=0", base, "--", VERSION_SOURCE)
-    lines = [line for line in diff.decode("utf-8", "strict").splitlines()
-             if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
-    return bool(lines) and all(VERSION_LINE.match(line) for line in lines)
+    """True only when Saves.swift differs from `base` in exactly the one top-level
+    ELYSIUM_VERSION literal: same line, nothing else, no carriage returns."""
+    old = git(root, "show", "--no-textconv", f"{base}:{VERSION_SOURCE}")
+    new = (Path(root) / VERSION_SOURCE).read_bytes()
+    if old == new or b"\r" in old or b"\r" in new:
+        return False
+    old_lines, new_lines = old.split(b"\n"), new.split(b"\n")
+    old_at = [i for i, line in enumerate(old_lines) if VERSION_DECL.match(line)]
+    new_at = [i for i, line in enumerate(new_lines) if VERSION_DECL.match(line)]
+    if len(old_at) != 1 or old_at != new_at:
+        return False
+    old_lines[old_at[0]] = new_lines[new_at[0]]
+    return old_lines == new_lines
 
 
 def changed_paths(root, base):

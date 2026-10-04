@@ -25,6 +25,8 @@ fail() {
 }
 
 snapshot() { "$SNAPSHOT_TOOL" "$ROOT"; }
+# Any earlier XCTest evidence is void until this run's XCTest stage passes again.
+rm -f -- "$(git rev-parse --git-path elysium-xctest-evidence)"
 SOURCE_AUTHORITY="$(snapshot)" || fail source-security 1
 # Freeze the comparison commit before gates; a concurrent fetch cannot narrow stage 4.
 TEST_BASE="$(scripts/test-impact.py --plan | python3 -c 'import json,sys; print(json.load(sys.stdin).get("base", "0"*40))')" \

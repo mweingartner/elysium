@@ -174,6 +174,13 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("version", selection["groups"])
         self.write(source, 'let a = 2\npublic let ELYSIUM_VERSION = "1.4.2"\n'); self.commit(source)
         self.assertEqual(impact.plan(self.root, base)["mode"], "full")
+        # A shadowing declaration inside a type, or code smuggled after a bare CR, is not
+        # a version bump even though every changed line looks like one.
+        for content in ['let a = 1\npublic let ELYSIUM_VERSION = "1.4.1"\nstruct M {\npublic let ELYSIUM_VERSION = "9.9.9"\n}\n',
+                        'let a = 1\npublic let ELYSIUM_VERSION = "1.4.1"\rlet a = 3\n']:
+            with self.subTest(content=content):
+                self.write(source, content); self.commit(source)
+                self.assertEqual(impact.plan(self.root, base)["mode"], "full")
 
     def test_unavailable_invalid_zero_and_nonancestor_bases_widen(self):
         unrelated = self.git("commit-tree", "HEAD^{tree}", "-m", "independent root")

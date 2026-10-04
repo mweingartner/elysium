@@ -66,17 +66,14 @@ stage "real AppKit keyboard and Accessibility" scripts/appkit-text-entry-integra
 # for the same remote base (or the full suite), select tests only for the changes after it.
 TEST_BASE="$remote_sha"
 EVIDENCE="$(git rev-parse --git-path elysium-xctest-evidence)"
-if [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ]; then
-    read -r verified_sha verified_base verified_mode < "$EVIDENCE" || true
-    case "${verified_sha:-}:${verified_base:-}:${verified_mode:-}" in
-        *[!0-9a-fscopedul:]*) ;;
-        *)
-            if [ "${#verified_sha}" -eq 40 ] &&
-               { [ "$verified_mode" = full ] || [ "$verified_base" = "$remote_sha" ]; } &&
-               git merge-base --is-ancestor "$verified_sha" "$local_sha" 2>/dev/null; then
-                TEST_BASE="$verified_sha"
-            fi ;;
-    esac
+if [ "${ELYSIUM_FULL_TESTS:-}" != 1 ] && [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] &&
+   [ "$(wc -l < "$EVIDENCE" | tr -d ' ')" -eq 1 ] &&
+   grep -Eqx '[0-9a-f]{40} [0-9a-f]{40} (scoped|full)' "$EVIDENCE"; then
+    read -r verified_sha verified_base verified_mode < "$EVIDENCE"
+    if { [ "$verified_mode" = full ] || [ "$verified_base" = "$remote_sha" ]; } &&
+       git merge-base --is-ancestor "$verified_sha" "$local_sha" 2>/dev/null; then
+        TEST_BASE="$verified_sha"
+    fi
 fi
 if [ "$TEST_BASE" = "$local_sha" ]; then
     echo "==> pre-push: impact-scoped xctest reused (pipeline verified $local_sha)"

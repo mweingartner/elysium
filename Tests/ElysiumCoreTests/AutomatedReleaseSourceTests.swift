@@ -67,7 +67,17 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         XCTAssertFalse(commit.contains("mpd "))
         XCTAssertFalse(commit.contains("pipeline.sh"))
         let push = try source(".githooks/pre-push")
-        XCTAssertTrue(push.contains("scripts/test-impact.py --run --base \"$remote_sha\""))
+        XCTAssertTrue(push.contains("TEST_BASE=\"$remote_sha\""))
+        XCTAssertTrue(push.contains("scripts/test-impact.py --run --base \"$TEST_BASE\""))
+        // Evidence reuse: never through a symlink, only one strict line, only for an ancestor
+        // of the pushed commit, and never when a full run is requested.
+        for guardMarker in ["[ ! -L \"$EVIDENCE\" ]",
+                            "grep -Eqx '[0-9a-f]{40} [0-9a-f]{40} (scoped|full)' \"$EVIDENCE\"",
+                            "git merge-base --is-ancestor \"$verified_sha\" \"$local_sha\"",
+                            "[ \"$verified_mode\" = full ] || [ \"$verified_base\" = \"$remote_sha\" ]",
+                            "[ \"${ELYSIUM_FULL_TESTS:-}\" != 1 ]"] {
+            XCTAssertTrue(push.contains(guardMarker), guardMarker)
+        }
         for marker in ["exactly one outgoing ref", "local_sha\" = \"$HEAD_SHA",
                        "local_sha\" = \"$REF_SHA", "git status --porcelain=v1 --untracked-files=all",
                        "SOURCE_SNAPSHOT", "revalidate"] {
