@@ -82,6 +82,18 @@ verify_pack_set() {
     cmp -s "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" \
         "$resources/FAITHFUL-ADDONS-CREDITS.txt"
 }
+# Records which clean commit's selected XCTest scope passed, so pre-push can test only the
+# changes after it instead of re-running verified tests. Dirty trees record nothing.
+record_xctest_evidence() {
+    local receipt head mode
+    receipt="$(git rev-parse --git-path elysium-xctest-evidence)" || return 0
+    rm -f -- "$receipt"
+    [ -z "$(git status --porcelain=v1 --untracked-files=all)" ] || return 0
+    head="$(git rev-parse --verify 'HEAD^{commit}')" || return 0
+    mode="$(sed -nE 's/^IMPACT TESTS PASS tests=[1-9][0-9]* mode=(scoped|full)$/\1/p' "$TMP/xctest.log")"
+    [ -n "$mode" ] || return 0
+    printf '%s %s %s\n' "$head" "$TEST_BASE" "$mode" > "$receipt"
+}
 stage_xctest() {
     scripts/test-impact.py --run --base "$TEST_BASE" 2>&1 | tee "$TMP/xctest.log"
     local status=${PIPESTATUS[0]}
@@ -168,6 +180,7 @@ run_stage 2 release-build 'Warning-free release build' '' stage_build
 run_stage 3 release-surface-binary 'Release surface and binary' '' stage_surface
 stage_xctest; status=$?; [ "$status" -eq 0 ] || fail impact-xctest "$status"
 revalidate_source || fail impact-xctest 98
+record_xctest_evidence
 echo "[4/9] Impact-scoped XCTest ... PASS tests=$XCTEST_COUNT"
 run_stage 5 elysmoke 'Elysmoke' ' checks=491 failures=0' stage_smoke
 run_stage 6 package 'Package signed application' '' stage_package

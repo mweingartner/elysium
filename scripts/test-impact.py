@@ -43,6 +43,11 @@ GROUPS = {
     "app-shell": [r"ElysiumResourcePackTests\.", r"ElysiumDebugProtocolTests\.",
                   r"ElysiumCoreTests\.AutomatedReleaseSourceTests/"],
     "release-workflow": [r"ElysiumCoreTests\.AutomatedReleaseSourceTests/"],
+    "prehistoric-audio": [r"ElysiumResourcePackTests\.PrehistoricAudioTests/",
+                          r"ElysiumResourcePackTests\.PrehistoricAudioRobustnessTests/"],
+    "app-packaging": [r"ElysiumCoreTests\.BrandAttributionSourceTests/",
+                      r"ElysiumCoreTests\.TextEntrySourceTests/"],
+    "version": [r"ElysiumCoreTests\.VersionTests/", r"ElysiumCoreTests\.LANMultiplayerTests/"],
 }
 WORKFLOW = {
     "scripts/test-impact.py", "scripts/test-test-impact.py", "scripts/pipeline.sh",
@@ -77,16 +82,39 @@ REVIEWED_SETTINGS_PATHS = {
 SHELL_FILES = {"Sources/Elysium/main.swift", "Sources/Elysium/HudM.swift",
                "Sources/Elysium/DebugControlRuntime.swift"}
 DOCS = {"README.md", "AGENTS.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "SECURITY.md", "PLAYER_GUIDE.md"}
+# Bundled dinosaur recordings: the sample bank, its assets, validator and authoring tools are
+# exercised only by the prehistoric audio suites (cue emission itself lives in Core and is
+# not mapped here).
+AUDIO_PATHS = {"Sources/Elysium/Audio.swift", "scripts/verify-dinosaur-sounds.py",
+               "scripts/build-dinosaur-sounds.py",
+               "Tests/ElysiumResourcePackTests/PrehistoricAudioTests.swift",
+               "Tests/ElysiumResourcePackTests/PrehistoricAudioRobustnessTests.swift"}
+AUDIO_PREFIXES = ("packaging/DinosaurSounds/", "Assets/dinosaur-audio/")
+# Packaging scripts are read by the release and brand/text-entry source contracts.
+PACKAGING_PATHS = {"scripts/package-app.sh", "scripts/package-debug-app.sh"}
+# Release-pin manifests are verified by the gate scripts themselves, not by XCTest.
+PIN_MANIFESTS = {"scripts/elysium-core-storage-capability-v1.json", "scripts/elysium-storage-api-v1.json"}
+VERSION_PLISTS = {"packaging/Info.plist", "packaging/DebugInfo.plist"}
+VERSION_SOURCE = "Sources/ElysiumCore/Game/Saves.swift"
+VERSION_LINE = re.compile(r'^[+-]public let ELYSIUM_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"$')
 
 
-def classify(paths):
+def classify(paths, version_only=False):
+    """`version_only` is true only when the Saves.swift diff touches nothing but the
+    ELYSIUM_VERSION literal; any other Saves.swift change stays unmapped (full suite)."""
     groups, unknown = set(), []
     for path in sorted(set(paths)):
         parent, name = str(Path(path).parent), Path(path).name
         if path in DOCS or (path.startswith("docs/") and path.endswith(".md")):
             continue
-        if path in WORKFLOW:
+        if path in WORKFLOW or path in PIN_MANIFESTS:
             groups.add("release-workflow")
+        elif path in AUDIO_PATHS or path.startswith(AUDIO_PREFIXES):
+            groups.add("prehistoric-audio")
+        elif path in PACKAGING_PATHS:
+            groups.update({"release-workflow", "app-packaging"})
+        elif path in VERSION_PLISTS or (path == VERSION_SOURCE and version_only):
+            groups.add("version")
         elif path in SHELL_FILES:
             groups.add("app-shell")
         elif path in REVIEWED_RENDER_PATHS:
@@ -114,6 +142,14 @@ def git(root, *args):
     return subprocess.check_output(["/usr/bin/git", "-C", str(root), *args], stderr=subprocess.PIPE)
 
 
+def version_literal_only(root, base):
+    """True when the Saves.swift change since `base` is exactly the version literal."""
+    diff = git(root, "diff", "--no-ext-diff", "--unified=0", base, "--", VERSION_SOURCE)
+    lines = [line for line in diff.decode("utf-8", "strict").splitlines()
+             if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
+    return bool(lines) and all(VERSION_LINE.match(line) for line in lines)
+
+
 def changed_paths(root, base):
     # --no-renames reports both the deleted source and added destination; -z preserves names.
     tracked = git(root, "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", base, "--")
@@ -135,7 +171,8 @@ def plan(root, requested_base=None, full=False):
             if base == head and not changed_paths(root, base):
                 base = git(root, "rev-parse", "--verify", "HEAD^1^{commit}").decode().strip()
         paths = changed_paths(root, base)
-        result = classify(paths)
+        result = classify(paths, version_only=VERSION_SOURCE in paths and
+                          version_literal_only(root, base))
         result.update(base=base, head=head, paths=paths)
     except (subprocess.CalledProcessError, UnicodeError, ValueError):
         result = {"mode": "full", "groups": [], "patterns": [], "reason": "base or change inventory unavailable"}

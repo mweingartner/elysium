@@ -55,7 +55,16 @@ The initial reviewed groups cover dedicated rendering code (75 test cases), rele
 (`ElysiumResourcePackTests`, `ElysiumDebugProtocolTests`, and `AutomatedReleaseSourceTests`).
 Shared entrypoints such as `main.swift`, `HudM.swift`, and `DebugControlRuntime.swift` broaden the
 selection to app-shell coverage rather than relying on narrow changed-line exceptions.
+Dinosaur audio (the sample bank, its assets, validator and authoring scripts), the packaging
+scripts, the bundle plists, the release-pin manifests, and a `Saves.swift` change that touches only
+the `ELYSIUM_VERSION` literal are mapped to their own suites instead of widening to the full suite.
 These are maintained impact rules, not a claim of complete automatic dependency analysis.
+
+Do not re-run verified tests. After `scripts/pipeline.sh` passes its XCTest stage on a clean tree,
+it records that commit (`.git/elysium-xctest-evidence`); pre-push then selects tests only for the
+changes after it (and skips XCTest entirely when pushing exactly that commit), provided the
+evidence was a full run or used the same remote base. Run the full suite only for genuinely
+pervasive changes.
 
 For security-sensitive changes, also run:
 

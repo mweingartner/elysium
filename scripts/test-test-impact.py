@@ -143,6 +143,38 @@ class ImpactTests(unittest.TestCase):
         self.git("add", "--", old, new, deleted)
         self.assertEqual(impact.changed_paths(self.root, base), sorted([old, new, deleted]))
 
+    def test_audio_packaging_version_and_pin_paths_scope_to_their_suites(self):
+        cases = {
+            "Sources/Elysium/Audio.swift": {"prehistoric-audio"},
+            "packaging/DinosaurSounds/tyrannosaurus-attack.wav": {"prehistoric-audio"},
+            "Assets/dinosaur-audio/sources.json": {"prehistoric-audio"},
+            "scripts/verify-dinosaur-sounds.py": {"prehistoric-audio"},
+            "scripts/package-app.sh": {"app-packaging"},
+            "packaging/Info.plist": {"version"},
+            "scripts/elysium-storage-api-v1.json": set(),
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                selection = impact.classify([path])
+                self.assertEqual(selection["mode"], "scoped")
+                self.assertEqual(set(selection["groups"]), expected | {"release-workflow"})
+        # Saves.swift is shared engine code: only a version-literal-only diff is scoped.
+        self.assertEqual(impact.classify([impact.VERSION_SOURCE])["mode"], "full")
+        self.assertIn("version", impact.classify([impact.VERSION_SOURCE], version_only=True)["groups"])
+        # Any unmapped neighbour still widens the whole selection.
+        self.assertEqual(impact.classify(["Sources/Elysium/Audio.swift", "Sources/Elysium/main2.swift"])["mode"], "full")
+
+    def test_saves_version_literal_only_detection_uses_the_real_diff(self):
+        source = impact.VERSION_SOURCE
+        self.write(source, 'let a = 1\npublic let ELYSIUM_VERSION = "1.4.0"\n'); self.commit(source)
+        base = self.git("rev-parse", "HEAD")
+        self.write(source, 'let a = 1\npublic let ELYSIUM_VERSION = "1.4.1"\n'); self.commit(source)
+        selection = impact.plan(self.root, base)
+        self.assertEqual(selection["mode"], "scoped")
+        self.assertIn("version", selection["groups"])
+        self.write(source, 'let a = 2\npublic let ELYSIUM_VERSION = "1.4.2"\n'); self.commit(source)
+        self.assertEqual(impact.plan(self.root, base)["mode"], "full")
+
     def test_unavailable_invalid_zero_and_nonancestor_bases_widen(self):
         unrelated = self.git("commit-tree", "HEAD^{tree}", "-m", "independent root")
         for base in ["HEAD", "0" * 40, "f" * 40, unrelated]:

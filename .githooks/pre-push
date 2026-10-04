@@ -62,6 +62,26 @@ stage "release surface and binary" sh -c \
 RELEASE_HASH="$(shasum -a 256 .build/release/Elysium | awk '{print $1}')"
 stage "real AppKit keyboard and Accessibility" scripts/appkit-text-entry-integration.sh --no-build \
     --executable "$(cd .build/release && pwd -P)/Elysium" --expected-hash "$RELEASE_HASH" --timeout 90
-stage "impact-scoped xctest" scripts/test-impact.py --run --base "$remote_sha"
+# Reuse pipeline XCTest evidence: when this push extends a commit whose tests already passed
+# for the same remote base (or the full suite), select tests only for the changes after it.
+TEST_BASE="$remote_sha"
+EVIDENCE="$(git rev-parse --git-path elysium-xctest-evidence)"
+if [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ]; then
+    read -r verified_sha verified_base verified_mode < "$EVIDENCE" || true
+    case "${verified_sha:-}:${verified_base:-}:${verified_mode:-}" in
+        *[!0-9a-fscopedul:]*) ;;
+        *)
+            if [ "${#verified_sha}" -eq 40 ] &&
+               { [ "$verified_mode" = full ] || [ "$verified_base" = "$remote_sha" ]; } &&
+               git merge-base --is-ancestor "$verified_sha" "$local_sha" 2>/dev/null; then
+                TEST_BASE="$verified_sha"
+            fi ;;
+    esac
+fi
+if [ "$TEST_BASE" = "$local_sha" ]; then
+    echo "==> pre-push: impact-scoped xctest reused (pipeline verified $local_sha)"
+else
+    stage "impact-scoped xctest" scripts/test-impact.py --run --base "$TEST_BASE"
+fi
 stage "elysmoke" swift run -c release elysmoke
 echo "==> pre-push: pass sha=$local_sha"
