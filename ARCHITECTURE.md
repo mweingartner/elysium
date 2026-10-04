@@ -858,9 +858,12 @@ repository packaging directory. Missing/invalid recordings retain the native syn
 `ambient`, `idle`, `browse`, and `eat` select the feeding recording; `attack` and `hurt` select their
 own files. Movement and remaining action/lifecycle cues retain the existing synthesis recipes.
 
-Creature-category entity sounds use quadratic amplitude falloff `(1 - distance/40)^2`, capped at
+Prehistoric creature sounds (`entity.prehistoric.*`) use quadratic amplitude falloff `(1 - distance/40)^2`, capped at
 40 blocks regardless of emission volume. The callback snapshots listener position/yaw under the
 inbox lock and recomputes active-call gain/pan each render block against the emission position.
+Ordinary mobs keep the 18 x volume range: applying 40 blocks to every mob let dungeon and cave
+monsters overlap through rock into a constant buzz, so zombie-family groans also use a soft
+triangle-plus-breath voice instead of a sawtooth.
 Creature calls bypass the shared cave delay so echoes cannot leak beyond the radius; underwater
 output filtering still applies. Ordinary block/player/script sounds retain their previous range. This presentation-only change consumes no simulation RNG and adds no save or LAN fields;
 the existing host-local semantic-audio limitation remains. The source originals, prompts, rights

@@ -283,7 +283,8 @@ recordings; remaining action, movement and death cues keep the explicit per-spec
 recipes, which also remain the fallback for missing or invalid recordings. Semantic transitions
 and motion rate limits are unchanged; no additional simulation RNG is consumed.
 
-All friendly/hostile creature entity sounds fade smoothly with distance to silence at 40 blocks,
+Prehistoric creature sounds fade smoothly with distance to silence at 40 blocks (ordinary mobs keep
+the 18 x volume range, so dungeon and cave monsters do not carry through rock),
 independent of caller volume. Active calls update their pan and gain when the player moves or
 turns; their source remains the location where the call was emitted. At 20 blocks amplitude is
 25% of the close level, and at 30 blocks it is 6.25%. Creature reverb sends follow the same fade.

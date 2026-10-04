@@ -369,7 +369,10 @@ final class PrehistoricAudioRobustnessTests: XCTestCase {
         let audio = AudioEngineM()
         audio.setListener(0, 0, 0, 0)
         for name in ["block.stone.break", "entity.player.hurt", "entity.generic.explode",
-                     "entity.bat.ambient", "block.lever.click", "block.grass.step"] {
+                     "entity.bat.ambient", "block.lever.click", "block.grass.step",
+                     // ordinary mobs: a 40-block reach let dungeon monsters buzz through rock
+                     "entity.zombie.ambient", "entity.husk.ambient", "entity.drowned.ambient",
+                     "entity.skeleton.ambient", "entity.spider.ambient", "entity.cow.ambient"] {
             for volume in [0.25, 0.5, 1.0, 2.0, 3.0] {
                 let reach = 18 * max(1, volume)
                 XCTAssertNil(audio.gameSoundMix(name, reach, 0, 0, volume), "\(name) v\(volume) at edge")

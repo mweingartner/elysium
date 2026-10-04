@@ -2,7 +2,7 @@
 
 The warning-free isolated production build changes only the Elysium application target.
 Audio.swift adds bounded bundled PCM decoding, selected cue playback and listener-relative
-40-block creature attenuation; it does not change storage, Core, Lua, save, or LAN authority.
+40-block prehistoric-creature attenuation (ordinary mobs keep their 18 x volume range); it does not change storage, Core, Lua, save, or LAN authority.
 
 The five focused audio tests passed, including all 36 species/action mappings and actual
 PCM rendering that becomes silent outside the radius and resumes inside it. The asset

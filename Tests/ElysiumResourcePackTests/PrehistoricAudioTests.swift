@@ -51,8 +51,7 @@ final class PrehistoricAudioTests: XCTestCase {
     func testCreatureRangeAndFalloffForEntireRoster() throws {
         let audio = AudioEngineM()
         audio.setListener(0, 0, 0, 0)
-        for name in PrehistoricCreatureDefinition.all.flatMap(\.soundNames) +
-            ["entity.cow.ambient", "entity.zombie.hurt"] {
+        for name in PrehistoricCreatureDefinition.all.flatMap(\.soundNames) {
             for volume in [0.25, 1.0, 4.0] {
                 for distance in [0.0, 10, 20, 30, 39] {
                     let mix = try XCTUnwrap(audio.gameSoundMix(name, 0, 0, distance, volume))
@@ -159,5 +158,33 @@ final class PrehistoricAudioTests: XCTestCase {
         let right = try XCTUnwrap(buffer.floatChannelData?[1])
         let peak = (0..<8_192).map { max(abs(left[$0]), abs(right[$0])) }.max() ?? 0
         XCTAssertGreaterThan(peak, 0.0005, "a call 30 blocks away must be audible")
+    }
+
+    /// Zombie-family groans must not be a harmonic-rich buzz: the share of energy in sample-to-
+    /// sample differences (a high-frequency proxy) stays well below a sawtooth's.
+    func testZombieFamilyGroansAreSoftNotBuzzing() throws {
+        func highFrequencyShare(_ name: String) throws -> Double {
+            let audio = AudioEngineM()
+            audio.initEngine(startDevice: false)
+            audio.setEnvironment(false, 0)
+            audio.setListener(0, 0, 0, 0)
+            audio.play(name, 0, 0, 1)
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 24_000))
+            buffer.frameLength = 24_000
+            audio.render(buffer.frameLength, buffer.mutableAudioBufferList)
+            let left = try XCTUnwrap(buffer.floatChannelData?[0])
+            var energy = 0.0, difference = 0.0
+            for i in 1..<24_000 {
+                energy += Double(left[i] * left[i])
+                let d = Double(left[i] - left[i - 1]); difference += d * d
+            }
+            XCTAssertGreaterThan(energy, 1e-6, "\(name) must be audible")
+            return difference / max(energy, 1e-12)
+        }
+        let buzz = try highFrequencyShare("entity.cow.ambient") // still a sawtooth voice
+        for name in ["entity.zombie.ambient", "entity.husk.ambient", "entity.drowned.ambient"] {
+            XCTAssertLessThan(try highFrequencyShare(name), buzz * 0.5, name)
+        }
     }
 }

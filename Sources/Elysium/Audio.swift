@@ -138,7 +138,7 @@ final class AudioEngineM {
     func play(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double = 1, _ pitch: Double = 1) {
         guard inited, pitch.isFinite, pitch > 0,
               let mix = gameSoundMix(name, x, y, z, volume) else { return }
-        let creature = isCreatureSound(name) ? CreatureSoundPosition(x: x, y: y, z: z) : nil
+        let creature = isPrehistoricCreatureSound(name) ? CreatureSoundPosition(x: x, y: y, z: z) : nil
         playRecipe(name, mix.volume, pitch, mix.pan, true,
                    creaturePosition: creature, creatureVolume: volume)
     }
@@ -163,7 +163,7 @@ final class AudioEngineM {
     func gameSoundMix(
         _ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double
     ) -> (volume: Double, pan: Double)? {
-        positionalMix(x, y, z, volume, maxDistance: isCreatureSound(name) ? 40 : nil)
+        positionalMix(x, y, z, volume, maxDistance: isPrehistoricCreatureSound(name) ? 40 : nil)
     }
 
     private func positionalMix(
@@ -661,6 +661,18 @@ private func mobVoice(_ name: String, _ cat: String, _ subtitle: String?, _ base
     }
 }
 
+/// A low, breathy groan for zombie-family mobs. A sawtooth carried every harmonic, and with a
+/// dungeon's worth of mobs calling every few seconds the overlap read as a mechanical buzz.
+private func groanVoice(_ name: String, _ subtitle: String, _ base: Double, _ dur: Double,
+                        _ slide: Double, _ vibrato: Double) {
+    R(name, "hostile", subtitle) { s, pitch, _ in
+        s.tone(freq: base * pitch, endFreq: base * slide * pitch, dur: dur, type: .triangle,
+               vol: 0.24, attack: 0.08, vibrato: vibrato)
+        s.noiseBurst(dur: dur * 0.85, freq: base * 2.2 * pitch, q: 0.7, lowpass: true,
+                     vol: 0.10, attack: 0.06, pitch: pitch)
+    }
+}
+
 private func prehistoricCueSubtitle(_ cue: PrehistoricSoundCue) -> String {
     switch cue {
     case .ambient: return "calls"
@@ -1017,11 +1029,11 @@ private func buildRecipes() {
     R("entity.chicken.egg", "friendly", "Chicken plops") { s, _, _ in
         s.tone(freq: 500, endFreq: 900, dur: 0.1, vol: 0.25)
     }
-    mobVoice("entity.zombie.ambient", "hostile", "Zombie groans", 140, .sawtooth, 0.7, 0.8, 3)
+    groanVoice("entity.zombie.ambient", "Zombie groans", 140, 0.7, 0.8, 3)
     mobVoice("entity.zombie.hurt", "hostile", "Zombie hurts", 160, .sawtooth, 0.3, 0.75, 3)
     mobVoice("entity.zombie.death", "hostile", "Zombie dies", 150, .sawtooth, 0.6, 0.5, 3)
-    mobVoice("entity.husk.ambient", "hostile", "Husk groans", 120, .sawtooth, 0.7, 0.8, 3)
-    mobVoice("entity.drowned.ambient", "hostile", "Drowned gurgles", 130, .sawtooth, 0.6, 0.7, 8)
+    groanVoice("entity.husk.ambient", "Husk groans", 120, 0.7, 0.8, 3)
+    groanVoice("entity.drowned.ambient", "Drowned gurgles", 130, 0.6, 0.7, 8)
     R("entity.skeleton.ambient", "hostile", "Skeleton rattles") { s, _, rng in
         for i in 0..<4 { s.noiseBurst(dur: 0.05, freq: 1800 + rng() * 800, q: 4, vol: 0.3, delay: Double(i) * 0.06) }
     }
@@ -1584,9 +1596,12 @@ private func resolveRecipe(_ name: String) -> SoundRecipe? {
     return nil
 }
 
+/// Prehistoric creature voices carry 40 blocks so herds are audible at a distance. Ordinary
+/// mobs keep the 18 x volume range (close to Minecraft's 16 blocks): a 40-block range for every
+/// mob let dungeon and cave monsters' calls overlap through solid rock into a constant buzz.
 /// Presentation-only: no simulation RNG, save state, or network authority changes.
-private func isCreatureSound(_ name: String) -> Bool {
-    guard name.hasPrefix("entity."), let recipe = resolveRecipe(name) else { return false }
+private func isPrehistoricCreatureSound(_ name: String) -> Bool {
+    guard name.hasPrefix("entity.prehistoric."), let recipe = resolveRecipe(name) else { return false }
     return recipe.cat == "friendly" || recipe.cat == "hostile"
 }
 
