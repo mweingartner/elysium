@@ -223,8 +223,8 @@ public struct TemplateCloneOptions {
 }
 
 public struct TemplatePlacementOptions {
-    /// Bypasses the destination-replaceable check. Public API with no in-repo caller;
-    /// kept as an extension point for callers outside this package.
+    /// Bypasses the destination-replaceable check. Used by the debug-control `template.place`
+    /// operation; gameplay placements prepare terrain instead.
     public var replaceExisting: Bool
     public var prepareTerrain: Bool
 
@@ -278,7 +278,7 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-private struct TemplatePos: Hashable, Comparable {
+struct TemplatePos: Hashable, Comparable {
     let x: Int
     let y: Int
     let z: Int
@@ -324,20 +324,20 @@ private func templateCellIndex(_ x: Int, _ y: Int, _ z: Int, sizeX: Int, sizeZ: 
     (y * sizeZ + z) * sizeX + x
 }
 
-private func templateContainsBlock(_ sortedBlocks: [TemplateBlock], at pos: TemplatePos) -> Bool {
+private func templateBlock(_ sortedBlocks: [TemplateBlock], at pos: TemplatePos) -> TemplateBlock? {
     var low = 0
     var high = sortedBlocks.count
     while low < high {
         let mid = (low + high) >> 1
         let midPos = templatePos(sortedBlocks[mid])
-        if midPos == pos { return true }
+        if midPos == pos { return sortedBlocks[mid] }
         if midPos < pos {
             low = mid + 1
         } else {
             high = mid
         }
     }
-    return false
+    return nil
 }
 
 private func sortedUniqueTemplatePositions(_ positions: [TemplatePos]) -> [TemplatePos] {
@@ -418,7 +418,7 @@ private func sanitizedTemplateStack(_ stack: ItemStack?) -> ItemStack? {
     return copy
 }
 
-private func sanitizedTemplateBlockEntity(_ be: BlockEntityData) -> BlockEntityData? {
+func sanitizedTemplateBlockEntity(_ be: BlockEntityData) -> BlockEntityData? {
     guard let data = try? JSONEncoder().encode(be),
           let copy = try? JSONDecoder().decode(BlockEntityData.self, from: data) else { return nil }
     if let items = copy.items {
@@ -650,7 +650,7 @@ private func validateTemplate(_ template: ObjectTemplate) throws -> ObjectTempla
               be.x < template.sizeX, be.y < template.sizeY, be.z < template.sizeZ else {
             throw TemplateError.corruptTemplate("block entity outside template bounds")
         }
-        guard templateContainsBlock(blocks, at: templatePos(be)) else {
+        guard templateBlock(blocks, at: templatePos(be)) != nil else {
             throw TemplateError.corruptTemplate("block entity without a cloned block")
         }
         if let copy = sanitizedTemplateBlockEntity(be) { blockEntities.append(copy) }
@@ -1271,11 +1271,6 @@ private func isDestinationReplaceable(_ world: World, _ x: Int, _ y: Int, _ z: I
     return id > 0 && id < blockDefs.count && blockDefs[id].replaceable
 }
 
-private struct TemplatePlacementPreparation {
-    let blocksCleared: Int
-    let supportBlocksFilled: Int
-}
-
 private func validateTemplateMutableDestination(_ world: World, _ x: Int, _ y: Int, _ z: Int) throws {
     guard world.isLoadedAt(x, z), y >= world.info.minY, y < world.info.minY + world.info.height else {
         throw TemplateError.destinationUnavailable(x, y, z)
@@ -1296,27 +1291,10 @@ private func isTemplateFoundationMaterial(_ cell: Int) -> Bool {
     return def.solid && def.fullCube && !def.replaceable && def.hardness >= 0
 }
 
-private func normalizedFoundationCell(_ cellValue: Int) -> Int {
-    let id = cellValue >> 4
-    guard id > 0, id < blockDefs.count else { return Int(cell(B.dirt)) }
-    return Int(cell(UInt16(id)))
-}
-
-private func adjacentFoundationCell(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> Int? {
-    let deltas = [(-1, 0, 0), (1, 0, 0), (0, 0, -1), (0, 0, 1), (0, -1, 0), (0, 1, 0)]
-    for d in deltas {
-        let cellValue = world.getBlock(x + d.0, y + d.1, z + d.2)
-        // A support column must never mint ore: a resource neighbour is skipped, not copied.
-        if isTemplateFoundationMaterial(cellValue),
-           skillTreeMiningResource(blockID: blockDefs[cellValue >> 4].name) == nil {
-            return normalizedFoundationCell(cellValue)
-        }
-    }
-    return nil
-}
-
 private func makeObjectTemplatePlacementPreparationPlan(_ template: ObjectTemplate, in world: World,
-                                                        originX: Int, originY: Int, originZ: Int) throws -> TemplatePlacementPreparationPlan {
+                                                        originX: Int, originY: Int, originZ: Int,
+                                                        options: TemplatePlacementOptions) throws -> TemplatePlacementPreparationPlan {
+    guard options.prepareTerrain else { return TemplatePlacementPreparationPlan(clearance: [], support: []) }
     var clearance: [TemplatePos] = []
     var support = Set<TemplatePos>()
     let minY = world.info.minY
@@ -1363,50 +1341,13 @@ private func makeObjectTemplatePlacementPreparationPlan(_ template: ObjectTempla
     return TemplatePlacementPreparationPlan(clearance: clearance.sorted(), support: support.sorted())
 }
 
-@discardableResult
-private func applyObjectTemplatePlacementPreparationPlan(_ plan: TemplatePlacementPreparationPlan,
-                                                        in world: World,
-                                                        touched: inout [TemplatePos]) -> TemplatePlacementPreparation {
-    var cleared = 0
-    for p in plan.clearance {
-        if world.getBlock(p.x, p.y, p.z) != 0 {
-            world.setBlock(p.x, p.y, p.z, 0, SET_NO_NEIGHBORS)
-            cleared += 1
-            touched.append(p)
-        }
-    }
-
-    var filled = 0
-    for p in plan.support {
-        let fillCell = adjacentFoundationCell(world, p.x, p.y, p.z) ?? Int(cell(B.dirt))
-        if world.getBlock(p.x, p.y, p.z) != fillCell {
-            world.setBlock(p.x, p.y, p.z, fillCell, SET_NO_NEIGHBORS)
-            filled += 1
-            touched.append(p)
-        }
-    }
-    return TemplatePlacementPreparation(blocksCleared: cleared, supportBlocksFilled: filled)
-}
-
-private func prepareObjectTemplatePlacement(_ template: ObjectTemplate, in world: World,
-                                            originX: Int, originY: Int, originZ: Int) throws -> TemplatePlacementPreparation {
-    let plan = try makeObjectTemplatePlacementPreparationPlan(template, in: world,
-                                                              originX: originX, originY: originY, originZ: originZ)
-    var touched: [TemplatePos] = []
-    let preparation = applyObjectTemplatePlacementPreparationPlan(plan, in: world, touched: &touched)
-    for p in sortedUniqueTemplatePositions(touched) {
-        world.updateNeighbors(p.x, p.y, p.z)
-        world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
-    }
-    return preparation
-}
-
-private func objectTemplatePlacementMutationPositions(_ template: ObjectTemplate, in world: World,
-                                                      originX: Int, originY: Int, originZ: Int,
-                                                      options: TemplatePlacementOptions) throws -> [TemplatePos] {
-    var positions = Set<TemplatePos>()
-    positions.reserveCapacity(template.blocks.count)
-    for block in template.blocks {
+/// The world cells the template's own blocks land on, in template order. Throws when one is
+/// unloaded or out of range, or occupied when the placement neither prepares terrain nor
+/// replaces what is there.
+private func objectTemplateBlockDestinations(_ template: ObjectTemplate, in world: World,
+                                             originX: Int, originY: Int, originZ: Int,
+                                             options: TemplatePlacementOptions) throws -> [TemplatePos] {
+    try template.blocks.map { block in
         let x = originX + block.dx
         let y = originY + block.dy
         let z = originZ + block.dz
@@ -1416,52 +1357,21 @@ private func objectTemplatePlacementMutationPositions(_ template: ObjectTemplate
         if !options.replaceExisting && !options.prepareTerrain && !isDestinationReplaceable(world, x, y, z) {
             throw TemplateError.destinationBlocked(x, y, z)
         }
-        positions.insert(TemplatePos(x: x, y: y, z: z))
+        return TemplatePos(x: x, y: y, z: z)
     }
-    guard options.prepareTerrain else { return positions.sorted() }
-
-    let minY = world.info.minY
-    for dx in 0..<template.sizeX {
-        for dz in 0..<template.sizeZ {
-            let x = originX + dx
-            let z = originZ + dz
-            for dy in 0..<template.sizeY {
-                let y = originY + dy
-                try validateTemplateMutableDestination(world, x, y, z)
-                if world.getBlock(x, y, z) != 0 || world.getBlockEntity(x, y, z) != nil {
-                    positions.insert(TemplatePos(x: x, y: y, z: z))
-                }
-            }
-
-            let foundationY = originY - 1
-            guard foundationY >= minY else {
-                throw TemplateError.destinationUnavailable(x, foundationY, z)
-            }
-            let minSearchY = max(minY, foundationY - OBJECT_TEMPLATE_MAX_SUPPORT_FILL_DEPTH)
-            var baseY: Int?
-            var y = foundationY
-            while y >= minSearchY {
-                try validateTemplateMutableDestination(world, x, y, z)
-                if isTemplateFoundationMaterial(world.getBlock(x, y, z)) {
-                    baseY = y
-                    break
-                }
-                y -= 1
-            }
-            guard let baseY else {
-                throw TemplateError.foundationTooDeep(x, foundationY, z)
-            }
-            if baseY < foundationY {
-                for fillY in (baseY + 1)...foundationY {
-                    try validateTemplateMutableDestination(world, x, fillY, z)
-                    positions.insert(TemplatePos(x: x, y: fillY, z: z))
-                }
-            }
-        }
-    }
-    return positions.sorted()
 }
 
+/// Every cell a placement may change, ascending with no repeats: the template's own cells and
+/// the plan's obstructions and support cells. The job and the undo reading share this list,
+/// so a cell the job writes is always a cell undo knows about.
+private func objectTemplatePlacementPositions(_ blockDestinations: [TemplatePos],
+                                              _ plan: TemplatePlacementPreparationPlan) -> [TemplatePos] {
+    sortedUniqueTemplatePositions(blockDestinations + plan.clearance + plan.support)
+}
+
+/// A reading of every cell a placement may change, for a caller that places synchronously
+/// straight afterwards. A tick-sliced job keeps its own record instead (`TemplateUndoLedger`),
+/// because a reading taken at admission goes stale while the job runs.
 public func objectTemplatePlacementUndoSnapshot(for rawTemplate: ObjectTemplate, in world: World,
                                                 targetX: Int, targetY: Int, targetZ: Int,
                                                 rotationSteps: Int = 0,
@@ -1470,17 +1380,11 @@ public func objectTemplatePlacementUndoSnapshot(for rawTemplate: ObjectTemplate,
     let originX = targetX - template.anchorX
     let originY = targetY - template.anchorY
     let originZ = targetZ - template.anchorZ
-    let positions = try objectTemplatePlacementMutationPositions(template, in: world,
-                                                                 originX: originX, originY: originY, originZ: originZ,
-                                                                 options: options)
-    let cells = positions.map { pos -> TemplatePlacementUndoCell in
-        let cellValue = world.getBlock(pos.x, pos.y, pos.z)
-        let id = cellValue >> 4
-        let blockEntity = id > 0 && id < blockDefs.count
-            ? world.getBlockEntity(pos.x, pos.y, pos.z).flatMap(sanitizedTemplateBlockEntity)
-            : nil
-        return TemplatePlacementUndoCell(x: pos.x, y: pos.y, z: pos.z, cell: cellValue, blockEntity: blockEntity)
-    }
+    let destinations = try objectTemplateBlockDestinations(template, in: world, originX: originX, originY: originY,
+                                                           originZ: originZ, options: options)
+    let plan = try makeObjectTemplatePlacementPreparationPlan(template, in: world, originX: originX, originY: originY,
+                                                              originZ: originZ, options: options)
+    let cells = objectTemplatePlacementPositions(destinations, plan).map { templateUndoCell(in: world, at: $0) }
     return TemplatePlacementUndoSnapshot(templateName: template.name, dimension: world.dim.rawValue, cells: cells)
 }
 
@@ -1500,14 +1404,13 @@ public final class ObjectTemplatePlacementJob {
     private let originY: Int
     private let originZ: Int
     private let preparationPlan: TemplatePlacementPreparationPlan
-    private let undoSnapshotValue: TemplatePlacementUndoSnapshot
+    private var undoLedger: TemplateUndoLedger
     private var phase: Phase = .clearing
     private var clearanceIndex = 0
     private var supportIndex = 0
     private var blockIndex = 0
     private var blockEntityIndex = 0
     private var notifyIndex = 0
-    private let notifyPositions: [TemplatePos]
     private var blocksCleared = 0
     private var supportBlocksFilled = 0
     private var blockEntitiesPlaced = 0
@@ -1523,43 +1426,28 @@ public final class ObjectTemplatePlacementJob {
         let originX = targetX - template.anchorX
         let originY = targetY - template.anchorY
         let originZ = targetZ - template.anchorZ
-        var preparationPlan = TemplatePlacementPreparationPlan(clearance: [], support: [])
-        if options.prepareTerrain {
-            preparationPlan = try makeObjectTemplatePlacementPreparationPlan(template, in: world,
-                                                                             originX: originX, originY: originY, originZ: originZ)
-        }
-        for block in template.blocks {
-            let x = originX + block.dx
-            let y = originY + block.dy
-            let z = originZ + block.dz
-            guard world.isLoadedAt(x, z), y >= world.info.minY, y < world.info.minY + world.info.height else {
-                throw TemplateError.destinationUnavailable(x, y, z)
-            }
-            if !options.replaceExisting && !options.prepareTerrain && !isDestinationReplaceable(world, x, y, z) {
-                throw TemplateError.destinationBlocked(x, y, z)
-            }
-        }
+        let preparationPlan = try makeObjectTemplatePlacementPreparationPlan(
+            template, in: world, originX: originX, originY: originY, originZ: originZ, options: options)
+        let destinations = try objectTemplateBlockDestinations(template, in: world, originX: originX, originY: originY,
+                                                               originZ: originZ, options: options)
         self.template = template
         self.world = world
         self.originX = originX
         self.originY = originY
         self.originZ = originZ
         self.preparationPlan = preparationPlan
-        let undoSnapshot = try objectTemplatePlacementUndoSnapshot(for: template, in: world,
-                                                                   targetX: targetX, targetY: targetY, targetZ: targetZ,
-                                                                   options: options)
-        undoSnapshotValue = undoSnapshot
-        notifyPositions = undoSnapshot.cells.map { TemplatePos(x: $0.x, y: $0.y, z: $0.z) }
+        undoLedger = TemplateUndoLedger(templateName: template.name, dimension: world.dim.rawValue,
+                                        positions: objectTemplatePlacementPositions(destinations, preparationPlan))
         totalOperationCount = max(1, preparationPlan.clearance.count
                                   + preparationPlan.support.count
                                   + template.blocks.count
                                   + template.blockEntities.count
-                                  + notifyPositions.count)
+                                  + undoLedger.positions.count)
     }
 
     public var isDone: Bool { phase == .done }
     public var result: TemplatePlacementResult? { resultValue }
-    public var undoSnapshot: TemplatePlacementUndoSnapshot { undoSnapshotValue }
+    public var undoSnapshot: TemplatePlacementUndoSnapshot { undoLedger.snapshot }
 
     public var progress: TemplatePlacementProgress {
         TemplatePlacementProgress(
@@ -1567,6 +1455,17 @@ public final class ObjectTemplatePlacementJob {
             phase: phase.rawValue,
             completedOperations: min(completedOperationCount, totalOperationCount),
             totalOperations: totalOperationCount)
+    }
+
+    /// Takes the cell at `p` for the job: records what stands there for undo, then drops its
+    /// block entity so the undo record holds the only copy (`setBlock` keeps a block entity
+    /// across a same-shape swap, and one left under a pasted block would spill when that block
+    /// is broken). False when the cell cannot be taken because its chunk is not loaded; the
+    /// job then leaves it alone, so it never writes what it has not recorded.
+    private func take(_ p: TemplatePos) -> Bool {
+        guard undoLedger.record(p, in: world) else { return false }
+        world.removeBlockEntity(p.x, p.y, p.z)
+        return true
     }
 
     @discardableResult
@@ -1582,7 +1481,7 @@ public final class ObjectTemplatePlacementJob {
                 }
                 let p = preparationPlan.clearance[clearanceIndex]
                 clearanceIndex += 1
-                if world.getBlock(p.x, p.y, p.z) != 0 {
+                if take(p), world.getBlock(p.x, p.y, p.z) != 0 {
                     world.setBlock(p.x, p.y, p.z, 0, SET_NO_NEIGHBORS)
                     blocksCleared += 1
                 }
@@ -1595,10 +1494,12 @@ public final class ObjectTemplatePlacementJob {
                 }
                 let p = preparationPlan.support[supportIndex]
                 supportIndex += 1
-                let fillCell = adjacentFoundationCell(world, p.x, p.y, p.z) ?? Int(cell(B.dirt))
-                if world.getBlock(p.x, p.y, p.z) != fillCell {
-                    world.setBlock(p.x, p.y, p.z, fillCell, SET_NO_NEIGHBORS)
-                    supportBlocksFilled += 1
+                if take(p) {
+                    let fillCell = templateSupportFillCell(in: world, p.x, p.y, p.z)
+                    if world.getBlock(p.x, p.y, p.z) != fillCell {
+                        world.setBlock(p.x, p.y, p.z, fillCell, SET_NO_NEIGHBORS)
+                        supportBlocksFilled += 1
+                    }
                 }
                 completedOperationCount += 1
                 budget -= 1
@@ -1610,8 +1511,10 @@ public final class ObjectTemplatePlacementJob {
                 let block = template.blocks[blockIndex]
                 blockIndex += 1
                 let p = TemplatePos(x: originX + block.dx, y: originY + block.dy, z: originZ + block.dz)
-                // A pasted resource block is player-placed; undo restores the raw captured cells.
-                _ = world.setBlock(p.x, p.y, p.z, skillTreePlayerPlacedCell(Int(block.cell)), SET_NO_NEIGHBORS)
+                if take(p) {
+                    // A pasted resource block is player-placed; undo restores the raw captured cells.
+                    _ = world.setBlock(p.x, p.y, p.z, skillTreePlayerPlacedCell(Int(block.cell)), SET_NO_NEIGHBORS)
+                }
                 completedOperationCount += 1
                 budget -= 1
             case .placingBlockEntities:
@@ -1621,17 +1524,22 @@ public final class ObjectTemplatePlacementJob {
                 }
                 let be = template.blockEntities[blockEntityIndex]
                 blockEntityIndex += 1
-                if let copy = sanitizedTemplateBlockEntity(be) {
-                    copy.x = originX + be.x
-                    copy.y = originY + be.y
-                    copy.z = originZ + be.z
+                let p = TemplatePos(x: originX + be.x, y: originY + be.y, z: originZ + be.z)
+                // Only onto the job's own block: a cell the job could not take, or one replaced
+                // since, keeps whatever block entity it has.
+                if undoLedger.holds(p), let block = templateBlock(template.blocks, at: templatePos(be)),
+                   world.getBlockId(p.x, p.y, p.z) == Int(block.cell >> 4),
+                   let copy = sanitizedTemplateBlockEntity(be) {
+                    copy.x = p.x
+                    copy.y = p.y
+                    copy.z = p.z
                     world.setBlockEntity(copy)
                     blockEntitiesPlaced += 1
                 }
                 completedOperationCount += 1
                 budget -= 1
             case .notifying:
-                if notifyIndex >= notifyPositions.count {
+                if notifyIndex >= undoLedger.positions.count {
                     resultValue = TemplatePlacementResult(
                         originX: originX, originY: originY, originZ: originZ,
                         blocksPlaced: template.blocks.count,
@@ -1642,7 +1550,7 @@ public final class ObjectTemplatePlacementJob {
                     phase = .done
                     continue
                 }
-                let p = notifyPositions[notifyIndex]
+                let p = undoLedger.positions[notifyIndex]
                 notifyIndex += 1
                 world.updateNeighbors(p.x, p.y, p.z)
                 world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
@@ -1793,54 +1701,18 @@ public final class ObjectTemplateUndoRestoreJob {
     }
 }
 
+/// Places a template in one call. This is the tick-sliced job run to completion, so the two
+/// forms cannot drift apart: one preparation, one fill rule, one undo record.
 public func placeObjectTemplate(_ rawTemplate: ObjectTemplate, in world: World,
                                 targetX: Int, targetY: Int, targetZ: Int,
                                 rotationSteps: Int = 0,
                                 options: TemplatePlacementOptions = TemplatePlacementOptions()) throws -> TemplatePlacementResult {
-    let template = try rotatedObjectTemplate(rawTemplate, rotationSteps: rotationSteps)
-    let originX = targetX - template.anchorX
-    let originY = targetY - template.anchorY
-    let originZ = targetZ - template.anchorZ
-    let preparation: TemplatePlacementPreparation
-    if options.prepareTerrain {
-        preparation = try prepareObjectTemplatePlacement(template, in: world,
-                                                         originX: originX, originY: originY, originZ: originZ)
-    } else {
-        preparation = TemplatePlacementPreparation(blocksCleared: 0, supportBlocksFilled: 0)
+    let job = try ObjectTemplatePlacementJob(rawTemplate: rawTemplate, in: world,
+                                             targetX: targetX, targetY: targetY, targetZ: targetZ,
+                                             rotationSteps: rotationSteps, options: options)
+    job.step(maxOperations: .max)
+    guard let result = job.result else {
+        throw TemplateError.corruptTemplate("placement did not finish")
     }
-
-    for block in template.blocks {
-        let x = originX + block.dx
-        let y = originY + block.dy
-        let z = originZ + block.dz
-        guard world.isLoadedAt(x, z), y >= world.info.minY, y < world.info.minY + world.info.height else {
-            throw TemplateError.destinationUnavailable(x, y, z)
-        }
-        if !options.replaceExisting && !options.prepareTerrain && !isDestinationReplaceable(world, x, y, z) {
-            throw TemplateError.destinationBlocked(x, y, z)
-        }
-    }
-
-    let positions = template.blocks.map { TemplatePos(x: originX + $0.dx, y: originY + $0.dy, z: originZ + $0.dz) }
-    for block in template.blocks {
-        _ = world.setBlock(originX + block.dx, originY + block.dy, originZ + block.dz,
-                           skillTreePlayerPlacedCell(Int(block.cell)), SET_NO_NEIGHBORS)
-    }
-    var placedBEs = 0
-    for be in template.blockEntities {
-        guard let copy = sanitizedTemplateBlockEntity(be) else { continue }
-        copy.x = originX + be.x
-        copy.y = originY + be.y
-        copy.z = originZ + be.z
-        world.setBlockEntity(copy)
-        placedBEs += 1
-    }
-    for p in positions.sorted() {
-        world.updateNeighbors(p.x, p.y, p.z)
-        world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
-    }
-    return TemplatePlacementResult(originX: originX, originY: originY, originZ: originZ,
-                                   blocksPlaced: template.blocks.count, blockEntitiesPlaced: placedBEs,
-                                   blocksCleared: preparation.blocksCleared,
-                                   supportBlocksFilled: preparation.supportBlocksFilled)
+    return result
 }

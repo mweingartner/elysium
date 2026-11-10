@@ -4841,6 +4841,51 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(world.getBlock(1, 64, 1), 0, "restoring the pre-mutation snapshot must revert the abandoned job's write")
     }
 
+    /// A guest's paste is admitted, the guest then mines a block and empties a chest inside the
+    /// footprint before the tick-sliced job reaches them, and finally undoes. Undo must give
+    /// back what the job removed, not what stood there at admission, or both come back twice.
+    func testGuestUndoDoesNotReturnWhatTheGuestTookFromUnderAnInFlightPaste() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 1.5, y: 64, z: 1.5)
+        for x in 1...3 { _ = world.setBlock(x, 63, 1, Int(B.stone) << 4) }
+        _ = world.setBlock(2, 64, 1, Int(B.diamond_block) << 4)
+        _ = world.setBlock(3, 64, 1, Int(B.chest) << 4)
+        let chest = makeContainerBE(3, 64, 1, 27)
+        chest.items?[0] = stack("diamond", 5)
+        world.setBlockEntity(chest)
+        let plank = UInt16(Int(B.oak_planks) << 4)
+        let template = ObjectTemplate(
+            name: "Over Loot", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 3, sizeY: 1, sizeZ: 1,
+            blocks: (0..<3).map { TemplateBlock(dx: $0, dy: 0, dz: 0, cell: plank) })
+        var saved = ["Over Loot": template]
+        func send(_ action: LANTemplateIntent.Action) -> LANTemplateIntentResult {
+            session.applyTemplateIntent(
+                LANTemplateIntent(action: action, templateName: "Over Loot", x: 1, y: 64, z: 1, rotation: 0),
+                from: "peer-a", world: world, loadTemplate: { saved[$0] }, saveTemplate: { saved[$0.name] = $0; return true })
+        }
+
+        XCTAssertEqual(send(.placeTemplate), .accepted(action: .placeTemplate, name: "Over Loot"))
+        // The job has not stepped yet. The guest mines through the host's own block-intent
+        // path and takes the chest's contents.
+        let mined = session.applyBlockIntent(
+            LANBlockIntent(action: .breakBlock, x: 2, y: 64, z: 1, face: 1, selectedHotbarSlot: 0),
+            from: "peer-a", to: world)
+        guard case .applied = mined else { return XCTFail("the guest's break was not applied: \(mined)") }
+        world.getBlockEntity(3, 64, 1)?.items?[0] = nil
+
+        XCTAssertEqual(stepTemplateJobToCompletion(session, playerID: "peer-a", in: world),
+                       .placed(name: "Over Loot", blocks: 3, blockEntities: 0, cleared: 1, filled: 0))
+        XCTAssertEqual(send(.undoPlacement), .accepted(action: .undoPlacement, name: "Over Loot"))
+        XCTAssertEqual(stepTemplateJobToCompletion(session, playerID: "peer-a", in: world),
+                       .undone(name: "Over Loot", restored: 3))
+
+        XCTAssertEqual(world.getBlock(1, 64, 1), 0)
+        XCTAssertEqual(world.getBlock(2, 64, 1), 0, "the diamond block the guest mined must not come back")
+        XCTAssertEqual(world.getBlockId(3, 64, 1), Int(B.chest), "the chest was the job's to restore")
+        let items = try XCTUnwrap(world.getBlockEntity(3, 64, 1)?.items)
+        XCTAssertTrue(items.allSatisfy { $0 == nil }, "the diamonds the guest took must not come back")
+    }
+
     func testUndoRestoreJobFiltersUnloadedCellsOnCompletion() throws {
         // Two chunks loaded (cx 0 and cx 1) so the two template cells land in different chunks —
         // `ObjectTemplatePlacementJob.init` throws `.destinationUnavailable` on unloaded

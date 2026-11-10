@@ -5,6 +5,16 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **Object-template fixes.** The ground filled in under a pasted object is now always plain natural
+  ground (the stone, dirt, sand or similar terrain beside the gap, or dirt). It used to copy the
+  first solid block beside the gap, whatever that was, so pasting next to a block of diamond,
+  glowstone, packed ice or a furnace made a free copy of it (the furnace without its contents or
+  workings); 1.4.4 had excluded only ores. Template undo now gives back only what the placement
+  itself removed. It used to restore a picture of the area taken when the placement started, so
+  when another player emptied a chest or mined a block inside the footprint of the host's large
+  paste while it was still running, undo brought the contents or the block back a second time.
+  Copying and pasting a build still costs no materials, as before.
+
 - Bumped the release and exact-LAN-compatibility version to 1.4.4 for the audio, skill-tree and
   scripting fixes below. Skill rules are host-authoritative, so older binaries are rejected during
   the exact-version handshake instead of playing by different cooldown and XP rules.

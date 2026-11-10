@@ -566,8 +566,12 @@ Object templates let you reuse a connected build:
    glide the distance. Left click places it; right click cancels placement.
 5. Press `Command-Z` to undo the most recent template placement.
 
-Template placement is previewed and validated before it changes the world. Undo applies to the most recent
-template placement, not to every ordinary building action. In either saved-template browser, **Delete**
+Template placement is previewed and validated before it changes the world. Where the ground under the
+object is uneven, the gaps are filled with plain ground: the stone, dirt, sand or similar terrain beside
+the gap, or dirt. The fill never copies a nearby building block. Undo applies to the most recent
+template placement, not to every ordinary building action, and puts back what the placement replaced.
+A large placement takes a few seconds, and other players in a LAN session keep playing meanwhile; a
+block they mine or a chest they empty inside its footprint during that time stays that way after undo. In either saved-template browser, **Delete**
 or Delete/Backspace while the template list is focused opens a confirmation naming the exact template.
 **Cancel** has initial focus, Escape cancels, and only **Delete Template** performs the deletion.
 
