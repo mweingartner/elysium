@@ -813,6 +813,21 @@ final class DebugControlRuntime {
             templateUndo = nil
             mutate("template.undone")
             return ["restored": .integer(Int64(restored))]
+        case "template.arm":
+            // What `/place "name"` does: arms the placement preview. `input.mouse_down` is the
+            // click that commits it; a LAN guest's click asks the host, so no authority is needed.
+            try requireWorld(authoritative: false)
+            let name = try boundedString(a, "name", maximumBytes: OBJECT_TEMPLATE_NAME_MAX)
+            guard let template = try app.game.db.getTemplate(named: name) else {
+                throw RuntimeError(.invalidArguments, "Unknown template")
+            }
+            try app.game.beginTemplatePlacement(template)
+            return ["armed": .string(template.name)]
+        case "template.undo_last":
+            // The player's own Command-Z, not the debug snapshot above. A LAN guest's request
+            // goes to the host, which answers through the ordinary gameplay events.
+            try requireWorld(authoritative: false)
+            return ["requested": .bool(app.game.undoLastTemplatePlacement())]
         case "template.delete":
             let name = try boundedString(a, "name", maximumBytes: OBJECT_TEMPLATE_NAME_MAX)
             let deleted = try app.game.db.deleteTemplate(named: name)
@@ -1164,7 +1179,7 @@ final class DebugControlRuntime {
 
     private func runtimeError(for error: TemplateError) -> RuntimeError {
         switch error {
-        case .objectTooLarge, .objectTooWide, .tooManyBlockEntities:
+        case .objectTooLarge, .objectTooWide, .tooManyBlockEntities, .tooLargeForLANGuest:
             return RuntimeError(.boundedLimit, error.description)
         case .destinationUnavailable:
             return RuntimeError(.unloaded, error.description, retryable: true)

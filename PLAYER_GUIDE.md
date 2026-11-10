@@ -571,7 +571,22 @@ object is uneven, the gaps are filled with plain ground: the stone, dirt, sand o
 the gap, or dirt. The fill never copies a nearby building block. Undo applies to the most recent
 template placement, not to every ordinary building action, and puts back what the placement replaced.
 A large placement takes a few seconds, and other players in a LAN session keep playing meanwhile; a
-block they mine or a chest they empty inside its footprint during that time stays that way after undo. In either saved-template browser, **Delete**
+block they mine or a chest they empty inside its footprint during that time stays that way after undo.
+
+In a LAN world you joined, templates work the same way with your own library. `Command-C` saves to
+your Mac and `Command-V` shows your templates, including ones you made in your own worlds. When you
+click to place, your Mac asks the host, and the object appears for everyone once the host accepts;
+the action bar shows the host placing it and chat shows the result. If the host refuses, chat says
+why (for example the spot is too far away, or the host is in another dimension) and the wireframe
+stays so you can adjust and click again. `Command-Z` asks the host to undo your own most recent
+placement; it cannot undo another player's, and it is forgotten when you leave the session.
+What you place as a guest arrives as if newly built: chests, furnaces and other containers are
+empty, a jukebox has no disc, a spawner is inactive and a decorated pot is plain. Signs keep
+their text and flower pots keep their plants. An object of more than about 90,000 blocks is too
+large to send, so only the host can place it. The host sees a chat line
+naming you and the object each time one of your placements or undos completes.
+
+In either saved-template browser, **Delete**
 or Delete/Backspace while the template list is focused opens a confirmation naming the exact template.
 **Cancel** has initial focus, Escape cancels, and only **Delete Template** performs the deletion.
 

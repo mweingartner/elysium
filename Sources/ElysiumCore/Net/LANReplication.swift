@@ -431,6 +431,7 @@ public final class LANMultiplayerHostSession {
         /// dimension matches the world it was called with; a wrong-dimension entry pauses rather
         /// than aborting, and resumes once the host returns to that dimension.
         var dimension: Int
+        var stepsSinceReport = 0
     }
 
     private var peers: [String: Peer] = [:]
@@ -1028,67 +1029,45 @@ public final class LANMultiplayerHostSession {
         authorize(ai ? .ai : .command, from: rawPlayerID)
     }
 
+    /// Admits a guest's template place or undo. The guest sends the template itself
+    /// (`LANTemplateTransfer.swift`); the host's own library is never read or written here.
+    /// Permission, dimension and reach are checked once, at admission, before any world change.
     public func applyTemplateIntent(
         _ intent: LANTemplateIntent,
         from rawPlayerID: String,
-        world: World,
-        loadTemplate: (String) throws -> ObjectTemplate?,
-        saveTemplate: (ObjectTemplate) throws -> Bool
+        world: World
     ) -> LANTemplateIntentResult {
         let playerID = String(rawPlayerID.prefix(128))
-        switch authorize(.template, from: playerID) {
-        case .rejected(let reason): return .rejected(reason)
-        case .accepted: break
-        }
-        guard !intent.templateName.isEmpty else { return .rejected("missing template name") }
-        if intent.action != .undoPlacement {
-            guard let peer = peers[playerID], let playerState = peer.playerState else {
-                return .rejected("player state unavailable")
-            }
-            guard playerState.dimension == world.dim.rawValue else {
-                return .rejected("target dimension unavailable")
-            }
-            guard isWithinLANReach(playerState, x: intent.x, y: intent.y, z: intent.z) else {
-                return .rejected("target out of reach")
-            }
+        if let refusal = LANTemplateRefusal.authorization(authorize(.template, from: playerID), for: .template) {
+            return .rejected(refusal)
         }
         switch intent.action {
-        case .copyTarget:
-            switch authorize(.build, from: playerID) {
-            case .rejected(let reason): return .rejected(reason)
-            case .accepted: break
-            }
-            do {
-                let result = try cloneObjectTemplate(
-                    named: intent.templateName,
-                    from: world,
-                    targetX: intent.x,
-                    targetY: intent.y,
-                    targetZ: intent.z
-                )
-                guard try saveTemplate(result.template) else {
-                    return .rejected("template store write failed")
-                }
-                return .copied(name: result.template.name, blocks: result.template.blocks.count)
-            } catch {
-                return .rejected(String(describing: error))
-            }
         case .placeTemplate:
-            switch authorize(.build, from: playerID) {
-            case .rejected(let reason): return .rejected(reason)
-            case .accepted: break
+            if let refusal = LANTemplateRefusal.authorization(authorize(.build, from: playerID), for: .build) {
+                return .rejected(refusal)
             }
-            guard templateJobs[playerID] == nil else {
-                return .rejected("template placement already in progress")
+            guard let peer = peers[playerID], let playerState = peer.playerState else {
+                return .rejected(LANTemplateRefusal.unavailable)
+            }
+            guard playerState.dimension == world.dim.rawValue else {
+                return .rejected(LANTemplateRefusal.otherDimension)
+            }
+            // Busy is answered before the payload is decoded, so a peer with a job in flight
+            // cannot make the host decode a template for every further intent.
+            guard templateJobs[playerID] == nil else { return .rejected(LANTemplateRefusal.busy) }
+            guard let payload = intent.templateData else {
+                return .rejected(LANTemplateRefusal.missingTemplate)
             }
             do {
-                guard let rawTemplate = try loadTemplate(intent.templateName) else {
-                    return .rejected("unknown template")
+                let rawTemplate = try lanHostTemplate(fromGuestPayload: payload)
+                guard isWithinLANTemplateReach(playerState, template: rawTemplate, rotationSteps: intent.rotation,
+                                               targetX: intent.x, targetY: intent.y, targetZ: intent.z) else {
+                    return .rejected(LANTemplateRefusal.outOfReach)
                 }
                 // The job's throwing init does the rotate + preparation plan + destination
-                // validation + pre-mutation undo snapshot, all synchronously and all-or-nothing;
-                // pass the raw template + rotationSteps directly rather than pre-rotating, since
-                // the init rotates internally and pre-rotating would double-rotate.
+                // validation, all synchronously and all-or-nothing; pass the raw template +
+                // rotationSteps directly rather than pre-rotating, since the init rotates
+                // internally and pre-rotating would double-rotate.
                 let job = try ObjectTemplatePlacementJob(
                     rawTemplate: rawTemplate,
                     in: world,
@@ -1115,17 +1094,15 @@ public final class LANMultiplayerHostSession {
             }
         case .undoPlacement:
             guard let peer = peers[playerID], let undo = peer.lastTemplateUndo else {
-                return .rejected("no template placement to undo")
+                return .rejected(LANTemplateRefusal.nothingToUndo)
             }
             guard undo.dimension == world.dim.rawValue else {
-                return .rejected("template dimension unavailable")
+                return .rejected(LANTemplateRefusal.undoOtherDimension)
             }
             guard templateUndoSnapshotFullyLoaded(undo, in: world) else {
-                return .rejected("template region not loaded")
+                return .rejected(LANTemplateRefusal.undoNotLoaded)
             }
-            guard templateJobs[playerID] == nil else {
-                return .rejected("template placement already in progress")
-            }
+            guard templateJobs[playerID] == nil else { return .rejected(LANTemplateRefusal.busy) }
             // `lastTemplateUndo` is deliberately NOT cleared here — only at undo-completion
             // (finishTemplateJob). The busy guard above already prevents a second undo from
             // starting while this one is in flight, so early-clearing is unnecessary and would
@@ -1160,8 +1137,28 @@ public final class LANMultiplayerHostSession {
             }
             if done {
                 finishTemplateJob(playerID: playerID, in: world)
+            } else {
+                noteTemplateJobStep(playerID: playerID)
             }
         }
+    }
+
+    /// Queues a progress report for a job still running, once every
+    /// `LAN_MULTIPLAYER_TEMPLATE_PROGRESS_REPORT_STEPS` steps, so the guest sees it advance.
+    private func noteTemplateJobStep(playerID: String) {
+        guard var entry = templateJobs[playerID] else { return }
+        entry.stepsSinceReport += 1
+        if entry.stepsSinceReport >= LAN_MULTIPLAYER_TEMPLATE_PROGRESS_REPORT_STEPS {
+            entry.stepsSinceReport = 0
+            let progress: TemplatePlacementProgress
+            switch entry.job {
+            case .place(let job): progress = job.progress
+            case .undo(let job): progress = job.progress
+            }
+            pendingTemplateResponses.append((playerID, .progress(
+                action: entry.action, name: entry.templateName, percent: progress.percent, phase: progress.phase)))
+        }
+        templateJobs[playerID] = entry
     }
 
     /// Single completion path for a `.done` template job, shared by `stepTemplateJobs` and

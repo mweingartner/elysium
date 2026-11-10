@@ -526,6 +526,7 @@ public final class GameCore {
     public var lanTossIntentHandler: ((LANTossIntent) -> Void)?
     public var lanRPGIntentHandler: ((LANRPGIntent) -> Void)?
     public var lanContainerEditHandler: ((LANContainerEditIntent) -> Void)?
+    public var lanTemplateIntentHandler: ((LANTemplateIntent) -> Void)?
     /// fires with the freshly-published snapshot and its new revision number
     public var lanInventoryPublishHandler: ((LANPlayerInventorySnapshot, Int) -> Void)?
     /// Host-side LAN hook: settles every guest's in-flight template PLACE/UNDO job before a
@@ -656,6 +657,7 @@ public final class GameCore {
     public private(set) var lastTemplatePlacementUndo: TemplatePlacementUndoSnapshot?
     private var templatePlacementJob: ObjectTemplatePlacementJob?
     private var templatePlacementProgressTick = 0
+    var lanClientTemplates = LANClientTemplateState()
     public var perspective = 0          // 0 first, 1 back, 2 front
     private var sprintHeld = false
     private var lastForwardPress = 0.0
@@ -2517,6 +2519,7 @@ public final class GameCore {
         templatePlacementJob = nil
         templatePlacementProgressTick = 0
         lastTemplatePlacementUndo = nil
+        lanClientTemplates = LANClientTemplateState()
         ticksSinceSave = 0
         host?.closeAllScreens()
         host?.showActionBar("§e\(rec.name)§r — seed \(rec.seed)", 60)
@@ -4193,7 +4196,7 @@ public final class GameCore {
             finishTemplatePlacementJob(job)
         } else if templatePlacementProgressTick % 10 == 1 {
             let progress = job.progress
-            host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 25)
+            host?.showActionBar(templateProgressText(name: progress.templateName, percent: progress.percent, phase: progress.phase), 25)
         }
         return true
     }
@@ -4217,11 +4220,9 @@ public final class GameCore {
         targetedBlock = nil
         lastCursorHit = nil
         onTemplatePlacementCommitted?(world, undo)
-        var details = "\(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities"
-        if result.blocksCleared > 0 || result.supportBlocksFilled > 0 {
-            details += ", cleared \(result.blocksCleared), filled \(result.supportBlocksFilled)"
-        }
-        host?.pushChat("§7Placed object \"\(progress.templateName)\" - \(details)")
+        host?.pushChat("§7" + templatePlacementCompletionText(
+            name: progress.templateName, blocks: result.blocksPlaced, blockEntities: result.blockEntitiesPlaced,
+            cleared: result.blocksCleared, filled: result.supportBlocksFilled))
         host?.showActionBar("Placed \"\(progress.templateName)\"", 60)
     }
 
@@ -4306,7 +4307,7 @@ public final class GameCore {
             }
         }
 
-        if isLANClientWorld { lanClientTickCounter += 1 }
+        if isLANClientWorld { lanClientTickCounter += 1; tickLANClientTemplates() }
         streamChunks()
         if tickTemplatePlacementJob() { return }
         if isLANClientWorld {
@@ -5953,6 +5954,7 @@ public final class GameCore {
     // ===========================================================================
     public func beginTemplatePlacement(_ template: ObjectTemplate) throws {
         let session = try TemplatePlacementSession(template: template)
+        if isLANClientWorld { try armLANClientTemplate(session) }
         templatePlacement = session
         leftDown = false
         rightDown = false
@@ -6012,6 +6014,7 @@ public final class GameCore {
 
     @discardableResult
     public func commitTemplatePlacement() throws -> TemplatePlacementResult? {
+        if isLANClientWorld { return try commitLANClientTemplatePlacement() }
         guard templatePlacementJob == nil else { return nil }
         guard let session = templatePlacement else { return nil }
         guard let target = templatePlacementTarget() else { throw TemplateError.missingTarget }
@@ -6029,18 +6032,19 @@ public final class GameCore {
         targetedBlock = nil
         lastCursorHit = nil
         let progress = job.progress
-        host?.showActionBar("Placing \"\(progress.templateName)\" 0% - \(progress.phase)", 60)
+        host?.showActionBar(templateProgressText(name: progress.templateName, percent: 0, phase: progress.phase), 60)
         return nil
     }
 
     @discardableResult
     public func undoLastTemplatePlacement() -> Bool {
+        if isLANClientWorld { return requestLANClientTemplateUndo() }
         guard templatePlacementJob == nil else {
             host?.showActionBar("Template placement is still running", 55)
             return false
         }
         guard let undo = lastTemplatePlacementUndo else {
-            host?.showActionBar("No object placement to undo", 55)
+            host?.showActionBar(LANTemplateRefusal.nothingToUndo, 55)
             return false
         }
         guard undo.dimension == dim.rawValue else {
@@ -6048,7 +6052,7 @@ public final class GameCore {
             return false
         }
         guard templateUndoSnapshotFullyLoaded(undo, in: world) else {
-            host?.showActionBar("Move closer to the object to undo it", 60)
+            host?.showActionBar(LANTemplateRefusal.undoNotLoaded, 60)
             return false
         }
         if templatePlacement != nil {
@@ -6061,7 +6065,7 @@ public final class GameCore {
         player?.breakingProgress = -1
         targetedBlock = nil
         lastCursorHit = nil
-        host?.pushChat("§7Undid object placement \"\(undo.templateName)\" - restored \(restored) cells")
+        host?.pushChat("§7" + templateUndoCompletionText(name: undo.templateName, restored: restored))
         host?.showActionBar("Undid \"\(undo.templateName)\"", 60)
         return true
     }
@@ -6143,7 +6147,7 @@ public final class GameCore {
         guard inWorld, !(host?.hasScreen() ?? false) else { return }
         if let job = templatePlacementJob {
             let progress = job.progress
-            host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 25)
+            host?.showActionBar(templateProgressText(name: progress.templateName, percent: progress.percent, phase: progress.phase), 25)
             return
         }
         if templatePlacement != nil {
@@ -6243,7 +6247,7 @@ public final class GameCore {
             }
             if let job = templatePlacementJob {
                 let progress = job.progress
-                host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 45)
+                host?.showActionBar(templateProgressText(name: progress.templateName, percent: progress.percent, phase: progress.phase), 45)
                 return
             }
             if templatePlacement != nil {

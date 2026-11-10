@@ -671,7 +671,7 @@ final class LANReplicationTests: XCTestCase {
             loadTemplate: { _ in nil },
             saveTemplate: { _ in false }
         )
-        XCTAssertEqual(result, .rejected("permission denied: template"))
+        XCTAssertEqual(result, .rejected(LANTemplateRefusal.notAllowed))
 
         session.setPermissions(LANPeerPermissions(), for: "peer-a")
         session.updatePlayerState(LANPlayerState(
@@ -855,15 +855,18 @@ final class LANReplicationTests: XCTestCase {
             gameMode: GameMode.survival
         ))
 
+        let tiny = ObjectTemplate(name: "Tiny", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 1, sizeY: 1, sizeZ: 1,
+                                  blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(Int(B.dirt) << 4))])
         let result = session.applyTemplateIntent(
             LANTemplateIntent(action: .placeTemplate, templateName: "Tiny", x: 1, y: 64, z: 1, rotation: 0),
             from: "peer-a",
             world: world,
-            loadTemplate: { _ in nil },
+            loadTemplate: { _ in tiny },
             saveTemplate: { _ in false }
         )
 
-        XCTAssertEqual(result, .rejected("target out of reach"))
+        XCTAssertEqual(result, .rejected(LANTemplateRefusal.outOfReach))
+        XCTAssertEqual(world.getBlock(1, 64, 1), 0, "a refused placement must not change the world")
     }
 
     func testRemotePlayerEntitiesSpawnUpdateAndRemoveFromWorldSnapshots() {
@@ -4474,7 +4477,7 @@ final class LANReplicationTests: XCTestCase {
             saveTemplate: { saved[$0.name] = $0; return true }
         )
 
-        XCTAssertEqual(undone, .rejected("template dimension unavailable"))
+        XCTAssertEqual(undone, .rejected(LANTemplateRefusal.undoOtherDimension))
         XCTAssertEqual(world.getBlock(1, 64, 1), Int(dirt), "the overworld placement must remain untouched")
 
         // retrying against the correct dimension still succeeds (the snapshot was preserved)
@@ -4528,7 +4531,7 @@ final class LANReplicationTests: XCTestCase {
             saveTemplate: { saved[$0.name] = $0; return true }
         )
 
-        XCTAssertEqual(undone, .rejected("no template placement to undo"),
+        XCTAssertEqual(undone, .rejected(LANTemplateRefusal.nothingToUndo),
                        "disconnect must clear the peer's retained undo snapshot")
     }
 
@@ -4641,14 +4644,14 @@ final class LANReplicationTests: XCTestCase {
         let secondPlace = session.applyTemplateIntent(
             LANTemplateIntent(action: .placeTemplate, templateName: "Busy", x: 3, y: 64, z: 1, rotation: 0),
             from: "peer-a", world: world, loadTemplate: { saved[$0] }, saveTemplate: { saved[$0.name] = $0; return true })
-        XCTAssertEqual(secondPlace, .rejected("template placement already in progress"))
+        XCTAssertEqual(secondPlace, .rejected(LANTemplateRefusal.busy))
 
         // undo-while-placing — the peer has a real `lastTemplateUndo` (from the warmup
         // placement), so this exercises the busy guard rather than the "nothing to undo" pre-gate.
         let secondUndo = session.applyTemplateIntent(
             LANTemplateIntent(action: .undoPlacement, templateName: "Busy", x: 5, y: 64, z: 1, rotation: 0),
             from: "peer-a", world: world, loadTemplate: { saved[$0] }, saveTemplate: { saved[$0.name] = $0; return true })
-        XCTAssertEqual(secondUndo, .rejected("template placement already in progress"))
+        XCTAssertEqual(secondUndo, .rejected(LANTemplateRefusal.busy))
 
         // the busy branch must not have touched the active job's progress at all.
         XCTAssertTrue(session.hasActiveTemplateJob(playerID: "peer-a"))
@@ -4665,12 +4668,12 @@ final class LANReplicationTests: XCTestCase {
         let placeWhileUndoing = session.applyTemplateIntent(
             LANTemplateIntent(action: .placeTemplate, templateName: "Busy", x: 3, y: 64, z: 1, rotation: 0),
             from: "peer-a", world: world, loadTemplate: { saved[$0] }, saveTemplate: { saved[$0.name] = $0; return true })
-        XCTAssertEqual(placeWhileUndoing, .rejected("template placement already in progress"))
+        XCTAssertEqual(placeWhileUndoing, .rejected(LANTemplateRefusal.busy))
 
         let undoWhileUndoing = session.applyTemplateIntent(
             LANTemplateIntent(action: .undoPlacement, templateName: "Busy", x: 1, y: 64, z: 1, rotation: 0),
             from: "peer-a", world: world, loadTemplate: { saved[$0] }, saveTemplate: { saved[$0.name] = $0; return true })
-        XCTAssertEqual(undoWhileUndoing, .rejected("template placement already in progress"))
+        XCTAssertEqual(undoWhileUndoing, .rejected(LANTemplateRefusal.busy))
 
         let undoResult = stepTemplateJobToCompletion(session, playerID: "peer-a", in: world)
         XCTAssertEqual(undoResult, .undone(name: "Busy", restored: 2))
@@ -4769,7 +4772,7 @@ final class LANReplicationTests: XCTestCase {
         let undoAfterReconnect = session.applyTemplateIntent(
             LANTemplateIntent(action: .undoPlacement, templateName: "Abandoned", x: 1, y: 64, z: 1, rotation: 0),
             from: "peer-a", world: world, loadTemplate: { saved[$0] }, saveTemplate: { saved[$0.name] = $0; return true })
-        XCTAssertEqual(undoAfterReconnect, .rejected("no template placement to undo"))
+        XCTAssertEqual(undoAfterReconnect, .rejected(LANTemplateRefusal.nothingToUndo))
     }
 
     func testHostDimensionChangeMidJobPausesAndResumesAgainstOriginWorld() throws {
@@ -5121,7 +5124,7 @@ final class LANReplicationTests: XCTestCase {
             if iterations >= 64 { return nil }
         }
         let drained = session.drainTemplateIntentResponses()
-        guard let match = drained.first(where: { $0.playerID == playerID }) else {
+        guard let match = drained.last(where: { $0.playerID == playerID }) else {
             XCTFail("expected a drained template completion response for \(playerID)", file: file, line: line)
             return nil
         }

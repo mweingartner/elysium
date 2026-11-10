@@ -11,6 +11,22 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   the list captured when hosting started, and guests receive the current list with the next world
   update.
 
+- **Object templates for LAN guests.** A guest can now place and undo object templates in the
+  host's world. Until now a guest's `Command-V` paste appeared only on the guest's own screen: the
+  host never heard of it, nobody else saw it, and it disappeared again as the world updated. A
+  guest uses its own template library (`Command-C` saves to the guest's Mac), the host places the
+  object for every player, and the guest sees the host accept it, its progress and the result, or
+  the reason it was refused, with the wireframe kept so the guest can adjust and click again.
+  `Command-Z` on a guest asks the host to undo that guest's most recent placement. A guest's
+  placement can sit as far away as its wireframe can be pushed (the host used to allow six
+  blocks, which no real object could meet). What a guest places arrives as if newly built: the
+  host makes every chest, furnace, sign and other special block itself, so containers and
+  jukeboxes are empty and spawners inactive, while signs keep their text and flower pots their
+  plants. An object above about 90,000 blocks is too large for a guest to send, and the host's
+  chat names the guest and the object when a guest's placement or undo completes. The host no
+  longer looks up or saves templates in its own library on a guest's behalf. Copying and pasting
+  still costs no materials, for guests as for the host.
+
 - Bumped the release and exact-LAN-compatibility version to 1.4.5 for the object-template fixes
   below.
 

@@ -151,6 +151,8 @@ private struct LANPeerRateLimiter {
     /// compilation or an outbound AI request, so a guest gets a handful per
     /// second, not sixty.
     var scriptIntent: LANTokenBucket
+    /// A place intent makes the host decode a whole template: a handful a second at most.
+    var templateIntent: LANTokenBucket
 
     init(now: Double = Date.timeIntervalSinceReferenceDate) {
         chat = LANTokenBucket(capacity: 8, refillPerSecond: 8.0 / 10.0, now: now)
@@ -162,6 +164,7 @@ private struct LANPeerRateLimiter {
         inventoryUpdate = LANTokenBucket(capacity: 25, refillPerSecond: 25, now: now)
         containerEditIntent = LANTokenBucket(capacity: 20, refillPerSecond: 20, now: now)
         scriptIntent = LANTokenBucket(capacity: 6, refillPerSecond: 6.0 / 10.0, now: now)
+        templateIntent = LANTokenBucket(capacity: 6, refillPerSecond: 1, now: now)
     }
 }
 
@@ -581,6 +584,7 @@ final class LANMultiplayerManager {
         game.lanBlockIntentHandler = nil
         game.lanInteractionIntentHandler = nil
         game.lanBowIntentHandler = nil
+        game.lanTemplateIntentHandler = nil
     }
 
     private func configureClientReplicationHooks(for game: GameCore) {
@@ -669,6 +673,12 @@ final class LANMultiplayerManager {
                 self.send(.containerEditIntent(playerID: self.localPeerID, intent: intent), to: peer)
             }
         }
+        game.lanTemplateIntentHandler = { [weak self] intent in
+            self?.queue.async { [weak self] in
+                guard let self, let peer = self.clientPeer else { return }
+                self.send(.templateIntent(playerID: self.localPeerID, intent: intent), to: peer)
+            }
+        }
         game.lanInventoryPublishHandler = { [weak self] snapshot, revision in
             guard let self else { return }
             let update = LANInventoryUpdate(playerID: self.localPeerID, revision: revision, snapshot: snapshot)
@@ -692,6 +702,7 @@ final class LANMultiplayerManager {
         game?.lanTossIntentHandler = nil
         game?.lanRPGIntentHandler = nil
         game?.lanContainerEditHandler = nil
+        game?.lanTemplateIntentHandler = nil
         game?.lanInventoryPublishHandler = nil
         game?.lanSettleTemplateJobsHandler = nil
         game?.onRPGGameRuleTransition = nil
@@ -1213,9 +1224,9 @@ final class LANMultiplayerManager {
             // per-tick addressed events (damage/grants/death) flow independent of the replication
             // publish cadence below so a hit or a pickup never waits on the next full-batch tick.
             drainHostPerPeerEvents(game: game)
-            // Step every peer's in-flight template PLACE/UNDO job and drain any that finished
-            // this frame. This also runs independent of the publish cadence, every tickReplication
-            // call, so jobs progress and complete promptly. Only the completion text event is
+            // Step every peer's in-flight template PLACE/UNDO job and send what it has to report
+            // (progress, completion). This runs independent of the publish cadence, every
+            // tickReplication call, so jobs progress and complete promptly. Only the text event is
             // sent here — per-block deltas emitted this frame ride out through the normal
             // foreground-delta publish below (and the `onWorldBlockChanged`/dirty-section hooks
             // that already fire during stepping); building a second bespoke replication batch
@@ -1223,16 +1234,12 @@ final class LANMultiplayerManager {
             // dirty-section queues.
             hostReplicationSession.stepTemplateJobs(in: game.world)
             for (playerID, result) in hostReplicationSession.drainTemplateIntentResponses() {
-                let message: String
-                switch result {
-                case .placed(let name, let blocks, let blockEntities, let cleared, let filled):
-                    message = "placed \(name) (\(blocks) blocks, \(blockEntities) block entities, cleared \(cleared), filled \(filled))"
-                case .undone(let name, let restored):
-                    message = "undid \(name) (\(restored) cells)"
-                default:
-                    continue // .accepted/.copied/.rejected never arrive through this drain
+                let event = lanTemplateGameplayEvent(for: result, playerID: playerID, tick: game.rpgSimulationTick)
+                if event.kind == .templateCompleted {
+                    // The host sees what a guest changed in its world, and who did it.
+                    let name = hostReplicationSession.peerRecord(playerID: playerID)?.displayName ?? "A guest"
+                    postChat("§7\(name): \(event.message)")
                 }
-                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: message, tick: game.rpgSimulationTick)
                 queue.async { [weak self] in
                     guard let self, let peer = self.hostPeers.values.first(where: { $0.accepted && $0.playerID == playerID }) else { return }
                     self.sendGameplayEvent(event, to: peer.id)
@@ -1858,6 +1865,8 @@ final class LANMultiplayerManager {
             allowed = peer.rateLimiter.replicationAck.tryConsume(now: now)
         case .scriptIntent:
             allowed = peer.rateLimiter.scriptIntent.tryConsume(now: now)
+        case .templateIntent:
+            allowed = peer.rateLimiter.templateIntent.tryConsume(now: now)
         }
         guard !allowed else { return false }
         if peer.shouldLogThrottle(categoryName, now: now) {
@@ -3422,34 +3431,17 @@ final class LANMultiplayerManager {
         }
     }
 
+    /// Admission answers the guest at once, accepted or refused. A job's progress and completion
+    /// follow from `tickReplication`'s drain of the per-peer template jobs.
     private func applyHostTemplateIntent(_ intent: LANTemplateIntent, from playerID: String, peerID: UUID, peerName: String) {
         precondition(Thread.isMainThread)
         guard let game = activeGame, game.hasWorld() else { return }
-        let result = hostReplicationSession.applyTemplateIntent(
-            intent,
-            from: playerID,
-            world: game.world,
-            loadTemplate: { try game.db.getTemplate(named: $0) },
-            saveTemplate: { try game.db.putTemplate($0) }
-        )
-        switch result {
-        case .copied(let name, let blocks):
-            let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "copied \(name) (\(blocks) blocks)", tick: game.rpgSimulationTick)
-            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-        case .accepted(let action, let name):
-            // Place/undo are now tick-sliced host jobs (LANReplication's `templateJobs`
-            // registry): admission only returns an immediate "in progress" acknowledgment.
-            // The eventual `.placed`/`.undone` result arrives later via tickReplication.
-            let verb = action == .undoPlacement ? "undoing" : "placing"
-            let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "\(verb) \(name)…", tick: game.rpgSimulationTick)
-            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-        case .placed, .undone:
-            break // completion now arrives only through tickReplication's job-completion drain
-        case .rejected(let reason):
-            appendStatus("LAN template intent from \(peerName) rejected: \(reason).")
-            let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.rpgSimulationTick)
-            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+        let result = hostReplicationSession.applyTemplateIntent(intent, from: playerID, world: game.world)
+        if case .rejected(let reason) = result {
+            appendStatus("LAN template intent from \(peerName) rejected: \(reason)")
         }
+        let event = lanTemplateGameplayEvent(for: result, playerID: playerID, tick: game.rpgSimulationTick)
+        queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
     }
 
     /// A2: serves chunk requests for the GUEST's dimension, not just the host's current one —
@@ -3657,7 +3649,7 @@ final class LANMultiplayerManager {
         generation: UInt64
     ) {
         enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
-            manager.appendStatus(event.message)
+            if event.kind != .templateProgress { manager.appendStatus(event.message) }
             switch event.kind {
             case .peerDisconnected, .death:
                 guard let game = manager.activeGame, game.hasWorld() else { return }
@@ -3669,6 +3661,10 @@ final class LANMultiplayerManager {
                 manager.postChat("§7" + event.message)
             case .scriptIntentRefused:
                 manager.postChat("§c" + event.message)
+            case .templatePlaceAccepted, .templateUndoAccepted, .templateProgress, .templateCompleted,
+                 .templateRefused:
+                guard event.playerID == manager.localPeerID else { return }
+                manager.activeGame?.applyLANTemplateEvent(event)
             default:
                 break
             }

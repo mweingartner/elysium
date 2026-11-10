@@ -536,8 +536,7 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
         }
         if let held {
             let heldName = itemDef(held.id).name
-            let pottableWords = ["sapling", "fern", "dandelion", "poppy", "orchid", "allium", "bluet", "tulip", "daisy", "cornflower", "lily_of", "wither_rose", "mushroom", "cactus", "bamboo", "azalea", "fungus", "roots", "dead_bush", "torchflower"]
-            if pottableWords.contains(where: { heldName.contains($0) }) {
+            if isPottablePlantName(heldName) {
                 var pbe = be
                 if pbe == nil {
                     pbe = BlockEntityData(type: "lectern", x: x, y: y, z: z)
@@ -1290,36 +1289,49 @@ private func placeEffects(_ world: World, _ blockId: Int, _ x: Int, _ y: Int, _ 
     world.hooks.playSound("block." + blockDefs[blockId].sound + ".place", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 1, 0.8)
 }
 
-private func attachPlacementBE(_ world: World, _ blockId: Int, _ x: Int, _ y: Int, _ z: Int, _ held: ItemStack) {
+/// The block entity a block gets when a player places it by hand, or nil when it needs none.
+/// A LAN guest's pasted template is given exactly these (`lanHostTemplate`), so a guest cannot
+/// hand the host a block entity of its own making.
+func placementBlockEntity(_ blockId: Int, _ x: Int, _ y: Int, _ z: Int, held: ItemStack? = nil) -> BlockEntityData? {
     if blockId == Int(B.chest) || blockId == Int(B.trapped_chest) || blockId == Int(B.barrel) {
-        world.setBlockEntity(makeContainerBE(x, y, z, 27))
+        return makeContainerBE(x, y, z, 27)
     } else if blockId == Int(B.furnace) || blockId == Int(B.blast_furnace) || blockId == Int(B.smoker) {
-        world.setBlockEntity(makeFurnaceBE(x, y, z, blockId == Int(B.blast_furnace) ? "blast" : blockId == Int(B.smoker) ? "smoker" : "furnace"))
+        return makeFurnaceBE(x, y, z, blockId == Int(B.blast_furnace) ? "blast" : blockId == Int(B.smoker) ? "smoker" : "furnace")
     } else if blockId == Int(B.brewing_stand) {
-        world.setBlockEntity(makeBrewingBE(x, y, z))
+        return makeBrewingBE(x, y, z)
     } else if blockId == Int(B.hopper) {
-        world.setBlockEntity(makeHopperBE(x, y, z))
+        return makeHopperBE(x, y, z)
     } else if blockId == Int(B.dispenser) || blockId == Int(B.dropper) {
-        world.setBlockEntity(makeContainerBE(x, y, z, 9))
+        return makeContainerBE(x, y, z, 9)
     } else if blockDefs[blockId].name.hasSuffix("shulker_box") || blockId == Int(B.shulker_box) {
         let be = makeContainerBE(x, y, z, 27)
-        if let contents = held.data.contents { be.items = contents }
-        world.setBlockEntity(be)
+        if let contents = held?.data.contents { be.items = contents }
+        return be
     } else if shapeOf(blockId) == .sign || shapeOf(blockId) == .wallSign || shapeOf(blockId) == .hangingSign {
-        world.setBlockEntity(makeSignBE(x, y, z))
+        return makeSignBE(x, y, z)
     } else if blockId == Int(B.beacon) {
         let be = BlockEntityData(type: "beacon", x: x, y: y, z: z)
         be.levels = 0
-        world.setBlockEntity(be)
+        return be
     } else if blockId == Int(B.conduit) {
         let be = BlockEntityData(type: "conduit", x: x, y: y, z: z)
         be.active = false
-        world.setBlockEntity(be)
+        return be
     } else if blockId == Int(B.decorated_pot) {
         let be = BlockEntityData(type: "pot", x: x, y: y, z: z)
-        be.sherds = held.data.sherds.map { $0.map { Optional($0) } } ?? [nil, nil, nil, nil]
-        world.setBlockEntity(be)
+        be.sherds = held?.data.sherds.map { $0.map { Optional($0) } } ?? [nil, nil, nil, nil]
+        return be
     }
+    return nil
+}
+
+private func attachPlacementBE(_ world: World, _ blockId: Int, _ x: Int, _ y: Int, _ z: Int, _ held: ItemStack) {
+    if let be = placementBlockEntity(blockId, x, y, z, held: held) { world.setBlockEntity(be) }
+}
+
+/// Whether an item of this name can stand in a flower pot.
+func isPottablePlantName(_ name: String) -> Bool {
+    ["sapling", "fern", "dandelion", "poppy", "orchid", "allium", "bluet", "tulip", "daisy", "cornflower", "lily_of", "wither_rose", "mushroom", "cactus", "bamboo", "azalea", "fungus", "roots", "dead_bush", "torchflower"].contains(where: { name.contains($0) })
 }
 
 /// compute placement meta for orientation-aware shapes; -1 = can't place

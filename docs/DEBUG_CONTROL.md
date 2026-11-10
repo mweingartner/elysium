@@ -490,6 +490,8 @@ an out-of-band “set workstation contents” shortcut.
 | `template.generate` | Any | `{"name":"test_ship","kind":"pirate_ship","length":24,"style":"oak"}` | Generates and stores a bounded `pirate_ship`, `ship`, or `boat`. |
 | `template.place` | Authority | `{"name":"test_house","x":20,"y":64,"z":20,"rotation":1,"replaceExisting":false,"prepareTerrain":false}` | Preflights and places at most 8,192 blocks, retaining one world-bound debug undo snapshot. Terrain preparation is limited to 65,536 scanned cells. |
 | `template.undo` | Authority | `{}` | Restores the most recent compatible debug placement in the same world/dimension once, only while its full region is loaded. |
+| `template.arm` | World | `{"name":"test_house"}` | Arms the placement preview for a saved template, as `/place "name"` does. Commit it with `input.mouse_down {"button":0}`. On a LAN client the click asks the host. |
+| `template.undo_last` | World | `{}` | Runs the player's own Command-Z for the last interactive placement and returns `requested`. On a LAN client this sends the undo to the host, which answers through gameplay events; nothing is undone locally. |
 | `template.delete` | Any | `{"name":"test_house"}` | Deletes the normalized exact-name template from the isolated store. |
 
 Template names follow the existing normalized template contract and are limited to 48 bytes at
@@ -548,7 +550,8 @@ not bypass the host-authoritative replication model.
 
 On a LAN client, authoritative world/player/inventory/entity/template/RPG mutation returns
 `forbiddenInLANClient`. Local observation, view direction, raw input, screen snapshots/close, and
-exiting the client world remain available. All semantic screen mutation/open operations are denied
+exiting the client world remain available, and so do `template.arm` and `template.undo_last`, which
+take the same path as a guest's own paste and Command-Z and leave the decision to the host. All semantic screen mutation/open operations are denied
 conservatively because some production screens directly mutate local inventory or game mode. Run
 the control port on the LAN host when a test requires authoritative multiplayer mutation, then
 observe client replication separately.

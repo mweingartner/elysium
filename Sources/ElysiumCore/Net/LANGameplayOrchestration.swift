@@ -30,7 +30,8 @@ public enum LANTemplateIntentResult: Equatable {
     /// a place/undo intent is admitted into the host's per-peer template job registry; the
     /// eventual `.placed`/`.undone` result arrives later through `drainTemplateIntentResponses`.
     case accepted(action: LANTemplateIntent.Action, name: String)
-    case copied(name: String, blocks: Int)
+    /// A running job's progress, queued every `LAN_MULTIPLAYER_TEMPLATE_PROGRESS_REPORT_STEPS`.
+    case progress(action: LANTemplateIntent.Action, name: String, percent: Int, phase: String)
     case placed(name: String, blocks: Int, blockEntities: Int, cleared: Int, filled: Int)
     case undone(name: String, restored: Int)
     case rejected(String)

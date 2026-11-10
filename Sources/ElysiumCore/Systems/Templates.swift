@@ -12,7 +12,9 @@ public let OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS = 4_096
 public let OBJECT_TEMPLATE_PREVIEW_MAX_BOXES = OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS
 public let OBJECT_TEMPLATE_MAX_SUPPORT_FILL_DEPTH = 32
 public let OBJECT_TEMPLATE_PREVIEW_LINE_VERTICES_PER_BOX = 24
-private let OBJECT_TEMPLATE_BINARY_MAGIC = Data([0x50, 0x42, 0x54, 0x32]) // PBT2
+let OBJECT_TEMPLATE_BINARY_MAGIC = Data([0x50, 0x42, 0x54, 0x32]) // PBT2
+/// One block in the `PBT2` form: dx, dy, dz and the cell, two bytes each.
+public let OBJECT_TEMPLATE_BINARY_BYTES_PER_BLOCK = 8
 
 public struct TemplateBlock: Codable, Equatable {
     public var dx: Int
@@ -247,6 +249,7 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
     case destinationBlocked(Int, Int, Int)
     case foundationTooDeep(Int, Int, Int)
     case tooManyBlockEntities(Int)
+    case tooLargeForLANGuest(Int)
 
     public var description: String {
         switch self {
@@ -274,6 +277,8 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
             return "Foundation gap is too deep at \(x) \(y) \(z); move the object closer to terrain."
         case .tooManyBlockEntities(let count):
             return "Object has too many containers/signs (\(count); limit \(OBJECT_TEMPLATE_MAX_BLOCK_ENTITIES))."
+        case .tooLargeForLANGuest(let count):
+            return "Object is too large to place in a LAN game you joined (\(count) blocks; about \(LAN_MULTIPLAYER_TEMPLATE_GUEST_BLOCK_GUIDE) fit). The host can place it."
         }
     }
 }
@@ -300,11 +305,11 @@ private struct TemplatePlacementPreparationPlan {
     let support: [TemplatePos]
 }
 
-private func templatePos(_ block: TemplateBlock) -> TemplatePos {
+func templatePos(_ block: TemplateBlock) -> TemplatePos {
     TemplatePos(x: block.dx, y: block.dy, z: block.dz)
 }
 
-private func templatePos(_ be: BlockEntityData) -> TemplatePos {
+func templatePos(_ be: BlockEntityData) -> TemplatePos {
     TemplatePos(x: be.x, y: be.y, z: be.z)
 }
 
@@ -461,7 +466,11 @@ private func stripContainedItemsFromTemplateClone(_ copy: BlockEntityData) {
 }
 
 private func templateCloneCellWithoutContainedItemState(_ cellValue: UInt16, blockEntity be: BlockEntityData?) -> UInt16 {
-    guard be?.items != nil else { return cellValue }
+    be?.items != nil ? templateCellWithoutContainedItemState(cellValue) : cellValue
+}
+
+/// The cell as it stands when what it holds is gone: a lit furnace is out, a shelf shows no book.
+func templateCellWithoutContainedItemState(_ cellValue: UInt16) -> UInt16 {
     let id = Int(cellValue >> 4)
     let meta = Int(cellValue & 15)
     switch id {
@@ -491,7 +500,7 @@ public func normalizedTemplateRotation(_ steps: Int) -> Int {
     ((steps % 4) + 4) % 4
 }
 
-private func rotatedTemplateSize(_ template: ObjectTemplate, rotationSteps: Int) -> (x: Int, y: Int, z: Int) {
+func rotatedTemplateSize(_ template: ObjectTemplate, rotationSteps: Int) -> (x: Int, y: Int, z: Int) {
     switch normalizedTemplateRotation(rotationSteps) {
     case 1, 3:
         return (template.sizeZ, template.sizeY, template.sizeX)
@@ -500,7 +509,7 @@ private func rotatedTemplateSize(_ template: ObjectTemplate, rotationSteps: Int)
     }
 }
 
-private func rotatedTemplateCoordinate(x: Int, y: Int, z: Int,
+func rotatedTemplateCoordinate(x: Int, y: Int, z: Int,
                                        sizeX: Int, sizeZ: Int,
                                        rotationSteps: Int) -> (x: Int, y: Int, z: Int) {
     switch normalizedTemplateRotation(rotationSteps) {
@@ -564,7 +573,7 @@ public func templatePlacementPreviewDistance(for rawTemplate: ObjectTemplate) th
     return templatePlacementPreviewDistance(forValidated: template)
 }
 
-private func templatePlacementPreviewDistance(forValidated template: ObjectTemplate) -> Double {
+func templatePlacementPreviewDistance(forValidated template: ObjectTemplate) -> Double {
     let sx = Double(template.sizeX)
     let sy = Double(template.sizeY)
     let sz = Double(template.sizeZ)
@@ -780,7 +789,7 @@ public func encodeObjectTemplate(_ template: ObjectTemplate) throws -> Data {
     guard nameBytes.count <= OBJECT_TEMPLATE_NAME_MAX else { throw TemplateError.invalidName }
     let blockEntityData = try JSONEncoder().encode(validated.blockEntities)
     var data = Data()
-    data.reserveCapacity(48 + nameBytes.count + validated.blocks.count * 8 + blockEntityData.count)
+    data.reserveCapacity(48 + nameBytes.count + validated.blocks.count * OBJECT_TEMPLATE_BINARY_BYTES_PER_BLOCK + blockEntityData.count)
     data.append(OBJECT_TEMPLATE_BINARY_MAGIC)
     try appendTemplateU16(OBJECT_TEMPLATE_VERSION, to: &data)
     try appendTemplateU16(0, to: &data)
@@ -876,8 +885,8 @@ private func decodeBinaryObjectTemplate(_ data: Data) throws -> ObjectTemplate {
           normalizedTemplateName(name) != nil else {
         throw TemplateError.invalidName
     }
-    let blockBytes = blockCount * 8
-    guard blockBytes / 8 == blockCount,
+    let blockBytes = blockCount * OBJECT_TEMPLATE_BINARY_BYTES_PER_BLOCK
+    guard blockBytes / OBJECT_TEMPLATE_BINARY_BYTES_PER_BLOCK == blockCount,
           reader.offset + blockBytes + blockEntityByteCount == data.count else {
         throw TemplateError.corruptTemplate("template binary length mismatch")
     }

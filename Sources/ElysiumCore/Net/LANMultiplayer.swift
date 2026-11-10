@@ -258,6 +258,9 @@ public enum LANMultiplayerHostRateLimitCategory: String, Equatable, CaseIterable
     /// compilation/validation work (script attach) or an outbound AI request,
     /// materially more expensive per message than a movement/block intent.
     case scriptIntent
+    /// A place intent carries a whole template for the host to decode, so it is not counted
+    /// with the sixty-a-second gameplay intents.
+    case templateIntent
 }
 
 public func lanMultiplayerHostRateLimitCategory(
@@ -272,9 +275,11 @@ public func lanMultiplayerHostRateLimitCategory(
         return .heartbeat
     case .chunkRequest:
         return .chunkRequest
-    case .blockIntent, .containerIntent, .templateIntent, .attackIntent, .tossIntent, .rpgIntent,
+    case .blockIntent, .containerIntent, .attackIntent, .tossIntent, .rpgIntent,
          .interactionIntent, .bowIntent:
         return .gameplayIntent
+    case .templateIntent:
+        return .templateIntent
     case .inventoryUpdate:
         return .inventoryUpdate
     case .containerEditIntent:
@@ -445,6 +450,13 @@ public enum LANGameplayEventKind: String, Codable, Equatable {
     /// so a guest client can style/route the two differently later without a
     /// protocol change (today both just render `message` in chat).
     case scriptIntentRefused
+    /// The host's answers to a guest's own `templateIntent` (`LANTemplateTransfer.swift`): the
+    /// guest acts on the kind and shows `message` in its action bar and chat.
+    case templatePlaceAccepted
+    case templateUndoAccepted
+    case templateProgress
+    case templateCompleted
+    case templateRefused
 }
 
 public struct LANGameplayEvent: Codable, Equatable {
@@ -1989,30 +2001,6 @@ public struct LANContainerIntent: Codable, Equatable {
         self.slot = max(-1, min(1024, slot))
         self.button = max(0, min(2, button))
         self.shift = shift
-    }
-}
-
-public struct LANTemplateIntent: Codable, Equatable {
-    public enum Action: String, Codable, Equatable {
-        case copyTarget
-        case placeTemplate
-        case undoPlacement
-    }
-
-    public var action: Action
-    public var templateName: String
-    public var x: Int
-    public var y: Int
-    public var z: Int
-    public var rotation: Int
-
-    public init(action: Action, templateName: String, x: Int, y: Int, z: Int, rotation: Int) {
-        self.action = action
-        self.templateName = sanitizedLANTemplateName(templateName)
-        self.x = x
-        self.y = y
-        self.z = z
-        self.rotation = ((rotation % 4) + 4) % 4
     }
 }
 
