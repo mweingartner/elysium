@@ -2288,7 +2288,10 @@ final class SettingsScreen: Screen {
                     { [weak game] in game?.settings.volumes[key] ?? 1 },
                     { [weak self, weak game] v in
                         guard let self, let game else { return }
-                        _ = self.persistSettingsMutation(game) { $0.volumes[key] = v }
+                        // audible while dragging, not on the app's once-a-second settings sync
+                        if self.persistSettingsMutation(game, { $0.volumes[key] = v }) {
+                            gAppDelegate?.audio.applyVolumes(game.settings.volumes)
+                        }
                     }))
                 if col == 1 { y += 22 }
             }

@@ -591,8 +591,8 @@ final class PrehistoricAudioRobustnessTests: XCTestCase {
             peak = max(peak, out.peak)
         }
         XCTAssertGreaterThan(peak, 0)
-        // 512-voice cap x max creature gain 1.5 x recording headroom 0.52 (synth voices are smaller)
-        XCTAssertLessThan(peak, 512 * 1.5)
+        // the master-bus limiter holds even a 700-call pile-up within full scale
+        XCTAssertLessThanOrEqual(peak, 1.0)
     }
 
     func testConcurrentListenerUpdatesAndPlaysDuringRenderStayFinite() throws {
@@ -713,12 +713,8 @@ final class PrehistoricAudioRobustnessTests: XCTestCase {
     private static let repositoryRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 
-    /// Mirrors `initEngine`: the render rate is the (unstarted) output node's rate, else 48 kHz.
-    private static let engineOutputRate: Double = {
-        let engine = AVAudioEngine()   // outputNode does not retain its engine
-        let rate = withExtendedLifetime(engine) { engine.outputNode.outputFormat(forBus: 0).sampleRate }
-        return rate > 0 ? rate : 48_000
-    }()
+    /// Mirrors `initEngine(startDevice: false)`: offline engines always render at 48 kHz.
+    private static let engineOutputRate = 48_000.0
 
     private struct Rendered {
         var left: [Float] = []

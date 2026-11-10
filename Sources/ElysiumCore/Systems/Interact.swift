@@ -1604,6 +1604,8 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
         }
         if be.type == "jukebox", let disc = be.disc {
             spawnItem(world, Double(x) + 0.5, Double(y) + 1, Double(z) + 0.5, disc)
+            // presentation only, like ejecting: the host stops the disc's music
+            world.hooks.playSound("jukebox.stop", Double(x) + 0.5, Double(y), Double(z) + 0.5, 1, 1)
         }
         if isShulker && world.rule("doTileDrops") {
             // shulker keeps contents

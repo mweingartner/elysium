@@ -9,7 +9,7 @@ import os
 import ElysiumCore
 
 // ---------------------------------------------------------------------------
-// voices
+// voices (Voice, the scheduler and the limiter live in AudioMixerSupport.swift)
 // ---------------------------------------------------------------------------
 struct CreatureSoundPosition {
     let x: Double
@@ -17,66 +17,34 @@ struct CreatureSoundPosition {
     let z: Double
 }
 
-private enum OscType {
-    case sine, square, sawtooth, triangle
-}
-
-private struct Voice {
-    var isNoise = false
-    var type = OscType.sine
-    var freq = 440.0
-    var endFreq = 0.0           // 0 = constant
-    var vibrato = 0.0           // Hz, depth = freq*0.04
-    var dur = 0.2
-    var attack = 0.01
-    var vol = 0.3
-    var pitchRate = 1.0         // noise playback rate
-    var filterFreq = 0.0        // noise: biquad center
-    var filterQ = 1.0
-    var lowpassFilter = false   // else bandpass
-    var start = 0.0             // engine-time seconds
-    var pan = 0.0               // -1..1
-    var gain = 1.0              // category × distance gain at spawn
-    var reverbSend = 0.0
-    // runtime state
-    var phase = 0.0
-    var lfoPhase = 0.0
-    var noisePos = 0.0
-    var z1 = 0.0, z2 = 0.0      // biquad state (transposed direct form II)
-    var done = false
-    var sample: DinosaurSample?
-    var sampleCursor = 0.0
-    var creaturePosition: CreatureSoundPosition?
-    var creatureVolume = 1.0
-    var isDisc = false          // jukebox voices — stopDisc cuts ONLY these
-}
-
 // ---------------------------------------------------------------------------
 // engine
 // ---------------------------------------------------------------------------
 final class AudioEngineM {
-    private let engine = AVAudioEngine()
-    private var srcNode: AVAudioSourceNode!
-    private var sampleRate = 48000.0
+    /// nil for offline engines (`initEngine(startDevice: false)`): no device graph, 48 kHz
+    private var device: AudioOutputDevice?
+    private var sampleRate = 48000.0      // render thread's copy of `mix.sampleRate`
     private var lock = os_unfair_lock()
-    /// owned by the render thread after pickup — main thread only appends to
-    /// the inbox (a snapshot/write-back scheme silently dropped any voice
-    /// added while the render callback was running)
-    private var voices: [Voice] = []
+    /// The render thread owns `scheduler` — the main thread only appends to the inbox (a
+    /// snapshot/write-back scheme silently dropped any voice added while the render callback
+    /// was running) and requests disc cuts.
+    private var scheduler = VoiceScheduler()
     private var voiceInbox: [Voice] = []
-    private var discCutAt: Double? = nil
+    private var discCut: (time: Double, generation: Int)? = nil
+    private var discGeneration = 0
+    private var discSource: CreatureSoundPosition?   // main thread: the jukebox playing the disc
+    var outputRunning = true                         // main thread: false while the device is down
     private var engineTime = 0.0          // seconds, advanced by the render thread
+    /// sliders, environment and device rate: main thread writes under the lock, render copies per block
+    private var mix = MixSettings()
 
     // shared noise table
     private var noise = [Float](repeating: 0, count: 1 << 16)
 
-    // env / mix state (written main thread, read audio thread — floats, benign races)
-    private var masterGain = 0.8
-    private var catGains: [String: Double] = [:]
-    private var lowpassTarget = 20000.0
+    // render-thread mix state
     private var lowpassCur = 20000.0
     private var lpZ1 = 0.0, lpZ2 = 0.0
-    private var reverbAmt = 0.0
+    private var limiter = OutputLimiter(sampleRate: 48000)
     private var delayL = [Float](repeating: 0, count: 24000)
     private var delayR = [Float](repeating: 0, count: 26000)
     private var delayPos = 0
@@ -93,37 +61,59 @@ final class AudioEngineM {
     private var dinosaurSamples = DinosaurSampleBank()
     private var inited = false
 
+    /// `startDevice: false` (tests) never touches AVAudioEngine and renders at a fixed 48 kHz.
     func initEngine(startDevice: Bool = true) {
         if inited { return }
-        inited = true
         dinosaurSamples = DinosaurSampleBank.loadBundled()
         for i in 0..<noise.count { noise[i] = Float.random(in: -1...1) }
-        let format = engine.outputNode.outputFormat(forBus: 0)
-        sampleRate = format.sampleRate > 0 ? format.sampleRate : 48000
-        let renderFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
-        srcNode = AVAudioSourceNode { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            self?.render(frameCount, audioBufferList)
-            return noErr
-        }
-        engine.attach(srcNode)
-        engine.connect(srcNode, to: engine.mainMixerNode, format: renderFormat)
-        if startDevice { try? engine.start() }
         applyVolumes(volumes)
+        inited = true
+        guard startDevice else { return }
+        let device = AudioOutputDevice(
+            render: { [weak self] frameCount, audioBufferList in self?.render(frameCount, audioBufferList) },
+            rateChanged: { [weak self] rate in self?.reconfigure(sampleRate: rate) },
+            runningChanged: { [weak self] running in self?.outputRunning = running })
+        self.device = device
+        reconfigure(sampleRate: device.sampleRate)
+        device.start()
     }
+    var isDeviceGraphBuilt: Bool { device != nil }
+
+    /// Hands a new output rate to the render thread, which adopts it at its next block. Called
+    /// on main after a device change; non-finite or implausible rates are ignored.
+    func reconfigure(sampleRate rate: Double) {
+        guard MixSettings.isPlausibleSampleRate(rate) else { return }
+        os_unfair_lock_lock(&lock)
+        mix.sampleRate = rate
+        os_unfair_lock_unlock(&lock)
+    }
+    private func mixSnapshot() -> MixSettings { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return mix }
+    var renderSampleRate: Double { mixSnapshot().sampleRate }
+    var pendingInboxCount: Int { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return voiceInbox.count }
 
     func applyVolumes(_ v: [String: Double]) {
         volumes = v
-        masterGain = v["master"] ?? 1
-        for cat in ["music", "blocks", "hostile", "friendly", "players", "ambient", "records", "ui"] {
-            catGains[cat] = v[cat] ?? 1
-        }
+        func level(_ key: String) -> Double { let g = v[key] ?? 1; return g.isFinite ? max(0, g) : 0 }
+        var gains = SIMD16<Double>(repeating: 1)      // dictionary lookups stay outside the lock
+        for category in AudioCategory.sliders { gains[category.rawValue] = level(category.settingsKey) }
+        let master = level("master")
+        os_unfair_lock_lock(&lock)
+        (mix.master, mix.categoryGains) = (master, gains)
+        os_unfair_lock_unlock(&lock)
     }
 
     func setEnvironment(_ underwater: Bool, _ caveFactor: Double) {
         self.underwater = underwater
         self.caveFactor = caveFactor
-        lowpassTarget = underwater ? 700 : 20000
-        reverbAmt = caveFactor * 0.35
+        os_unfair_lock_lock(&lock)
+        mix.lowpassTarget = underwater ? 700 : 20000
+        mix.reverbAmount = caveFactor * 0.35
+        os_unfair_lock_unlock(&lock)
+    }
+    /// The player left the world: stop the disc and return to the dry, full-bandwidth title mix.
+    func worldAudioDidEnd() {
+        stopDisc()
+        setEnvironment(false, 0)
     }
     func setListener(_ x: Double, _ y: Double, _ z: Double, _ yaw: Double) {
         os_unfair_lock_lock(&lock)
@@ -138,6 +128,7 @@ final class AudioEngineM {
     func play(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double = 1, _ pitch: Double = 1) {
         guard inited, pitch.isFinite, pitch > 0,
               let mix = gameSoundMix(name, x, y, z, volume) else { return }
+        let pitch = min(4, max(0.25, pitch))   // an unbounded rate would overrun the noise cursor
         let creature = isPrehistoricCreatureSound(name) ? CreatureSoundPosition(x: x, y: y, z: z) : nil
         playRecipe(name, mix.volume, pitch, mix.pan, true,
                    creaturePosition: creature, creatureVolume: volume)
@@ -149,9 +140,8 @@ final class AudioEngineM {
         _ x: Double, _ y: Double, _ z: Double, _ volume: Double
     ) -> (volume: Float, pan: Float)? {
         guard let mix = positionalMix(x, y, z, min(1, max(0, volume))) else { return nil }
-        let master = masterGain.isFinite ? masterGain : 0
-        let configuredPlayers = catGains["players"] ?? 1
-        let players = configuredPlayers.isFinite ? configuredPlayers : 0
+        let settings = mixSnapshot()
+        let master = settings.master, players = settings.gain(.players)
         return (
             volume: Float(min(1, max(0, mix.volume * master * players))),
             pan: Float(min(1, max(-1, mix.pan)))
@@ -163,7 +153,7 @@ final class AudioEngineM {
     func gameSoundMix(
         _ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double
     ) -> (volume: Double, pan: Double)? {
-        positionalMix(x, y, z, volume, maxDistance: isPrehistoricCreatureSound(name) ? 40 : nil)
+        positionalMix(x, y, z, volume, maxDistance: isPrehistoricCreatureSound(name) ? Voice.creatureRange : nil)
     }
 
     private func positionalMix(
@@ -189,7 +179,7 @@ final class AudioEngineM {
             seed = seed &* 1664525 &+ 1013904223
             return Double(seed) / 4294967296.0
         }
-        let gain = min(1.5, volume) * (catGains[recipe.cat] ?? 1)
+        let gain = min(1.5, volume)
         // The shared room delay cannot follow an individual source after the listener
         // leaves its radius. Keep creature calls dry so no delayed voice leaks past 40 blocks.
         let reverbSend = allowReverb && creaturePosition == nil && caveFactor > 0.05 ? caveFactor * 0.6 : 0
@@ -208,10 +198,12 @@ final class AudioEngineM {
         } else {
             recipe.build(&sink, pitch, rng)
         }
-        if let creaturePosition {
-            for i in sink.voices.indices {
-                sink.voices[i].creaturePosition = creaturePosition
-                sink.voices[i].creatureVolume = min(1.5, creatureVolume) * (catGains[recipe.cat] ?? 1)
+        let category = AudioCategory(settingsKey: recipe.cat)
+        for i in sink.voices.indices {
+            sink.voices[i].category = category
+            if let creaturePosition {
+                sink.voices[i].sourcePosition = creaturePosition
+                sink.voices[i].sourceVolume = min(1.5, creatureVolume)
             }
         }
         addVoices(sink.voices)
@@ -225,15 +217,22 @@ final class AudioEngineM {
         return t
     }
     private func addVoices(_ vs: [Voice]) {
+        // a stopped device renders nothing: drop, or everything queued plays stale on its return
+        guard outputRunning else { return }
         os_unfair_lock_lock(&lock)
         voiceInbox.append(contentsOf: vs)
+        let excess = voiceInbox.count - VoiceScheduler.maxInbox
+        if excess > 0 { voiceInbox.removeFirst(excess) }
         os_unfair_lock_unlock(&lock)
     }
 
     // ---- generative music ------------------------------------------------------
     func tickMusic(_ mood: String, _ enabled: Bool) {
         guard inited else { return }
-        if !enabled || now() < musicPlayingUntil {
+        os_unfair_lock_lock(&lock)
+        let discPlaying = discUntil > engineTime   // a jukebox disc holds generative music off
+        os_unfair_lock_unlock(&lock)
+        if !enabled || discPlaying || now() < musicPlayingUntil {
             if musicTimer > 0 { musicTimer -= 1 }
             return
         }
@@ -259,7 +258,7 @@ final class AudioEngineM {
         let length = 60 + Double.random(in: 0..<30)
         let start = now()
         musicPlayingUntil = start + length
-        let gain = 0.32 * (catGains["music"] ?? 1)
+        let gain = 0.32
         var vs: [Voice] = []
         let dark = mood == "nether" || mood == "dark" || mood == "end"
 
@@ -326,6 +325,7 @@ final class AudioEngineM {
             }
             t += 1.5 + Double.random(in: 0..<2)
         }
+        for i in vs.indices { vs[i].category = .music }
         addVoices(vs)
     }
 
@@ -358,8 +358,9 @@ final class AudioEngineM {
         let start = now()
         os_unfair_lock_lock(&lock)
         discUntil = start + length
+        let generation = discGeneration
         os_unfair_lock_unlock(&lock)
-        let gain = 0.5 * (catGains["records"] ?? 1)
+        let gain = 0.5
         var vs: [Voice] = []
         var t = start + 0.2
         var step = 0
@@ -373,18 +374,37 @@ final class AudioEngineM {
             t += beat / 2
             step += 1
         }
-        for i in 0..<vs.count { vs[i].isDisc = true }
+        // heard from the jukebox: attenuated and panned like a creature call, over 64 blocks
+        let source = CreatureSoundPosition(x: x, y: y, z: z)
+        discSource = source
+        for i in vs.indices {
+            vs[i].isDisc = true
+            vs[i].discGeneration = generation
+            vs[i].category = .records
+            vs[i].sourcePosition = source
+            vs[i].sourceVolume = gain
+            vs[i].sourceRange = 64
+        }
         addVoices(vs)
+    }
+    /// Host entry for core sound names: `jukebox.play.*` starts a disc; `jukebox.stop` (eject or
+    /// break) from the jukebox that is playing stops it and still clicks; the rest are recipes.
+    func playGameSound(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double, _ pitch: Double) {
+        if name.hasPrefix("jukebox.play.") { return playDisc(name, x, y, z) }
+        if name == "jukebox.stop", discSource?.isWithinOneBlock(x, y, z) ?? true { stopDisc() }
+        play(name, x, y, z, volume, pitch)
     }
     func stopDisc() {
         guard inited else { return }
-        // request the cut — the render thread owns `voices`, so mutating the
-        // array here raced (and the old duration heuristic also silenced
-        // generative-music tails scheduled inside the disc window)
+        // request the cut — the render thread owns the voices, so mutating them here raced
+        // (and the old duration heuristic also silenced generative-music tails scheduled
+        // inside the disc window). The generation spares a disc started right after this.
         os_unfair_lock_lock(&lock)
-        if discUntil > engineTime { discCutAt = engineTime }
+        discCut = (engineTime, discGeneration)
+        discGeneration += 1
         discUntil = 0
         os_unfair_lock_unlock(&lock)
+        discSource = nil
     }
 
     // ---- render ---------------------------------------------------------------
@@ -394,27 +414,30 @@ final class AudioEngineM {
               let outL = buffers[0].mData?.assumingMemoryBound(to: Float.self),
               let outR = buffers[1].mData?.assumingMemoryBound(to: Float.self) else { return }
         let n = Int(frameCount)
-        let dt = 1.0 / sampleRate
 
+        // O(1) under the lock: snapshot settings, swap the inbox out, take any disc cut
         os_unfair_lock_lock(&lock)
+        let settings = mix
+        sampleRate = settings.sampleRate
+        let dt = 1.0 / sampleRate
         let t = engineTime
         let listener = (listenerX, listenerY, listenerZ, listenerYaw)
         engineTime += Double(n) * dt
-        var local = voices
-        if !voiceInbox.isEmpty {
-            local.append(contentsOf: voiceInbox)
-            voiceInbox.removeAll()
-            // generous cap — a full generative track schedules ~250 voices
-            // up front (most start in the future and cost nothing until then)
-            if local.count > 512 { local.removeFirst(local.count - 512) }
-        }
-        if let cut = discCutAt {
-            discCutAt = nil
-            for i in 0..<local.count where local[i].isDisc && local[i].start > cut {
-                local[i].done = true
-            }
-        }
+        swap(&voiceInbox, &scheduler.incoming)
+        let cut = discCut
+        discCut = nil
         os_unfair_lock_unlock(&lock)
+
+        let blockEnd = t + Double(n) * dt
+        scheduler.admitIncoming()
+        if let cut { scheduler.cutDiscs(after: cut.time, through: cut.generation) }
+        scheduler.enforceLimits(blockStart: t, blockEnd: blockEnd, gains: settings.categoryGains)
+        var local: [Voice] = []               // moved out (no copy) for the hot loop
+        swap(&local, &scheduler.voices)
+        defer {
+            swap(&local, &scheduler.voices)
+            scheduler.compact()
+        }
 
         for i in 0..<n {
             outL[i] = 0
@@ -423,23 +446,19 @@ final class AudioEngineM {
         let noiseMask = noise.count - 1
 
         for vi in 0..<local.count {
+            // finished, or scheduled in a future block — skip the whole sample loop
+            if local[vi].done || local[vi].start >= blockEnd { continue }
             var v = local[vi]
-            let end = v.start + v.dur + 0.05
-            if t >= end {
-                local[vi].done = true
-                continue
-            }
-            // scheduled in a future block — skip the whole sample loop
-            if v.start >= t + Double(n) * dt { continue }
-            // Re-evaluate active creature calls as the listener walks or turns. Positions
-            // are the emission location, not a retained entity or simulation-thread reference.
-            if let source = v.creaturePosition {
-                let mix = positionalSoundMix(source.x, source.y, source.z, v.creatureVolume,
+            // Re-evaluate tracked sources (creature calls, discs) as the listener walks or turns.
+            // Positions are the emission location, not a retained entity or simulation reference.
+            if let source = v.sourcePosition {
+                let mix = positionalSoundMix(source.x, source.y, source.z, v.sourceVolume,
                                              listener.0, listener.1, listener.2, listener.3,
-                                             maxDistance: 40)
+                                             maxDistance: v.sourceRange)
                 v.gain = mix?.volume ?? 0
                 v.pan = mix?.pan ?? 0
             }
+            let level = v.gain * settings.gain(v.category)     // the slider applies live
             // biquad coefficients (recomputed per block — voices are short)
             var b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0
             if v.isNoise {
@@ -464,13 +483,15 @@ final class AudioEngineM {
                 a2 = (1 - alpha) / a0
             }
             var lt = t
-            let panL = Float(min(1, 1 - v.pan) * v.gain)
-            let panR = Float(min(1, 1 + v.pan) * v.gain)
+            let panL = Float(min(1, 1 - v.pan) * level)
+            let panR = Float(min(1, 1 + v.pan) * level)
+            // the send follows the slider too; tracked sources also scale it by distance
+            let send = Float(v.reverbSend * (v.sourcePosition == nil ? 1 : v.gain) * settings.gain(v.category))
             for i in 0..<n {
                 let rel = lt - v.start
                 lt += dt
                 if rel < 0 { continue }
-                if rel > v.dur + 0.05 { break }
+                if rel > v.dur + Voice.tail { break }
                 // envelope: linear attack → exponential decay to 0.001 at dur
                 var env: Double
                 if v.sample != nil {
@@ -524,9 +545,8 @@ final class AudioEngineM {
                 outR[i] += s * panR
                 // reverb send into the delay lines
                 if v.reverbSend > 0 {
-                    let spatialGain = v.creaturePosition == nil ? 1 : v.gain
-                    delayL[(delayPos + i) % delayL.count] += s * Float(v.reverbSend * spatialGain)
-                    delayR[(delayPosR + i) % delayR.count] += s * Float(v.reverbSend * spatialGain)
+                    delayL[(delayPos + i) % delayL.count] += s * send
+                    delayR[(delayPosR + i) % delayR.count] += s * send
                 }
             }
             local[vi] = v
@@ -535,14 +555,14 @@ final class AudioEngineM {
         // cave reverb: two feedback delay taps (each line wraps on its OWN
         // length — sharing one cursor made the longer line's tap spacing jump
         // at every wrap, defeating the coprime-length design)
-        if reverbAmt > 0.001 || delayL[delayPos] != 0 {
+        if settings.reverbAmount > 0.001 || delayL[delayPos] != 0 {
             let fb: Float = 0.45
-            let amt = Float(reverbAmt)
+            let amt = Float(settings.reverbAmount)
             for i in 0..<n {
                 let li = (delayPos + i) % delayL.count
                 let ri = (delayPosR + i) % delayR.count
-                let l = delayL[li]
-                let r = delayR[ri]
+                let l = delayL[li].isFinite ? delayL[li] : 0
+                let r = delayR[ri].isFinite ? delayR[ri] : 0
                 outL[i] += l * amt
                 outR[i] += r * amt
                 delayL[li] = 0
@@ -557,8 +577,8 @@ final class AudioEngineM {
         delayPosR = (delayPosR + n) % delayR.count
 
         // master gain + underwater one-pole-ish lowpass (smoothed biquad)
-        lowpassCur += (lowpassTarget - lowpassCur) * min(1, Double(n) / sampleRate * 10)
-        let master = Float(masterGain)
+        lowpassCur += (settings.lowpassTarget - lowpassCur) * min(1, Double(n) / sampleRate * 10)
+        let master = Float(settings.master)
         if lowpassCur < 19000 {
             let w0 = 2 * Double.pi * min(sampleRate * 0.45, lowpassCur) / sampleRate
             let alpha = Foundation.sin(w0) / 1.4142
@@ -574,17 +594,16 @@ final class AudioEngineM {
                 outL[i] = Float(y) * master
                 outR[i] = Float(y) * master
             }
+            if !(lpZ1.isFinite && lpZ2.isFinite) { lpZ1 = 0; lpZ2 = 0 }
         } else {
             for i in 0..<n {
                 outL[i] *= master
                 outR[i] *= master
             }
         }
-
-        // write back voice state, prune finished
-        os_unfair_lock_lock(&lock)
-        voices = local.filter { !$0.done }
-        os_unfair_lock_unlock(&lock)
+        // bit-transparent below its threshold; keeps a pile-up within ±1 and NaN-free
+        if limiter.sampleRate != sampleRate { limiter.configure(sampleRate) }
+        limiter.process(outL, outR, n)
     }
 }
 

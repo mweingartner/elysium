@@ -189,12 +189,7 @@ final class HostBridge: GameHost {
     func setBossBars(_ bars: [BossBarInfo]) { hud.bossBars = bars }
 
     func playSound(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double, _ pitch: Double) {
-        guard let app else { return }
-        if name.hasPrefix("jukebox.play.") {
-            app.audio.playDisc(name, x, y, z)
-            return
-        }
-        app.audio.play(name, x, y, z, volume, pitch)
+        app?.audio.playGameSound(name, x, y, z, volume, pitch)   // routes jukebox play/stop
     }
     func scriptSoundNames() -> [String] {
         guard let app else { return [] }
@@ -221,7 +216,8 @@ final class HostBridge: GameHost {
         app?.audio.setListener(x, y, z, yaw)
     }
     func tickMusic(_ mood: String, _ enabled: Bool) { app?.audio.tickMusic(mood, enabled) }
-    func stopDisc() { app?.audio.stopDisc() }
+    /// Core calls this exactly when the player leaves a world.
+    func stopDisc() { app?.worldAudioDidEnd() }
 
     func addParticles(_ type: String, _ x: Double, _ y: Double, _ z: Double, _ count: Int, _ spread: Double, _ cell: Int) {
         guard let app, app.game.hasWorld() else { return }
@@ -540,7 +536,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     var ui: UIManager!
     let hud = HUD()
     let audio = AudioEngineM()
-    @MainActor lazy var scriptSoundLibrary = ScriptSoundLibrary()
+    /// Created on first use: its init scans (and creates) the sounds folder.
+    @MainActor var scriptSoundLibrary: ScriptSoundLibrary {
+        if let library = scriptSoundLibraryIfLoaded { return library }
+        let library = ScriptSoundLibrary()
+        scriptSoundLibraryIfLoaded = library
+        return library
+    }
+    @MainActor private(set) var scriptSoundLibraryIfLoaded: ScriptSoundLibrary?
     private var rpgControllerAdapter: RPGControllerAdapter!
     lazy var realityDerivedCoordinator = RealityDerivedCoordinator(owner: self)
     // native SwiftUI script editor (Stage A): lazy, `RealityDerivedCoordinator`'s own ownership
@@ -710,6 +713,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
 #if ELYSIUM_DEBUG_CONTROL
         startDebugControlIfRequested()
 #endif
+    }
+
+    /// The player left the world: stop the disc, drop the underwater/cave mix so the title screen
+    /// is dry, and stop script sounds (a library never loaded has nothing playing).
+    func worldAudioDidEnd() {
+        audio.worldAudioDidEnd()
+        elysiumMainActorSync { scriptSoundLibraryIfLoaded?.stopAll() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
