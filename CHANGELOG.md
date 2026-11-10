@@ -5,6 +5,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.4.5 for the object-template fixes
+  below.
+
 - **Object-template fixes.** The ground filled in under a pasted object is now always plain natural
   ground (the stone, dirt, sand or similar terrain beside the gap, or dirt). It used to copy the
   first solid block beside the gap, whatever that was, so pasting next to a block of diamond,
