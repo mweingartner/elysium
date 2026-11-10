@@ -5,6 +5,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.4.4 for the audio, skill-tree and
+  scripting fixes below. Skill rules are host-authoritative, so older binaries are rejected during
+  the exact-version handshake instead of playing by different cooldown and XP rules.
+
 - **Scripting fixes for authors.** A script that fails now says so: the host sees one rate-limited
   chat line naming the object, the script and the error, with the `/script show` command to look
   closer. Runtime error line numbers were one too high and now match the source. `/script attach`

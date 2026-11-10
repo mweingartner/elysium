@@ -283,7 +283,8 @@ EXPECTED_STORAGE_OBJECT_SHA256='7dd3d8314e6bd3067b1e3779d6ae52d63d009cb952175f5a
 # 1.4.2 (Minecraft bow pose, quieter dungeon mobs): only ELYSIUM_VERSION changes; was
 # 9294a42711cfc62b6debb79bb334790ce202bcd480b413e8f21962e2c01940a5.
 # 1.4.3: only ELYSIUM_VERSION changes; was 38b646c1ea1983c0f7104c3d9df353a04cea05b39442180415cf4484dba06479.
-EXPECTED_SAVES_SOURCE_SHA256='e87d37bbf5cf4d763fbc020d39cc2b7da2caad4a4cb92da1c2205a0968efc461'
+# 1.4.4: only ELYSIUM_VERSION changes; was e87d37bbf5cf4d763fbc020d39cc2b7da2caad4a4cb92da1c2205a0968efc461.
+EXPECTED_SAVES_SOURCE_SHA256='5af166872a3cbcff3fd104df1fd676e04196eba9776794960426c9f14df0eea6'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
 # 1.4.0: only the Saves.swift compiler-AST inventory entry moves (version literal); was
 # 377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb.
@@ -293,7 +294,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd
 # ca7196757bf56adc022268b203057a15286c1cf0314f7c8005c597bd940d7350.
 # 1.4.3: only the Saves.swift compiler-AST entry moves (version literal); was
 # ae4018b1c271741c0768684c81ec4fdbb3725e9b12774511033e155eb34a6375.
-EXPECTED_CORE_CAPABILITY_SHA256='62dec84f63f0199c776aaa6b936f4e2e53bcd6493863c372fa4578acb0f394c0'
+# 1.4.4: only the Saves.swift compiler-AST entry moves (version literal); was
+# 62dec84f63f0199c776aaa6b936f4e2e53bcd6493863c372fa4578acb0f394c0.
+EXPECTED_CORE_CAPABILITY_SHA256='3e53ff8a0b05c23c138f3e0be361719e6fb2bab683e97d78a543ee7185acf87e'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
 # Swift 6.4.2 toolchain (unchanged source): was d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444.
@@ -446,7 +449,14 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='a3df1d3ae3f1039361b3b59205ec7a6cb16832dc1d916b
 # 1.4.3: dinosaur feather drops, profile chicken spawns, dawn chicken cap and the admission rule,
 # plus the version literal; was 77d2c36ddba3ddc64297574b02f18da85b376b023c705b8626f01bd327d11f1b.
 # Swift 6.4.2 toolchain (unchanged source): was a936716f2e339b401a4c226a2c46df1bb42ff3ec9e4c49f386c24735cb2978bf.
-EXPECTED_CORE_OBJECT_SHA256='cff9f7a79021b988d4ad784df5c72f6aa2902bef32c49082bbe67d6f4c94b47e'
+# 1.4.4 (audio, skill-tree and scripting polish): the Core object moves for the player-placed
+# resource mark and its placement, LAN and template call sites, repacking-recipe flags, technique
+# cooldown groups, area targets and the shared bow-damage owner; for script fault notices,
+# repeating closure timers, cancel, the typo guards, bounded attribute-name normalization and
+# attach validation; for the jukebox-stop hook; and for the version literal. GameCore.swift,
+# Player.swift, the storage and text-input sources and objects are byte-identical. Was
+# cff9f7a79021b988d4ad784df5c72f6aa2902bef32c49082bbe67d6f4c94b47e. See docs/release-1.4.4-build.md.
+EXPECTED_CORE_OBJECT_SHA256='4d8f9e57132ed68773a3df5c872c7d1b7ce10596b7a614415108f2bf67d0dbc0'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -511,8 +521,13 @@ EXPECTED_CORE_OBJECT_SHA256='cff9f7a79021b988d4ad784df5c72f6aa2902bef32c49082bbe
 # Swift 6.4.2 toolchain (unchanged source, Atrium still 19eb940): both products relink; were
 # 883a0240e55faa7661dae0dfea9ca7104c3c64e276146ee86a40ec222549e151 (Elysium) and
 # edf92a0ed3d32b5c3280b54198ae31660a3bfa97b36d68c0c03f1c03c175dcf4 (elysmoke).
-EXPECTED_ELYSIUM_PRODUCT_SHA256='159bd86e7af7a6734f52d52413c1e8a87fa85da156eae78648093c36c0f1f6e9'
-EXPECTED_SMOKE_PRODUCT_SHA256='77aa57bfc74ef2bd11fee6684c66a75be94df26ca89b849b3a7c5cede1085286'
+# 1.4.4: the Elysium product relinks the Core changes above and adds the mixer scheduler, live
+# category gains, limiter and device handling (Audio.swift, AudioMixerSupport.swift), the Skills
+# window notes and the scripting help; Atrium still 19eb940. Were
+# 159bd86e7af7a6734f52d52413c1e8a87fa85da156eae78648093c36c0f1f6e9 (Elysium) and
+# 77aa57bfc74ef2bd11fee6684c66a75be94df26ca89b849b3a7c5cede1085286 (elysmoke, Core relink only).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='9baa8ad25a46aeb6b37549962407e2b9166a83277b6bb4dfcfeecd22778f47da'
+EXPECTED_SMOKE_PRODUCT_SHA256='9e6bedc4c96c0a0d64c3b1524a3f8e9ea6427bfebba86b0d3c84ecc8fc6ccda4'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
