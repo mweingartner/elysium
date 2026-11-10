@@ -12,4 +12,5 @@ Sources/ElysiumCore/Net/LANV6HandshakeMessages.swift:generic-api-key:557
 # gitleaks' generic-api-key matches "lapi.c"/"lapi.h" (substring "api") and EXPECTED_STORAGE_API_SHA256.
 scripts/clua/upstream-manifest.json:generic-api-key:8
 scripts/clua/upstream-manifest.json:generic-api-key:9
-scripts/verify-elysium-storage-release-surface.sh:generic-api-key:50
+# The pin's line moves as renewal notes accumulate above it; 270 as of the Swift 6.4.2 renewal.
+scripts/verify-elysium-storage-release-surface.sh:generic-api-key:270

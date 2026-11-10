@@ -261,9 +261,17 @@ EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf
 # only in module.platform.minimumVersion (362 symbols, 462 relationships identical), and the
 # objects recompile for the new target. Previous pins are kept in the comments below each value.
 # Storage API manifest pin was 511be0c59c5ca0228074819b8f9c6d737d83673634ac6369f5c117596feb7cb3.
-EXPECTED_STORAGE_API_SHA256='3397082a30b483a157df3982f1d1f15af31d5097b6563c56082bae8bc91e3d74'
+# Toolchain renewal (Swift 6.4.0.34.1 -> 6.4.2.1.9, Xcode 27.2), no source change since release
+# 1.4.3 (fdf888c): the ElysiumStorage symbol graph differs only in metadata.generator. Proof: the
+# 6.4.2 graph (362 symbols, 462 relationships) re-hashed with the generator string set back to
+# "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)" reproduces the previous
+# symbolGraphSHA256 b073a1b77d8c60cef8f14a56f789694174d7333ec980c0f3efab1368b164a57d exactly. This
+# file pin moves from 3397082a30b483a157df3982f1d1f15af31d5097b6563c56082bae8bc91e3d74.
+EXPECTED_STORAGE_API_SHA256='65f7b9f72ef3d6690fdb32fb7a45687e792e6717a242f1e92f132cea31a1ac96'
 # Deployment target 26: was 43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8.
-EXPECTED_STORAGE_OBJECT_SHA256='e38636a44a6357ab6b17195cbe81bf56c5ebf8157fb07c30e972087341e16e23'
+# Swift 6.4.2 toolchain (unchanged source, see above): the compiler re-emits the object; was
+# e38636a44a6357ab6b17195cbe81bf56c5ebf8157fb07c30e972087341e16e23.
+EXPECTED_STORAGE_OBJECT_SHA256='7dd3d8314e6bd3067b1e3779d6ae52d63d009cb952175f5af3c99e5a84a49ebb'
 # prehistoric-worlds 1.3.0: Saves now rejects unknown/future prehistoric
 # profile IDs at the persistence boundary, and GameCore/LAN content changes
 # relink the Core object and both production consumers. The reviewed AST
@@ -288,7 +296,8 @@ EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd
 EXPECTED_CORE_CAPABILITY_SHA256='62dec84f63f0199c776aaa6b936f4e2e53bcd6493863c372fa4578acb0f394c0'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
-EXPECTED_TEXT_INPUT_OBJECT_SHA256='d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444'
+# Swift 6.4.2 toolchain (unchanged source): was d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444.
+EXPECTED_TEXT_INPUT_OBJECT_SHA256='8bc5318f0aceb95d67d92db8771b8fa1e0690a1fcd7956b23401b137b5cca049'
 # land-animal shore escape: AI.swift, Animals.swift and Entity.swift add footprint-aware
 # water avoidance, bounded deterministic shore search, and bat surface avoidance. The Core
 # object and its two linked products therefore change. Reviewed with 26 focused regressions,
@@ -436,7 +445,8 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='a3df1d3ae3f1039361b3b59205ec7a6cb16832dc1d916b
 # 1.4.2 version literal: was db906dc579360ddbeafb4845260b62b121ab8854b761a63cbef5fd3875e30a8d.
 # 1.4.3: dinosaur feather drops, profile chicken spawns, dawn chicken cap and the admission rule,
 # plus the version literal; was 77d2c36ddba3ddc64297574b02f18da85b376b023c705b8626f01bd327d11f1b.
-EXPECTED_CORE_OBJECT_SHA256='a936716f2e339b401a4c226a2c46df1bb42ff3ec9e4c49f386c24735cb2978bf'
+# Swift 6.4.2 toolchain (unchanged source): was a936716f2e339b401a4c226a2c46df1bb42ff3ec9e4c49f386c24735cb2978bf.
+EXPECTED_CORE_OBJECT_SHA256='cff9f7a79021b988d4ad784df5c72f6aa2902bef32c49082bbe67d6f4c94b47e'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -498,8 +508,11 @@ EXPECTED_CORE_OBJECT_SHA256='a936716f2e339b401a4c226a2c46df1bb42ff3ec9e4c49f386c
 # (Elysium) and 1b364a0e8a74affcf13a955bea11471181e7e08947839fbf62d4a720cf0eba84 (elysmoke, version literal).
 # 1.4.3: both products relink the Core changes above; were 1613ad21da3116752c4325990c9e65e46991e4a3a5cb75784bf5d57f77afa6fe
 # (Elysium) and 3d57c43a95bbad67cd935f145bb7e03a91a6097c5df39f3498342f6e9801ae71 (elysmoke). Atrium still 19eb940.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='883a0240e55faa7661dae0dfea9ca7104c3c64e276146ee86a40ec222549e151'
-EXPECTED_SMOKE_PRODUCT_SHA256='edf92a0ed3d32b5c3280b54198ae31660a3bfa97b36d68c0c03f1c03c175dcf4'
+# Swift 6.4.2 toolchain (unchanged source, Atrium still 19eb940): both products relink; were
+# 883a0240e55faa7661dae0dfea9ca7104c3c64e276146ee86a40ec222549e151 (Elysium) and
+# edf92a0ed3d32b5c3280b54198ae31660a3bfa97b36d68c0c03f1c03c175dcf4 (elysmoke).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='159bd86e7af7a6734f52d52413c1e8a87fa85da156eae78648093c36c0f1f6e9'
+EXPECTED_SMOKE_PRODUCT_SHA256='77aa57bfc74ef2bd11fee6684c66a75be94df26ca89b849b3a7c5cede1085286'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
