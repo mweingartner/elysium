@@ -360,10 +360,11 @@ public enum AttributeRegistry {
 
     // MARK: - did-you-mean
 
-    /// Case-insensitive, camelCase-normalized, Levenshtein-distance-≤2 match
+    /// Case-insensitive, camelCase-normalized, edit-distance-≤2 match (the shared
+    /// `ScriptNameSuggestions.editDistance`, which also counts an adjacent transposition as one edit)
     /// over `kind`'s canonical names and aliases, ≤ 3 suggestions, ordered by
     /// (distance, then canonical spelling) for determinism. Security (code)
-    /// SC-2: `name` is bounded to 64 bytes before the Levenshtein sweep over
+    /// SC-2: `name` is bounded to 64 bytes before the edit-distance sweep over
     /// every descriptor — unreachable from the 1a command path today (a
     /// registered name `resolve` would accept is ≤32 bytes by construction,
     /// and a longer custom name is refused earlier by
@@ -372,45 +373,20 @@ public enum AttributeRegistry {
     /// with an unbounded string.
     public static func didYouMean(kind: ObjectKind, name: String) -> [String] {
         guard name.utf8.count <= 64 else { return [] }
-        let query = normalizeForMatch(name)
+        // Lowercased and camelCase-split so "MaxHealth" and "maxhealth" both compare against
+        // "max_health" the same way; a candidate more than two characters longer or shorter cannot
+        // be within distance 2 and is skipped unmeasured.
+        let query = Array(ScriptNameSuggestions.snakeCased(name).unicodeScalars)
         var candidates: [(name: String, distance: Int)] = []
         var seen = Set<String>()
         for descr in descriptors(for: kind) {
             guard seen.insert(descr.canonical).inserted else { continue }
-            let dist = levenshtein(query, normalizeForMatch(descr.canonical))
+            let candidate = Array(ScriptNameSuggestions.snakeCased(descr.canonical).unicodeScalars)
+            guard abs(candidate.count - query.count) <= 2,
+                  let dist = ScriptNameSuggestions.editDistance(query, candidate) else { continue }
             if dist <= 2 { candidates.append((descr.canonical, dist)) }
         }
         candidates.sort { a, b in a.distance == b.distance ? a.name < b.name : a.distance < b.distance }
         return candidates.prefix(3).map(\.name)
-    }
-
-    /// lowercases and inserts `_` at camelCase boundaries so "MaxHealth" and
-    /// "maxhealth" both compare against "max_health" the same way.
-    private static func normalizeForMatch(_ s: String) -> String {
-        var out = ""
-        var previousLower = false
-        for ch in s {
-            if ch.isUppercase && previousLower { out.append("_") }
-            out.append(Character(ch.lowercased()))
-            previousLower = ch.isLowercase
-        }
-        return out
-    }
-
-    private static func levenshtein(_ a: String, _ b: String) -> Int {
-        let a = Array(a), b = Array(b)
-        if a.isEmpty { return b.count }
-        if b.isEmpty { return a.count }
-        var prev = Array(0...b.count)
-        var cur = [Int](repeating: 0, count: b.count + 1)
-        for i in 1...a.count {
-            cur[0] = i
-            for j in 1...b.count {
-                let cost = a[i - 1] == b[j - 1] ? 0 : 1
-                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-            }
-            swap(&prev, &cur)
-        }
-        return prev[b.count]
     }
 }

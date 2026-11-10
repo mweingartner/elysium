@@ -355,11 +355,15 @@ public enum AIObjectGraphMutationTools {
                 }
                 triggers = parsed
             }
-            switch AIScriptValidationGate.validate(source: source, chunkName: name, runtime: runtime) {
+            let customEvents = CustomEventStore(graph: context.graph)
+            let checked = AIScriptValidationGate.validateForAttach(
+                source: source, chunkName: name, runtime: runtime, isDeclared: { customEvents.get(ref, $0) != nil }
+            )
+            switch checked.outcome {
             case .refused(let result):
                 return .refuse(stage: "validate", message: result.message, hint: result.hint)
             case .accepted(let sha):
-                var warnings: [String] = []
+                var warnings = checked.warnings
                 let dryRunSubject: ObjectRef?
                 let dryRunSubjectIsExact: Bool
                 if mode == .handler, case .object(let subject)? = triggers.first?.target {

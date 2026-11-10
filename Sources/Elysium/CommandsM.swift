@@ -144,7 +144,15 @@ func runCommand(_ game: GameCore, _ raw: String) {
 
     switch cmd {
     case "help":
-        ok("Commands: ai, attr, inspect, inspector, objects, lan, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
+        // `ScriptingCommands` owns the scripting command list and its getting-started text.
+        if arg(0)?.lowercased() == "script" {
+            ScriptingCommands.scriptHelpLines().forEach(ok)
+            return
+        }
+        ok("Commands: ai, inspector, lan, clone, place, listTemplates, templates, give, tp, time, weather,")
+        ok("  gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty,")
+        ok("  gamerule, clear, spawnpoint, heal")
+        ok("Scripting: \(ScriptingCommands.helpSummary()) — try /help script")
     case "ai", "agent":
         let prompt = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         // ai-object-graph (change 2), design.md §12: "/ai cancel".

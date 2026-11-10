@@ -307,8 +307,8 @@ public struct ScriptSnippetSection: Sendable, Equatable, Identifiable {
 public enum ScriptLanguageSchema {
     /// Character budget used when the editor supplies this generated reference to its local AI.
     /// Keep this bounded, but large enough to include the executable globals and object lookup
-    /// surface that follow the object-handle methods.
-    public static let editorAIPrefixCharacterLimit = 6_500
+    /// surface that follow the object-handle methods (raised from 6,500 when `cancel` was added).
+    public static let editorAIPrefixCharacterLimit = 6_700
 
     public static let keywords = [
         "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
@@ -345,17 +345,22 @@ public enum ScriptLanguageSchema {
             .globalFunction, "every",
             signatures: [
                 signature("every(ticks, handlerName)", [p("ticks", .integer), p("handlerName", .string)]),
-                signature("every(ticks, fn)", [p("ticks", .integer), p("fn", .function)]),
+                signature("every(ticks, fn)", [p("ticks", .integer), p("fn", .function)], returns: [r(.integer, "Id for cancel(id).")]),
             ],
-            summary: "Schedule a named durable repeating timer. A function callback is live-only and fires once."
+            summary: "Repeat: a name is a durable timer; a function repeats while live and returns a cancel id."
         ),
         function(
             .globalFunction, "after",
             signatures: [
                 signature("after(ticks, handlerName)", [p("ticks", .integer), p("handlerName", .string)]),
-                signature("after(ticks, fn)", [p("ticks", .integer), p("fn", .function)]),
+                signature("after(ticks, fn)", [p("ticks", .integer), p("fn", .function)], returns: [r(.integer, "Id for cancel(id).")]),
             ],
             summary: "Schedule a one-shot named durable timer or live callback."
+        ),
+        function(
+            .globalFunction, "cancel",
+            signatures: [signature("cancel(id)", [p("id", .integer)], returns: [r(.boolean)])],
+            summary: "Stop a live after/every callback by id."
         ),
         function(
             .globalFunction, "wait",
@@ -629,8 +634,8 @@ public enum ScriptLanguageSchema {
         snippet("objects.block", .objects, "objects.block(dim, x, y, z)", "objects.block(\"overworld\", x, y, z)", "Create a block handle with an explicit dimension."),
 
         snippet("timing.wait", .timing, "wait(ticks)", "wait(20)", "Yield the current handler."),
-        snippet("timing.every", .timing, "every(ticks, handlerName)", "register(\"on_interval\", function(ev)\n  \nend)\nevery(20, \"on_interval\")", "A named durable timer is the only repeating every form."),
-        snippet("timing.after", .timing, "after(ticks, fn)", "after(20, function()\n  \nend)", "Schedule a live one-shot callback. Closure timers receive no arguments."),
+        snippet("timing.every", .timing, "every(ticks, handlerName)", "register(\"on_interval\", function(ev)\n  \nend)\nevery(20, \"on_interval\")", "A named durable timer survives reloads; every(ticks, fn) repeats only while the script is live."),
+        snippet("timing.after", .timing, "after(ticks, fn)", "after(20, function()\n  \nend)", "Schedule a live one-shot callback. Closure timers receive no arguments and return an id for cancel(id)."),
         snippet("timing.tick", .timing, "tick()", "tick()", "Current world tick."),
 
         snippet("ai.ask", .ai, "ai.ask(prompt)", "ai.ask(\"describe the scene\")", "Queue a text-only model request."),

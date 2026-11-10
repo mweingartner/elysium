@@ -75,6 +75,7 @@ extension ScriptRuntime {
             .function(name: "subscribe", HostFunction { [weak self] call in self?.hostSubscribe(call) ?? .error("runtime unavailable") }),
             .function(name: "every", HostFunction { [weak self] call in self?.hostEvery(call) ?? .error("runtime unavailable") }),
             .function(name: "after", HostFunction { [weak self] call in self?.hostAfter(call) ?? .error("runtime unavailable") }),
+            .function(name: "cancel", HostFunction { [weak self] call in self?.hostCancel(call) ?? .error("runtime unavailable") }),
             .function(name: "wait", HostFunction { [weak self] call in self?.hostWait(call) ?? .error("runtime unavailable") }),
             .function(name: "emit", HostFunction { [weak self] call in self?.hostEmit(call) ?? .error("runtime unavailable") }),
             .function(name: "tick", HostFunction { [weak self] _ in .values([.int(self?.host.currentTick ?? 0)]) }),
@@ -132,7 +133,13 @@ extension ScriptRuntime {
 
     func objectNewIndex(_ handle: HandleRef, _ key: ScriptValue, _ value: ScriptValue) -> HostResult {
         guard case .string(let name) = key, let ref = ObjectRef.parse(handle.ref) else { return .error("invalid handle") }
-        return performSet(ref: ref, name: name, value: value)
+        // Dot sugar silently creating a custom attribute hides typos: the write always proceeds, and
+        // a newly created name that resembles a built-in warns once (ScriptFaultNotices.swift).
+        let wasUnknown = resolveLuaBuiltIn(kind: ref.kind, rawName: name) == nil
+            && occupiedCustomAttributeName(for: ref, rawName: name) == nil
+        let result = performSet(ref: ref, name: name, value: value)
+        if wasUnknown, case .values = result { warnIfCreatedAttributeTypo(ref: ref, rawName: name) }
+        return result
     }
 
     func performSet(ref: ObjectRef, name rawName: String, value: ScriptValue) -> HostResult {
@@ -445,6 +452,7 @@ extension ScriptRuntime {
         ) {
             return .error(scriptOwnedSubscriptionErrorMessage(error, owner: ctx.owner))
         }
+        warnIfEventTypo(event, target: options.target, owner: ctx.owner, scriptName: ctx.name)
         if let namedHandler = options.namedHandler {
             namedHandlers[ctx.owner.canonical + "#" + ctx.name + "#" + namedHandler] = fn
         }
@@ -946,10 +954,12 @@ extension ScriptRuntime {
     }
 
     func resolveLuaBuiltIn(kind: ObjectKind, rawName: String) -> AttributeDescriptor? {
+        // no built-in spelling is anywhere near this long; skip the snake-casing of a huge key
+        guard rawName.utf8.count <= SCRIPT_ATTRIBUTE_NAME_INPUT_MAX_CHARACTERS else { return nil }
         if let descriptor = AttributeRegistry.resolve(kind: kind, name: rawName) {
             return descriptor
         }
-        let canonical = camelToSnakeAttributeName(rawName)
+        let canonical = ScriptNameSuggestions.snakeCased(rawName)
         guard canonical != rawName else { return nil }
         return AttributeRegistry.resolve(kind: kind, name: canonical)
     }
@@ -1103,6 +1113,7 @@ extension ScriptRuntime {
         ) {
             return .error(scriptOwnedSubscriptionErrorMessage(error, owner: ctx.owner))
         }
+        warnIfEventTypo(event, target: options.target, owner: ctx.owner, scriptName: ctx.name)
         if let namedHandler = options.namedHandler {
             namedHandlers[ctx.owner.canonical + "#" + ctx.name + "#" + namedHandler] = fn
         }
@@ -1139,6 +1150,7 @@ extension ScriptRuntime {
         ) {
             return .error(scriptOwnedSubscriptionErrorMessage(error, owner: ctx.owner))
         }
+        warnIfEventTypo(event, target: options.target, owner: ctx.owner, scriptName: ctx.name)
         return .values([])
     }
 
@@ -1211,13 +1223,12 @@ extension ScriptRuntime {
         guard call.arguments.count >= 2, let n = intArg(call.arguments[0]), n > 0 else {
             return .error("after/every(n, handler) requires a positive tick count")
         }
-        // A dry run must never leave a durable timer, or a live scheduled
-        // coroutine referencing its throwaway (about-to-be-destroyed)
-        // environment, behind — both branches below are no-ops here.
-        guard !dryRunActive else { return .values([]) }
+        // A dry run validates both arguments but must never leave a durable timer, a closure
+        // timer, or a scheduled coroutine referencing its throwaway environment behind.
         switch call.arguments[1] {
         case .value(.string(let name)):
             guard isValidAttributeName(name) else { return .error("invalid timer handler name") }
+            guard !dryRunActive else { return .values([]) }
             let interval = repeating ? Int64(n) : nil
             let scriptKey = ctx.owner.canonical + "#" + ctx.name
             if let instance = instances[scriptKey], !instance.live,
@@ -1239,17 +1250,20 @@ extension ScriptRuntime {
             ))
             return .values([])
         case .function(let fn):
-            // Closure timers are live-only (design.md §17-8); this change
-            // implements them as a one-shot `wait`-equivalent scheduled run
-            // regardless of `after` vs `every` — see this file's header.
-            let key = ctx.owner.canonical + "#" + ctx.name + "#timer#\(scheduleOrdinal())"
+            // Closure timers are live-only (design.md §17-8) and return an id for `cancel(id)`.
+            // `every` repeats with a fresh callback per beat (ScriptClosureTimers.swift); `after`
+            // stays a one-shot `wait`-equivalent scheduled run.
+            guard !dryRunActive else { return .values([.int(0)]) }
+            if repeating { return scheduleRepeatingClosure(fn, every: n, owner: ctx.owner, scriptName: ctx.name) }
+            let id = closureTimers.allocateID()
             guard let coroutine = try? lua.makeCoroutine(function: fn) else { return .error("could not schedule timer") }
             guard appendScheduled(
-                key: key, coroutine: coroutine, wakeTick: scheduledTick(after: Int64(n))
+                key: afterClosureRunKey(owner: ctx.owner, scriptName: ctx.name, id: id),
+                coroutine: coroutine, wakeTick: scheduledTick(after: Int64(n))
             ) else {
                 return .error("suspended coroutine limit exceeded")
             }
-            return .values([])
+            return .values([.int(Int64(id))])
         default:
             return .error("after/every requires a handler name or function")
         }
@@ -1585,22 +1599,6 @@ extension ScriptRuntime {
     }
 
     // MARK: - small shared helpers
-
-    /// "maxHealth" -> "max_health" (lowercase, `_` inserted at a lower-to-
-    /// upper boundary) — mirrors `AttributeRegistry`'s own private
-    /// `normalizeForMatch` (duplicated rather than shared/exposed, per this
-    /// package's existing precedent for small per-file helpers of this
-    /// shape).
-    func camelToSnakeAttributeName(_ s: String) -> String {
-        var out = ""
-        var previousLower = false
-        for ch in s {
-            if ch.isUppercase && previousLower { out.append("_") }
-            out.append(Character(ch.lowercased()))
-            previousLower = ch.isLowercase
-        }
-        return out
-    }
 
     func scriptValueArg(_ arg: ScriptArgument) -> ScriptValue? {
         switch arg {

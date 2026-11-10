@@ -211,6 +211,12 @@ public final class ScriptRuntime {
 
     var timers: [DurableTimer] = []
     private var nextTimerId: UInt64 = 1
+    /// Live-only `every(n, fn)` callbacks and the shared closure-timer id counter (ScriptClosureTimers.swift).
+    var closureTimers = ScriptClosureTimerRegistry()
+    /// Chat-notice rate limiter for faults and typo warnings (ScriptFaultNotices.swift).
+    var scriptNotices = ScriptNoticeLimiter()
+    /// Per-tick bound on dot-sugar attribute typo checks (ScriptNameSuggestions.swift).
+    var attributeTypoChecks = ScriptAttributeTypoCheckBudget()
 
     /// `"<ownerRef>#<scriptName>#<handlerName>"` -> the function a module's
     /// load body registered with `register(name, fn)` (this change's
@@ -400,6 +406,7 @@ public final class ScriptRuntime {
         refreshAttachDetachBudget()
         refreshEventDeclarationBudget()
         refreshSoundBudget()
+        flushScriptNoticeSummary()
     }
 
     /// Tick-key the lifecycle budget at the mutation boundary as well as the ordinary phase entry.
@@ -522,7 +529,7 @@ public final class ScriptRuntime {
         instructionBudgetTick = tick
     }
 
-    private var nextInstructionSlice: Int {
+    var nextInstructionSlice: Int {
         refreshInstructionBudget()
         // Custom/test budgets smaller than five hook quanta cannot reserve one quantum for all
         // five lanes simultaneously. Clamp the reservation so the current lane can still make
@@ -581,7 +588,7 @@ public final class ScriptRuntime {
     }
 
     @discardableResult
-    private func removeScheduledRuns(where shouldRemove: (ScheduledRun) -> Bool) -> [ScheduledRun] {
+    func removeScheduledRuns(where shouldRemove: (ScheduledRun) -> Bool) -> [ScheduledRun] {
         var removed: [ScheduledRun] = []
         scheduled.removeAll { run in
             guard shouldRemove(run) else { return false }
@@ -738,7 +745,7 @@ public final class ScriptRuntime {
 
     // MARK: - running a fresh coroutine (load, handler, timer, closure)
 
-    private enum RunResult {
+    enum RunResult {
         case completed
         case yielded
         /// No global instruction token was available. Callers retain the authoritative source
@@ -748,7 +755,7 @@ public final class ScriptRuntime {
     }
 
     @discardableResult
-    private func runNew(
+    func runNew(
         key: String, function: ScriptFunction, args: [ScriptValue], isLoad: Bool,
         contextOverride: (owner: ObjectRef, name: String)? = nil,
         causedBy: ScriptEvent? = nil
@@ -831,16 +838,30 @@ public final class ScriptRuntime {
     private func recordRuntimeFault(_ message: String) {
         guard let ctx = currentScript else { return }
         // A callback/timer fault does not unload the otherwise-live module, so explicitly revoke
-        // any lifecycle capability it registered. Load-time faults also flow through here and are
-        // cleared again harmlessly when the failed instance is destroyed.
+        // any lifecycle capability it registered (furnace output, repeating closures). Load-time
+        // faults also flow through here and are cleared again harmlessly when the failed instance
+        // is destroyed.
         _ = clearFurnaceOutputOverride(for: ctx.owner, scriptName: ctx.name)
-        scriptStore.storeLastError(ctx.owner, ctx.name, message)
+        dropRepeatingClosures(owner: ctx.owner, scriptName: ctx.name)
+        recordFault(owner: ctx.owner, name: ctx.name, message: message)
+    }
+
+    /// The one place a script fault is recorded: `lastError`, the `script.faulted` event, and the
+    /// rate-limited chat notice for the host player.
+    private func recordFault(owner: ObjectRef, name: String, message: String) {
+        scriptStore.storeLastError(owner, name, message)
         state.eventBus.raise(
-            kind: .scriptFaulted, subject: ctx.owner,
-            payload: ["name": .string(ctx.name), "message": .string(message)],
-            source: .engine, tick: host.currentTick,
-            subjectType: eventSubjectType(for: ctx.owner)
+            kind: .scriptFaulted, subject: owner,
+            payload: ["name": .string(name), "message": .string(message)],
+            source: .engine, tick: host.currentTick, subjectType: eventSubjectType(for: owner)
         )
+        postFaultNotice(owner: owner, scriptName: name, message: message)
+    }
+
+    /// The one owner of the chunk preamble that binds the implicit locals. It stays on the author's
+    /// line 1 (joined with `; `, never a newline) so every runtime fault line matches the editor.
+    static func wrappedChunkSource(_ source: String, mode: ScriptMode) -> String {
+        (mode == .module ? "local self, world, player = ...; " : "local self, world, player, ev = ...; ") + source
     }
 
     private func parseKey(_ key: String) -> (owner: ObjectRef, name: String)? {
@@ -946,7 +967,7 @@ public final class ScriptRuntime {
         instance.definition == record
     }
 
-    private func definitionIsCurrent(_ instance: Instance) -> Bool {
+    func definitionIsCurrent(_ instance: Instance) -> Bool {
         guard let record = scriptStore.get(instance.ref, instance.name), record.enabled else { return false }
         return sourceUnchanged(instance, record)
     }
@@ -999,18 +1020,9 @@ public final class ScriptRuntime {
             handlerFunction: nil, randomAdapter: adapter
         )
         instances[key] = instance
-        let wrapped = record.mode == .module
-            ? "local self, world, player = ...\n" + record.source
-            : "local self, world, player, ev = ...\n" + record.source
-        switch env.compile(source: wrapped, chunkName: record.name) {
+        switch env.compile(source: Self.wrappedChunkSource(record.source, mode: record.mode), chunkName: record.name) {
         case .failure(let fault):
-            scriptStore.storeLastError(ref, record.name, fault.message)
-            state.eventBus.raise(
-                kind: .scriptFaulted, subject: ref,
-                payload: ["name": .string(record.name), "message": .string(fault.message)],
-                source: .engine, tick: host.currentTick,
-                subjectType: eventSubjectType(for: ref)
-            )
+            recordFault(owner: ref, name: record.name, message: fault.message)
             failLoad(key: key, definition: record)
             return
         case .success(let compiled):
@@ -1030,18 +1042,13 @@ public final class ScriptRuntime {
                     ) {
                     case .success(let subscription):
                         registeredSubscriptionIDs.append(subscription.id)
+                        warnIfEventTypo(trigger.event, target: trigger.target, owner: ref, scriptName: record.name)
                     case .failure(let error):
                         for id in registeredSubscriptionIDs {
                             state.eventBus.unregisterScriptOwned(id: id)
                         }
                         let message = scriptOwnedSubscriptionErrorMessage(error, owner: ref)
-                        scriptStore.storeLastError(ref, record.name, message)
-                        state.eventBus.raise(
-                            kind: .scriptFaulted, subject: ref,
-                            payload: ["name": .string(record.name), "message": .string(message)],
-                            source: .engine, tick: host.currentTick,
-                            subjectType: eventSubjectType(for: ref)
-                        )
+                        recordFault(owner: ref, name: record.name, message: message)
                         failLoad(key: key, definition: record)
                         return
                     }
@@ -1111,7 +1118,8 @@ public final class ScriptRuntime {
             .sorted { $0.wakeTick == $1.wakeTick ? $0.ordinal < $1.ordinal : $0.wakeTick < $1.wakeTick }
         for run in runnable {
             guard nextInstructionSlice > 0 else { break }
-            _ = removeScheduledRun(key: run.key, ordinal: run.ordinal)
+            // An earlier run in this pass may have cancel()ed (closed and removed) this one.
+            guard removeScheduledRun(key: run.key, ordinal: run.ordinal) != nil else { continue }
             guard scheduledRunIsCurrent(run) else {
                 try? lua.close(run.coroutine)
                 if run.isLoad, instances[run.key] != nil {
@@ -1130,6 +1138,7 @@ public final class ScriptRuntime {
             }
             if run.isLoad { finishResumedLoad(key: run.key, result: result, tick: tick) }
         }
+        runDueRepeatingClosures(tick: tick)
         downstreamInstructionReserve = Self.instructionAccountingQuantum
         runDueTimers(tick: tick)
     }
@@ -1342,7 +1351,7 @@ public final class ScriptRuntime {
         return result
     }
 
-    private func cancelAIRequest(_ id: UInt64) {
+    func cancelAIRequest(_ id: UInt64) {
         guard aiRequestModes.removeValue(forKey: id) != nil else { return }
         aiCancellationHandoff?(id)
         aiInFlightCount = max(0, aiInFlightCount - 1)
@@ -1493,13 +1502,7 @@ public final class ScriptRuntime {
             // already changed. Preserve diagnostics for a still-current chunk/shutdown
             // unload, but never write an old callback's fault onto the replacement record.
             if let unloadError, definitionIsCurrent(instance) {
-                scriptStore.storeLastError(instance.ref, instance.name, unloadError)
-                state.eventBus.raise(
-                    kind: .scriptFaulted, subject: instance.ref,
-                    payload: ["name": .string(instance.name), "message": .string(unloadError)],
-                    source: .engine, tick: host.currentTick,
-                    subjectType: eventSubjectType(for: instance.ref)
-                )
+                recordFault(owner: instance.ref, name: instance.name, message: unloadError)
             }
         }
         let discardedRuns = scheduled.filter { $0.key == key || $0.key.hasPrefix(key + "#") }
@@ -1515,6 +1518,7 @@ public final class ScriptRuntime {
             )
         }
         _ = clearFurnaceOutputOverride(for: instance.ref, scriptName: instance.name)
+        dropRepeatingClosures(owner: instance.ref, scriptName: instance.name)
         instance.environment.destroy()
         instances.removeValue(forKey: key)
         _ = removeScheduledRuns { $0.key == key || $0.key.hasPrefix(key + "#") }
@@ -1593,8 +1597,7 @@ public final class ScriptRuntime {
         )
         nextOrdinal += 1
         defer { env.destroy() }
-        let wrapped = "local self, world, player = ...\n" + source
-        switch env.compile(source: wrapped, chunkName: "run") {
+        switch env.compile(source: Self.wrappedChunkSource(source, mode: .module), chunkName: "run") {
         case .failure(let fault):
             return .failure("compile error: \(fault.message)")
         case .success(let fn):
@@ -1709,10 +1712,7 @@ public final class ScriptRuntime {
             random: transientRandom
         )
         defer { env.destroy() }
-        let wrapped = mode == .module
-            ? "local self, world, player = ...\n" + source
-            : "local self, world, player, ev = ...\n" + source
-        switch env.compile(source: wrapped, chunkName: "dryrun") {
+        switch env.compile(source: Self.wrappedChunkSource(source, mode: mode), chunkName: "dryrun") {
         case .failure(let fault):
             return .failure(fault.message)
         case .success(let fn):

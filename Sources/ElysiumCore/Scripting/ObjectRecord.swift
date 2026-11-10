@@ -88,12 +88,23 @@ public func isValidAttributeName(_ name: String) -> Bool {
     return true
 }
 
+/// A normalized attribute name is at most 32 bytes and is built left to right, so nothing past
+/// the first 32 characters of a raw name can affect it. Normalizers read only this bounded
+/// prefix: a script handing a multi-kilobyte key to a handle would otherwise buy host work that
+/// the Lua instruction budget never sees (a 4 KiB key cost about 280 µs per read in a debug build).
+public let SCRIPT_ATTRIBUTE_NAME_INPUT_MAX_CHARACTERS = 128
+
+func boundedAttributeNameInput(_ raw: String) -> String {
+    raw.utf8.count > SCRIPT_ATTRIBUTE_NAME_INPUT_MAX_CHARACTERS
+        ? String(raw.prefix(SCRIPT_ATTRIBUTE_NAME_INPUT_MAX_CHARACTERS)) : raw
+}
+
 /// Best-effort normalization hint for an invalid name (lowercased, invalid
 /// bytes folded to `_`, forced to start with a letter, truncated to 32 bytes)
 /// — offered in refusal messages, never applied silently.
 public func normalizedAttributeNameHint(_ name: String) -> String? {
     var scalars: [UInt8] = []
-    for b in name.lowercased().utf8 {
+    for b in boundedAttributeNameInput(name).lowercased().utf8 {
         let ok = (b >= UInt8(ascii: "a") && b <= UInt8(ascii: "z"))
             || (b >= UInt8(ascii: "0") && b <= UInt8(ascii: "9"))
         scalars.append(ok ? b : UInt8(ascii: "_"))
@@ -114,7 +125,7 @@ public func normalizedScriptCustomAttributeName(_ raw: String) -> String {
     guard !isValidAttributeName(raw) else { return raw }
     var snake = ""
     var previousLower = false
-    for character in raw {
+    for character in boundedAttributeNameInput(raw) {
         if character.isUppercase && previousLower { snake.append("_") }
         snake.append(Character(character.lowercased()))
         previousLower = character.isLowercase

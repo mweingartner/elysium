@@ -99,7 +99,21 @@ public enum ScriptingCommands {
         lanGatedCommands.contains(command.lowercased()) ? refusal : nil
     }
 
+    /// The single list of scripting chat commands `/help` prints.
     public static func helpSummary() -> String { "attr, inspect, objects, on, unsubscribe, events, script" }
+
+    /// `/help script`: a short getting-started, one chat line each (under 100 characters).
+    public static func scriptHelpLines() -> [String] {
+        [
+            "Scripting: attach Lua scripts to blocks, entities, players, dimensions and the world.",
+            "  /script edit [target] [name] — open the script editor (Command-E edits what you look at)",
+            "  /script attach <target> <name> module <source...> — attach a one-line script from chat",
+            "  /script list [target] and /script show <target> <name> — see scripts and their errors",
+            "  /inspector — the Inspector shows an object's attributes and scripts",
+            "  Targets: looking, self, world, dim, or a ref such as block:overworld:10,64,3",
+            "Full guide: docs/SCRIPTING_GUIDE.md",
+        ]
+    }
 
     /// lan-client-parity (change 4), design.md §11: the guest `scriptIntent`
     /// family — "author/attach/detach/run-script, attr set/define/remove,
@@ -662,7 +676,11 @@ public enum ScriptingCommands {
             attribute: attribute, createdBy: context.author, tick: context.tick
         ) {
         case .success(let sub):
-            return ok(["subscribed #\(sub.id): \(event.rawValue) on \(target.displayText) -> \(scriptName).\(handler)"])
+            var lines = ["subscribed #\(sub.id): \(event.rawValue) on \(target.displayText) -> \(scriptName).\(handler)"]
+            var declared = false
+            if case .object(let ref) = target { declared = CustomEventStore(graph: context.graph).get(ref, event.rawValue) != nil }
+            if let hint = ScriptNameSuggestions.eventTypoHint(for: event.rawValue, isDeclared: declared) { lines.append(hint) }
+            return ok(lines)
         case .failure(let err):
             switch err {
             case .tooManyForWorld: return fail("too many subscriptions in this world (limit \(context.eventBus.caps.maxSubscriptionsPerWorld))")
@@ -854,13 +872,19 @@ public enum ScriptingCommands {
 
     // MARK: - /script (script-runtime, change 1c, §12)
 
-    private static let usageScript =
-        "Usage: /script list [target] | show <target> <name> | attach <target> <name> module <source...> "
-            + "| attach <target> <name> handler <event> <source...> | detach <target> <name> | run <target> <source...> "
-            + "| stats | journal | undo-ai [n] | trust | off | on"
+    /// Several short lines: one line would exceed the 256-byte chat cap and lose its tail.
+    private static let usageScript = [
+        "Usage: /script edit [target] [name] | list [target] | show <target> <name>",
+        "  /script attach <target> <name> module <source...>",
+        "  /script attach <target> <name> handler <event> <source...>",
+        "  /script detach <target> <name> | run <target> <source...>",
+        "  /script stats | journal | undo-ai [n] | trust | off | on",
+    ]
+
+    private static func failUsage() -> ScriptingCommandResult { ScriptingCommandResult(lines: usageScript, ok: false) }
 
     private static func runScript(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
-        guard let sub = args.first else { return fail(usageScript) }
+        guard let sub = args.first else { return failUsage() }
         let rest = Array(args.dropFirst())
         switch sub {
         case "list": return scriptList(rest, context)
@@ -874,7 +898,7 @@ public enum ScriptingCommands {
         case "trust": return scriptTrust(context)
         case "off": return scriptKillSwitch(false, context)
         case "on": return scriptKillSwitch(true, context)
-        default: return fail(usageScript)
+        default: return failUsage()
         }
     }
 
@@ -932,7 +956,7 @@ public enum ScriptingCommands {
     }
 
     private static func scriptShow(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
-        guard rest.count >= 2 else { return fail(usageScript) }
+        guard rest.count >= 2 else { return failUsage() }
         switch resolveTarget(rest[0], context) {
         case .failure(let msg): return fail(msg.text)
         case .success(let (ref, _)):
@@ -978,7 +1002,7 @@ public enum ScriptingCommands {
     }
 
     private static func scriptAttach(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
-        guard rest.count >= 4 else { return fail(usageScript) }
+        guard rest.count >= 4 else { return failUsage() }
         let targetToken = rest[0]
         let name = rest[1]
         let modeToken = rest[2]
@@ -1000,24 +1024,48 @@ public enum ScriptingCommands {
                 triggers = [Trigger(event: event, attribute: nil, target: .object(ref))]
                 sourceTokens = Array(rest.dropFirst(4))
             default:
-                return fail(usageScript)
+                return failUsage()
             }
-            guard !sourceTokens.isEmpty else { return fail(usageScript) }
+            guard !sourceTokens.isEmpty else { return failUsage() }
             let source = sourceTokens.joined(separator: " ")
+            // The same read-only gate the editor and AI use (syntax, lint, event-name literals). It
+            // needs no trust or kill switch, so a bad source is refused in every world state.
+            guard let runtime = context.scriptRuntime else {
+                return fail("attach refused — no script runtime this session to check the source")
+            }
+            let chunkName = isValidAttributeName(name) ? name : "script"
+            let customEvents = CustomEventStore(graph: context.graph)
+            let checked = AIScriptValidationGate.validateForAttach(
+                source: source, chunkName: chunkName, runtime: runtime, isDeclared: { customEvents.get(ref, $0) != nil }
+            )
+            if case .refused(let refusal) = checked.outcome { return fail(attachRefusalText(refusal)) }
+            var hints = triggers.compactMap {
+                ScriptNameSuggestions.eventTypoHint(for: $0.event.rawValue, isDeclared: customEvents.get(ref, $0.event.rawValue) != nil)
+            }
+            for hint in checked.warnings where !hints.contains(hint) { hints.append(hint) }
             switch context.scriptStore.attach(
                 ref, name: name, source: source, mode: mode, triggers: triggers, by: context.author, tick: context.tick
             ) {
             case .success:
                 context.markScriptAttached()
-                return ok(["attached \(name) [\(mode.rawValue)] to \(ref.canonical) — takes effect next script phase"])
+                return ok(["attached \(name) [\(mode.rawValue)] to \(ref.canonical) — takes effect next script phase"] + hints)
             case .failure(let err):
                 return fail(scriptStoreErrorMessage(err, name: name))
             }
         }
     }
 
+    /// `attach refused — line 2: unexpected symbol near '='` (the chunk location is folded into the
+    /// line number rather than repeated).
+    private static func attachRefusalText(_ refusal: AIScriptStageResult) -> String {
+        var message = ScriptRuntime.friendlyFaultText(refusal.message)
+        let location = "line \(refusal.line): "
+        if message.hasPrefix(location) { message.removeFirst(location.count) }
+        return refusal.line > 0 ? "attach refused — " + location + message : "attach refused — " + message
+    }
+
     private static func scriptDetach(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
-        guard rest.count >= 2 else { return fail(usageScript) }
+        guard rest.count >= 2 else { return failUsage() }
         switch resolveTarget(rest[0], context) {
         case .failure(let msg): return fail(msg.text)
         case .success(let (ref, _)):
@@ -1034,7 +1082,7 @@ public enum ScriptingCommands {
     /// §9.3's `run_script`: ephemeral, runs once immediately (this change's
     /// documented simplification of "next phase" — see ARCHITECTURE.md).
     private static func scriptRun(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
-        guard rest.count >= 2 else { return fail(usageScript) }
+        guard rest.count >= 2 else { return failUsage() }
         guard let runtime = context.scriptRuntime else { return fail("no script runtime this session") }
         switch resolveTarget(rest[0], context) {
         case .failure(let msg): return fail(msg.text)

@@ -5,8 +5,8 @@
 // the two AI-specific stages that sit on top of it: stage 5 ("references":
 // event names, attribute names per kind, refs) and the plumbing that hands
 // stage 6 off to `ScriptRuntime.dryRun`. Every AI-authored `attach_script`
-// call runs the whole chain; `check_script`/`/script attach` (player-
-// authored) only ever need stages 0-3 (`ScriptValidator` directly).
+// call runs the whole chain; the chat `/script attach` command runs stages
+// 0-5 (`validateForAttach` below) before storing anything.
 //
 // Stage 5 is deliberately literal-only and conservative, exactly like
 // `ScriptValidator`'s own stage 2 (design.md: "it never refuses a program
@@ -19,7 +19,8 @@
 // custom events share the exact same grammar as catalog ones (§7.2's own
 // "bare names, namespaced by convention"), so there is no closed catalog to
 // check a literal against without also rejecting every legitimate custom
-// event name.
+// event name. A near miss of a built-in is therefore only ever a non-blocking
+// hint (`eventTypoWarnings`), never a refusal.
 
 import Foundation
 
@@ -42,12 +43,40 @@ public enum AIScriptValidationGate {
     /// is no separate stage-4 pass in this implementation — documented in
     /// ARCHITECTURE.md).
     public static func validate(source: String, chunkName: String, runtime: ScriptRuntime) -> AIScriptValidationOutcome {
+        validate(source: source, chunkName: chunkName, runtime: runtime, literals: { eventNameLiterals(in: source) })
+    }
+
+    /// The attach path (chat `/script attach`, AI `attach_script`): `validate` plus the non-blocking
+    /// event typo hints, from ONE scan of the source's event-name literals.
+    public static func validateForAttach(
+        source: String, chunkName: String, runtime: ScriptRuntime, isDeclared: (String) -> Bool
+    ) -> (outcome: AIScriptValidationOutcome, warnings: [String]) {
+        var scanned: [(name: String, location: Int)]?
+        let literals = {
+            if let scanned { return scanned }
+            let found = eventNameLiterals(in: source)
+            scanned = found
+            return found
+        }
+        let outcome = validate(source: source, chunkName: chunkName, runtime: runtime, literals: literals)
+        guard case .accepted = outcome else { return (outcome, []) }
+        return (outcome, eventTypoWarnings(literals: literals(), isDeclared: isDeclared))
+    }
+
+    /// Stage 5 runs (and so scans) only once stages 0-3 accept the source.
+    private static func validate(
+        source: String, chunkName: String, runtime: ScriptRuntime, literals: () -> [(name: String, location: Int)]
+    ) -> AIScriptValidationOutcome {
         switch runtime.validateSource(source, chunkName: chunkName) {
         case .refused(let stage, let message, let hint, let line):
             return .refused(AIScriptStageResult(stage: stage, message: message, hint: hint, line: line))
         case .accepted(let sha):
-            if let violation = firstReferenceViolation(in: source) {
-                return .refused(AIScriptStageResult(stage: 5, message: violation.message, hint: violation.hint, line: violation.line))
+            if let invalid = literals().first(where: { EventKind.parse($0.name) == nil }) {
+                return .refused(AIScriptStageResult(
+                    stage: 5, message: "'\(invalid.name)' is not a valid event name",
+                    hint: "event names are one to four '.'-separated lowercase segments, e.g. 'attribute.changed'",
+                    line: lineNumber(atUTF16Offset: invalid.location, in: source)
+                ))
             }
             return .accepted(sourceSHA256: sha)
         }
@@ -65,22 +94,49 @@ public enum AIScriptValidationGate {
         try! NSRegularExpression(pattern: #"\bon\s*=\s*"([^"\n]*)""#)
     }()
 
-    private static func firstReferenceViolation(in source: String) -> (message: String, hint: String, line: Int)? {
+    /// Every event-name string literal passed to `on(...)` or set as an `on = "..."` trigger field,
+    /// with the UTF-16 offset of its match: all `on(` matches first, then trigger fields, each in
+    /// source order. The one literal scanner shared by stage 5 and the typo hints below. Linear in
+    /// the source: a line number is computed only for the literal actually reported.
+    static func eventNameLiterals(in source: String) -> [(name: String, location: Int)] {
+        var literals: [(name: String, location: Int)] = []
+        let ns = source as NSString
         for pattern in [onCallPattern, triggerFieldPattern] {
-            let ns = source as NSString
             let matches = pattern.matches(in: source, range: NSRange(location: 0, length: ns.length))
             for match in matches where match.numberOfRanges >= 2 {
-                let captured = ns.substring(with: match.range(at: 1))
-                guard EventKind.parse(captured) == nil else { continue }
-                let line = 1 + ns.substring(to: match.range.location).reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
-                return (
-                    "'\(captured)' is not a valid event name",
-                    "event names are one to four '.'-separated lowercase segments, e.g. 'attribute.changed'",
-                    line
-                )
+                literals.append((ns.substring(with: match.range(at: 1)), match.range.location))
             }
         }
-        return nil
+        return literals
+    }
+
+    /// The 1-based line containing UTF-16 offset `offset` of `source` (one pass over the prefix).
+    static func lineNumber(atUTF16Offset offset: Int, in source: String) -> Int {
+        1 + source.utf16.prefix(max(0, offset)).reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
+    }
+
+    /// At most this many literals are checked for typo hints, bounding the per-command sweep work.
+    static let maxTypoCheckedLiterals = 64
+
+    /// Non-blocking "did you mean" hints for literal event names that are well formed but are a
+    /// near miss of a built-in and not declared (per `isDeclared`). Deduplicated, at most four, from
+    /// the first `maxTypoCheckedLiterals` literals.
+    public static func eventTypoWarnings(in source: String, isDeclared: (String) -> Bool) -> [String] {
+        eventTypoWarnings(literals: eventNameLiterals(in: source), isDeclared: isDeclared)
+    }
+
+    private static func eventTypoWarnings(
+        literals: [(name: String, location: Int)], isDeclared: (String) -> Bool
+    ) -> [String] {
+        var hints: [String] = []
+        for literal in literals.prefix(maxTypoCheckedLiterals) where EventKind.parse(literal.name) != nil {
+            guard let hint = ScriptNameSuggestions.eventTypoHint(
+                for: literal.name, isDeclared: isDeclared(literal.name)
+            ), !hints.contains(hint) else { continue }
+            hints.append(hint)
+            if hints.count == 4 { break }
+        }
+        return hints
     }
 }
 
