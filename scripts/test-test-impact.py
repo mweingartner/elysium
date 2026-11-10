@@ -26,10 +26,19 @@ CORE_MESH_CASES = ("MeshGenerationTests", "MesherFixtureTests", "MeshLightingMet
     "FenceGateRenderingTests", "StatefulOpenableTextureMappingTests", "DirectionalFunctionalTextureTests")
 SETTINGS_CASES = ("SettingsTests", "LocalSettingsStoreTests", "GameCoreLocalSettingsIntegrationTests",
     "CreatureRespawnSettingsTests")
+AUDIO_CASES = ("AudioMixerTests", "PrehistoricAudioTests", "PrehistoricAudioRobustnessTests", "ScriptSoundLibraryTests")
+# One concrete suite per family in the scripting closure (own suites, then consumers).
+SCRIPTING_CASES = ("ScriptRuntimeTests", "EventBusTests", "CustomEventStoreTests", "AttributeStoreTests",
+    "BuiltInAttributeAccessTests", "ObjectGraphTests", "BlockStateCodecTests", "FurnaceScriptTests",
+    "AIObjectGraphToolsTests", "LANScriptIntentHostTests", "AIAgentTests", "LANReplicationTests",
+    "LANMultiplayerTests", "LANClientRoutingTests", "InteractPersistenceTests", "ChunkEntityPersistenceTests",
+    "EntityUIDPersistenceTests", "LocalWorldPersistenceTests", "SaveDBTests")
 DISCOVERY = "".join(f"ElysiumResourcePackTests.{name}/testProbe\n" for name in RENDER_CASES)
 DISCOVERY += "ElysiumCoreTests.AutomatedReleaseSourceTests/testPipeline\n"
 MESH_DISCOVERY = DISCOVERY + "".join(f"ElysiumCoreTests.{name}/testProbe\n" for name in CORE_MESH_CASES)
 MESH_DISCOVERY += "ElysiumCoreTests.EntityFacingSourceTests/testFacing\nElysiumCoreTests.BrandAttributionSourceTests/testTitle\n"
+SCRIPTING_DISCOVERY = DISCOVERY + "ElysiumScriptTests.SandboxTests/testProbe\nElysiumDebugProtocolTests.ProtocolTests/testProbe\n"
+SCRIPTING_DISCOVERY += "".join(f"ElysiumCoreTests.{name}/testProbe\n" for name in SCRIPTING_CASES)
 SETTINGS_DISCOVERY = DISCOVERY + "".join(f"ElysiumCoreTests.{name}/testProbe\n" for name in SETTINGS_CASES)
 
 
@@ -147,10 +156,13 @@ class ImpactTests(unittest.TestCase):
 
     def test_audio_packaging_version_and_pin_paths_scope_to_their_suites(self):
         cases = {
-            "Sources/Elysium/Audio.swift": {"prehistoric-audio"},
-            "packaging/DinosaurSounds/tyrannosaurus-attack.wav": {"prehistoric-audio"},
-            "Assets/dinosaur-audio/sources.json": {"prehistoric-audio"},
-            "scripts/verify-dinosaur-sounds.py": {"prehistoric-audio"},
+            "Sources/Elysium/Audio.swift": {"audio"},
+            "Sources/Elysium/AudioMixerSupport.swift": {"audio"},
+            "Tests/ElysiumResourcePackTests/AudioMixerTests.swift": {"audio"},
+            "Tests/ElysiumResourcePackTests/AudioMixerPropertyTests.swift": {"audio"},
+            "packaging/DinosaurSounds/tyrannosaurus-attack.wav": {"audio"},
+            "Assets/dinosaur-audio/sources.json": {"audio"},
+            "scripts/verify-dinosaur-sounds.py": {"audio"},
             "scripts/package-app.sh": {"app-packaging"},
             "packaging/Info.plist": {"version"},
             "scripts/elysium-storage-api-v1.json": set(),
@@ -165,6 +177,42 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("version", impact.classify([impact.VERSION_SOURCE], version_only=True)["groups"])
         # Any unmapped neighbour still widens the whole selection.
         self.assertEqual(impact.classify(["Sources/Elysium/Audio.swift", "Sources/ElysiumCore/Game/GameCore.swift"])["mode"], "full")
+
+    def test_audio_scope_requires_the_mixer_recording_and_script_sound_suites(self):
+        discovery = DISCOVERY + "".join(f"ElysiumResourcePackTests.{name}/testProbe\n" for name in AUDIO_CASES)
+        selection = impact.classify(["Sources/Elysium/AudioMixerSupport.swift"])
+        impact.validate_discovery(selection, discovery)
+        for name in AUDIO_CASES:
+            missing = discovery.replace(f"ElysiumResourcePackTests.{name}/testProbe\n", "")
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                impact.validate_discovery(selection, missing)
+
+    def test_scripting_layer_scopes_to_its_closure_and_its_shared_seams_stay_full(self):
+        scoped = ["Sources/ElysiumScript/LuaState.swift", "Sources/ElysiumCore/Scripting/ScriptRuntime.swift",
+                  "Sources/ElysiumCore/Scripting/AI/AIJournal.swift", "Tests/ElysiumScriptTests/SandboxTests.swift",
+                  "Tests/ElysiumCoreTests/ScriptRuntimeTests.swift", "Tests/ElysiumCoreTests/EventBusFunnelTests.swift",
+                  "Tests/ElysiumCoreTests/AttrValueCodecTests.swift", "Tests/ElysiumCoreTests/ObjectGraphTests.swift"]
+        for path in scoped:
+            selection = impact.classify([path])
+            self.assertEqual(selection["mode"], "scoped", path)
+            self.assertEqual(set(selection["groups"]), {"scripting", "release-workflow"}, path)
+            impact.validate_discovery(selection, SCRIPTING_DISCOVERY)
+        # The GameCore seam, the vendored interpreter, non-Swift files, the consumer suites' own
+        # files and unrelated engine code are not part of the reviewed closure.
+        for path in ["Sources/ElysiumCore/Scripting/GameCore+Scripting.swift", "Sources/CLua/lapi.c",
+                     "Sources/ElysiumCore/Scripting/notes.txt", "Tests/ElysiumCoreTests/SaveDBTests.swift",
+                     "Tests/ElysiumCoreTests/LANReplicationTests.swift", "Sources/ElysiumCore/Net/LANReplication.swift",
+                     "Sources/ElysiumCore/Game/SkillTreeGameplay.swift", "Sources/elysmoke/ScriptRuntimeSmoke.swift"]:
+            self.assertEqual(impact.classify([path])["mode"], "full", path)
+            self.assertEqual(impact.classify(scoped + [path])["mode"], "full", path)
+        # Every family in the closure must be discovered, own suites and consumers alike.
+        selection = impact.classify(scoped)
+        for name in SCRIPTING_CASES:
+            missing = SCRIPTING_DISCOVERY.replace(f"ElysiumCoreTests.{name}/testProbe\n", "")
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                impact.validate_discovery(selection, missing)
+        with self.assertRaises(ValueError):
+            impact.validate_discovery(selection, SCRIPTING_DISCOVERY.replace("ElysiumScriptTests.SandboxTests/testProbe\n", ""))
 
     def test_app_target_sources_scope_to_app_bundle_and_their_core_source_readers(self):
         self.assertEqual(impact.classify(["Sources/Elysium/FirstPersonBow.swift"])["groups"],

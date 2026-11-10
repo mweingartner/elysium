@@ -34,6 +34,29 @@ SETTINGS_REQUIRED = (
     "SettingsTests", "LocalSettingsStoreTests", "GameCoreLocalSettingsIntegrationTests",
     "CreatureRespawnSettingsTests",
 )
+# The mixer, its scheduler/limiter/device support, the bundled recordings and the script-sound
+# gain path are exercised by these app-bundle suites.
+AUDIO_REQUIRED = (
+    "AudioMixerTests", "PrehistoricAudioTests", "PrehistoricAudioRobustnessTests", "ScriptSoundLibraryTests",
+)
+# Reviewed closure of the Lua sandbox (Sources/ElysiumScript) and the script runtime, event bus,
+# object graph and attribute stores (Sources/ElysiumCore/Scripting). SCRIPTING_OWN are that
+# layer's own Core suites. Outside the directory the runtime is reached only from LAN
+# replication/multiplayer, entity/chunk/world object records, the AI tool loop and the GameCore
+# seam, so SCRIPTING_CONSUMERS adds those suites; the app bundle (editor, inspector, commands,
+# AI broker) joins through the app-bundle patterns. The trailing class-name wildcard lets a
+# new suite in a covered family join without an edit.
+SCRIPTING_OWN = (
+    "Script[A-Za-z]*", "EventBus[A-Za-z]*", "CustomEvent[A-Za-z]*", "Attr[A-Za-z]*",
+    "BuiltInAttribute[A-Za-z]*", "Object[A-Za-z]*", "BlockStateCodecTests", "FurnaceScriptTests",
+    "AIObjectGraph[A-Za-z]*", "LANScriptIntent[A-Za-z]*",
+)
+SCRIPTING_CONSUMERS = (
+    "AIAgent[A-Za-z]*", "LANReplicationTests", "LANMultiplayerTests", "LANClientRoutingTests",
+    "InteractPersistenceTests", "ChunkEntityPersistenceTests", "EntityUIDPersistenceTests",
+    "LocalWorldPersistenceTests", "SaveDB[A-Za-z]*", "AutomatedReleaseSourceTests",
+)
+SCRIPTING_CORE_REQUIRED = SCRIPTING_OWN + SCRIPTING_CONSUMERS
 GROUPS = {
     "renderer": [RENDERER],
     "core-mesh": [r"ElysiumCoreTests\." + name + "/" for name in CORE_MESH_REQUIRED],
@@ -43,8 +66,10 @@ GROUPS = {
     "app-shell": [r"ElysiumResourcePackTests\.", r"ElysiumDebugProtocolTests\.",
                   r"ElysiumCoreTests\.AutomatedReleaseSourceTests/"],
     "release-workflow": [r"ElysiumCoreTests\.AutomatedReleaseSourceTests/"],
-    "prehistoric-audio": [r"ElysiumResourcePackTests\.PrehistoricAudioTests/",
-                          r"ElysiumResourcePackTests\.PrehistoricAudioRobustnessTests/"],
+    "audio": [r"ElysiumResourcePackTests\." + name + "/" for name in AUDIO_REQUIRED],
+    "scripting": [r"ElysiumScriptTests\."] +
+                 [r"ElysiumCoreTests\." + name + "/" for name in SCRIPTING_CORE_REQUIRED] +
+                 [r"ElysiumResourcePackTests\.", r"ElysiumDebugProtocolTests\."],
     "app-packaging": [r"ElysiumCoreTests\.BrandAttributionSourceTests/",
                       r"ElysiumCoreTests\.TextEntrySourceTests/"],
     "version": [r"ElysiumCoreTests\.VersionTests/", r"ElysiumCoreTests\.LANMultiplayerTests/"],
@@ -82,14 +107,20 @@ REVIEWED_SETTINGS_PATHS = {
 SHELL_FILES = {"Sources/Elysium/main.swift", "Sources/Elysium/HudM.swift",
                "Sources/Elysium/DebugControlRuntime.swift"}
 DOCS = {"README.md", "AGENTS.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "SECURITY.md", "PLAYER_GUIDE.md"}
-# Bundled dinosaur recordings: the sample bank, its assets, validator and authoring tools are
-# exercised only by the prehistoric audio suites (cue emission itself lives in Core and is
-# not mapped here).
-AUDIO_PATHS = {"Sources/Elysium/Audio.swift", "scripts/verify-dinosaur-sounds.py",
-               "scripts/build-dinosaur-sounds.py",
-               "Tests/ElysiumResourcePackTests/PrehistoricAudioTests.swift",
-               "Tests/ElysiumResourcePackTests/PrehistoricAudioRobustnessTests.swift"}
+# The audio engine and the bundled dinosaur recordings: the mixer, the sample bank, its assets,
+# validator and authoring tools are exercised only by the audio suites (cue emission itself
+# lives in Core and is not mapped here).
+AUDIO_PATHS = {"Sources/Elysium/Audio.swift", "Sources/Elysium/AudioMixerSupport.swift",
+               "scripts/verify-dinosaur-sounds.py", "scripts/build-dinosaur-sounds.py",
+               "Tests/ElysiumResourcePackTests/AudioMixerPropertyTests.swift",  # extends AudioMixerTests
+               *{"Tests/ElysiumResourcePackTests/" + name + ".swift" for name in AUDIO_REQUIRED}}
 AUDIO_PREFIXES = ("packaging/DinosaurSounds/", "Assets/dinosaur-audio/")
+# Scripting: every Swift file below these directories, and the layer's own Core suites, map to
+# the scripting group. The GameCore seam is shared engine code and stays unmapped (full suite),
+# as do the consumer suites' own files, the vendored interpreter (Sources/CLua) and elysmoke.
+SCRIPTING_PREFIXES = ("Sources/ElysiumScript/", "Sources/ElysiumCore/Scripting/", "Tests/ElysiumScriptTests/")
+SCRIPTING_UNMAPPED = {"Sources/ElysiumCore/Scripting/GameCore+Scripting.swift"}
+SCRIPTING_OWN_TEST = re.compile(r"Tests/ElysiumCoreTests/(?:" + "|".join(SCRIPTING_OWN) + r")\.swift")
 # Packaging scripts are read by the release and brand/text-entry source contracts.
 PACKAGING_PATHS = {"scripts/package-app.sh", "scripts/package-debug-app.sh"}
 # Release-pin manifests are verified by the gate scripts themselves, not by XCTest.
@@ -118,7 +149,10 @@ def classify(paths, version_only=False):
         if path in WORKFLOW or path in PIN_MANIFESTS:
             groups.add("release-workflow")
         elif path in AUDIO_PATHS or path.startswith(AUDIO_PREFIXES):
-            groups.add("prehistoric-audio")
+            groups.add("audio")
+        elif path.endswith(".swift") and path not in SCRIPTING_UNMAPPED and (
+                path.startswith(SCRIPTING_PREFIXES) or SCRIPTING_OWN_TEST.fullmatch(path)):
+            groups.add("scripting")
         elif path in PACKAGING_PATHS:
             groups.update({"release-workflow", "app-packaging"})
         elif path in VERSION_PLISTS or (path == VERSION_SOURCE and version_only):
