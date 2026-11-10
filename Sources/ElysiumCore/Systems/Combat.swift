@@ -115,6 +115,33 @@ public func playerAttack(_ player: Player, _ target: Entity) {
 // ---------------------------------------------------------------------------
 // Bow / crossbow shooting (player)
 // ---------------------------------------------------------------------------
+/// Launch speed of a fully drawn bow (or a charged crossbow) shot.
+public let BOW_FULL_DRAW_ARROW_SPEED = 3.0
+
+/// The single owner of "what a bow shot hits for": the per-speed damage an
+/// arrow fired by `player` from `bow` carries.  Power and crafted quality
+/// scale the bow base; a Ranged-tree rank scales bows (not crossbows).
+public func bowArrowDamage(_ player: Player, bow: ItemStack) -> Double {
+    let power = enchLevel(bow, "power")
+    let bowBaseDamage = 2 + Double(power) * 0.5 + (power > 0 ? 0.5 : 0)
+    let qualityDamage = skillTreeEffectiveWeaponDamage(
+        base: bowBaseDamage, qualityRank: bow.data.craftingQuality ?? 0)
+    if let trees = player.rpg.skillTrees, itemDef(bow.id).tool?.type == "bow" {
+        return qualityDamage * skillTreeWeaponDamageMultiplier(primaryRank: trees.ranged.primaryRank)
+    }
+    return qualityDamage
+}
+
+/// Damage an arrow deals on impact before criticals: ceil(speed x damage).
+public func arrowImpactDamage(speed: Double, arrowDamage: Double) -> Double {
+    (speed * arrowDamage).rounded(.up)
+}
+
+/// An ordinary fully drawn, non-critical arrow from `bow` at point-blank range.
+public func bowFullDrawHitDamage(_ player: Player, bow: ItemStack) -> Double {
+    arrowImpactDamage(speed: BOW_FULL_DRAW_ARROW_SPEED, arrowDamage: bowArrowDamage(player, bow: bow))
+}
+
 @discardableResult
 public func shootBow(_ player: Player, _ chargeTicks: Int) -> ArrowEntity? {
     guard let held = player.mainHand else { return nil }
@@ -148,18 +175,9 @@ public func shootBow(_ player: Player, _ chargeTicks: Int) -> ArrowEntity? {
     }
 
     let arrow = ArrowEntity(world: player.world)
-    arrow.shootFrom(player, player.pitch, player.yaw, power * 3, rpgBowInaccuracy(player))
-    let bowBaseDamage = 2 + Double(enchLevel(held, "power")) * 0.5
-        + (enchLevel(held, "power") > 0 ? 0.5 : 0)
-    let qualityDamage = skillTreeEffectiveWeaponDamage(
-        base: bowBaseDamage, qualityRank: held.data.craftingQuality ?? 0)
-    if let trees = player.rpg.skillTrees, itemDef(held.id).tool?.type == "bow" {
-        arrow.damage = qualityDamage * skillTreeWeaponDamageMultiplier(
-            primaryRank: trees.ranged.primaryRank)
-        arrow.skillTreeRangedShot = true
-    } else {
-        arrow.damage = qualityDamage
-    }
+    arrow.shootFrom(player, player.pitch, player.yaw, power * BOW_FULL_DRAW_ARROW_SPEED, rpgBowInaccuracy(player))
+    arrow.damage = bowArrowDamage(player, bow: held)
+    arrow.skillTreeRangedShot = player.rpg.skillTrees != nil && itemDef(held.id).tool?.type == "bow"
     arrow.critical = power >= 1
     arrow.punchLevel = enchLevel(held, "punch")
     arrow.flame = enchLevel(held, "flame") > 0

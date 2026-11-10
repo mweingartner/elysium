@@ -173,7 +173,7 @@ final class SkillTreeActionRuntimeTests: XCTestCase {
     }
 
     func testAdvancedBowActionsHonorCraftedQualityDamage() throws {
-        func powerShotDamage(qualityRank: Int?) throws -> Double {
+        func powerShot(qualityRank: Int?) throws -> (damage: Double, arrowDamage: Double, fullDraw: Double) {
             let world = makeWorld(seed: qualityRank == nil ? 0x51B5 : 0x51B6)
             let player = Player(world: world)
             player.setPos(0.5, 64, 0.5)
@@ -185,6 +185,8 @@ final class SkillTreeActionRuntimeTests: XCTestCase {
             trees.ranged = skillTreeBranchState(primaryRank: 5, advancedRank: 2)
             player.skillTreeState = trees
             let target = Cow(world: world)
+            target.maxHealth = 200
+            target.health = 200
             target.setPos(0.5, 65, 2.5)
             world.addEntity(target)
             let beforeHealth = target.health
@@ -192,14 +194,19 @@ final class SkillTreeActionRuntimeTests: XCTestCase {
             _ = try skillTreeExecuteAction(
                 player, id: .powerShot, authorization: .local(for: player)
             ).get()
-            return beforeHealth - target.health
+            return (beforeHealth - target.health, bowArrowDamage(player, bow: bow),
+                    bowFullDrawHitDamage(player, bow: bow))
         }
 
-        let ordinary = try powerShotDamage(qualityRank: nil)
-        let masterCrafted = try powerShotDamage(qualityRank: 5)
-        XCTAssertGreaterThan(masterCrafted, ordinary)
-        XCTAssertEqual(masterCrafted / ordinary, 1.25, accuracy: 0.000_001,
+        let ordinary = try powerShot(qualityRank: nil)
+        let masterCrafted = try powerShot(qualityRank: 5)
+        XCTAssertGreaterThan(masterCrafted.damage, ordinary.damage)
+        XCTAssertEqual(masterCrafted.arrowDamage / ordinary.arrowDamage, 1.25, accuracy: 0.000_001,
                        "quality scales the bow base before the tree and Power Shot multipliers")
+        // A technique hits for exactly what an ordinary full-draw arrow from the
+        // same bow would (ceil(3 x arrow damage)), then applies its multiplier.
+        XCTAssertEqual(ordinary.damage, ordinary.fullDraw * 1.5, accuracy: 0.000_001)
+        XCTAssertEqual(masterCrafted.damage, masterCrafted.fullDraw * 1.5, accuracy: 0.000_001)
     }
 
     @MainActor

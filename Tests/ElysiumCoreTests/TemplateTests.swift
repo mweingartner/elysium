@@ -622,6 +622,43 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(session.basePreviewDistance, base, accuracy: 1e-9)
     }
 
+    /// The support fill copies a neighbouring foundation block. It must skip ore and ancient
+    /// debris, or pasting beside a vein would duplicate the ore (and its Mining XP) for free.
+    func testPreparedPlacementNeverFillsFoundationGapsWithOre() throws {
+        for resource in [B.diamond_ore, B.ancient_debris, B.deepslate_redstone_ore] {
+            let world = makeWorld()
+            world.setBlock(7, 69, 8, Int(cell(resource)))      // first neighbour the fill inspects
+            world.setBlock(8, 68, 8, Int(cell(B.stone)))
+            let template = ObjectTemplate(
+                name: "Beside A Vein",
+                anchorX: 0, anchorY: 0, anchorZ: 0,
+                sizeX: 1, sizeY: 1, sizeZ: 1,
+                blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks)))])
+
+            let placed = try placeObjectTemplate(template, in: world,
+                                                 targetX: 8, targetY: 70, targetZ: 8,
+                                                 options: TemplatePlacementOptions(prepareTerrain: true))
+
+            let name = blockDefs[Int(resource)].name
+            XCTAssertEqual(placed.supportBlocksFilled, 1, name)
+            XCTAssertEqual(world.getBlockId(8, 69, 8), Int(B.stone), "\(name): the gap takes the next neighbour")
+            XCTAssertEqual(world.getBlockId(7, 69, 8), Int(resource), "\(name): the vein itself is untouched")
+        }
+        // With ore as the only neighbour the column falls back to dirt.
+        let world = makeWorld()
+        world.setBlock(7, 69, 8, Int(cell(B.diamond_ore)))
+        world.setBlock(8, 68, 8, Int(cell(B.diamond_ore)))
+        let template = ObjectTemplate(
+            name: "Only Ore Around",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: 1, sizeY: 1, sizeZ: 1,
+            blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks)))])
+        _ = try placeObjectTemplate(template, in: world, targetX: 8, targetY: 70, targetZ: 8,
+                                    options: TemplatePlacementOptions(prepareTerrain: true))
+        XCTAssertNotEqual(world.getBlockId(8, 69, 8), Int(B.diamond_ore))
+        XCTAssertTrue(blockDefs[world.getBlockId(8, 69, 8)].solid, "the gap is still filled with something solid")
+    }
+
     func testPreparedPlacementClearsObstructionsAndFillsFoundationGapFromAdjacentBlock() throws {
         let world = makeWorld()
         world.setBlock(7, 69, 8, Int(cell(B.dirt)))

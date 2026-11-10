@@ -5,6 +5,15 @@
 
 import Foundation
 
+/// Entity types treated as boss-tier everywhere a rule needs to tell bosses
+/// apart: the AI agent never scatters them in an area spawn, and a skill-tree
+/// stun on one of them is capped.  Elder Guardian lives in Monsters.swift.
+public let BOSS_TIER_ENTITY_TYPES: [String] = ["wither", "ender_dragon", "warden", "elder_guardian"]
+
+public func isBossTierEntityType(_ type: String) -> Bool {
+    BOSS_TIER_ENTITY_TYPES.contains(type)
+}
+
 // =============================================================================
 // WARDEN
 // =============================================================================

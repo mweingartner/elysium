@@ -1312,9 +1312,7 @@ public extension GameCore {
         guard skillTreeActionIsUnlocked(actionID, in: trees) else {
             return (false, "\(descriptor.displayName) is still locked")
         }
-        guard !state.activeCooldowns.contains(where: {
-            $0.id == actionID.rawValue && $0.remainingTicks > 0
-        }) else {
+        guard skillTreeCooldownRemainingTicks(actionID, in: state.activeCooldowns) == 0 else {
             return (false, RPGActionFailure.skillOnCooldown(actionID.rawValue).description)
         }
         guard let nextSequence = rpgNextActionSequence(state) else {
@@ -2464,7 +2462,7 @@ public func rpgPreparedActions(_ state: RPGCharacterState) -> [RPGPreparedAction
     if let rawTrees = state.skillTrees {
         let trees = skillTreeValidatedState(rawTrees, recipeCount: skillTreeRecipeCountForValidation())
         return skillTreeUnlockedActions(in: trees).map { descriptor in
-            let cooldown = state.activeCooldowns.first { $0.id == descriptor.id.rawValue }?.remainingTicks ?? 0
+            let cooldown = skillTreeCooldownRemainingTicks(descriptor.id, in: state.activeCooldowns)
             return RPGPreparedAction(
                 // Reuse the established skill token namespace for fastbar and
                 // LAN compatibility. `rpgExecuteAction` recognizes these

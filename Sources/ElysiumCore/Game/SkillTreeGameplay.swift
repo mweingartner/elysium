@@ -15,13 +15,51 @@ private func skillTreeEmptyReport(for branch: SkillTreeBranchState) -> SkillTree
                                       reachedAdvancedCap: false)
 }
 
+/// Metadata bit marking a mining-resource block that a player placed (like
+/// Minecraft's `persistent` leaves).  Worldgen and amethyst growth never set
+/// it, and it is free on every such block: ores carry no metadata, redstone
+/// ore reads only bit 0x1 ("lit"), and an amethyst cluster stores its facing
+/// in values 0-5.  Tiles, light, shape and drops ignore it.
+public let SKILL_TREE_PLAYER_PLACED_META_BIT = 0x8
+
+/// The block's own (re-placeable) item, or nil.
+private func skillTreeOwnItemID(ofBlock blockID: Int) -> Int? {
+    guard blockID > 0, blockID < blockDefs.count, blockID < blockToItem.count,
+          blockToItem[blockID] >= 0 else { return nil }
+    return Int(blockToItem[blockID])
+}
+
+private func skillTreeIsMiningResourceBlock(_ blockID: Int) -> Bool {
+    blockID > 0 && blockID < blockDefs.count && skillTreeMiningResource(blockID: blockDefs[blockID].name) != nil
+}
+
+/// The cell the world stores when a player places `cell`, by hand, from a
+/// LAN guest, or by pasting a template.  A mining-resource block gains the
+/// player-placed mark with every other metadata bit (cluster facing, the
+/// redstone-ore lit bit) kept, so a LAN guest can neither clear the mark nor
+/// lose real state.  Every other block is stored unchanged.
+public func skillTreePlayerPlacedCell(_ cell: Int) -> Int {
+    guard skillTreeIsMiningResourceBlock(cell >> 4) else { return cell }
+    return cell | SKILL_TREE_PLAYER_PLACED_META_BIT
+}
+
+/// Whether `cell` is a mining-resource block that a player placed.  Such a
+/// block earns no Mining XP and no ore-yield bonus.
+public func skillTreeIsPlayerPlacedResourceCell(_ cell: Int) -> Bool {
+    (cell & SKILL_TREE_PLAYER_PLACED_META_BIT) != 0 && skillTreeIsMiningResourceBlock(cell >> 4)
+}
+
 /// Awards a successful, harvestable mineral break.  The caller supplies only
 /// a block that was actually removed after the ordinary harvest gate passed;
-/// creative mining never advances a tree.
+/// creative mining never advances a tree.  Mining XP is earned once per
+/// naturally occurring resource block: a silk-touch break (which drops the
+/// re-placeable block) and a player-placed resource block earn nothing.
 @discardableResult
-public func skillTreeAwardMiningBreak(_ player: Player, blockID: Int) -> SkillTreeProgressionReport {
+public func skillTreeAwardMiningBreak(_ player: Player, cell: Int, silkTouch: Bool) -> SkillTreeProgressionReport {
+    let blockID = cell >> 4
     guard player.rpg.skillTrees != nil, player.gameMode != GameMode.creative,
-          blockID >= 0, blockID < blockDefs.count else {
+          blockID >= 0, blockID < blockDefs.count,
+          !silkTouch, !skillTreeIsPlayerPlacedResourceCell(cell) else {
         return skillTreeEmptyReport(for: rpgSkillTreeState(player.rpg).mining)
     }
     let award = skillTreeMiningXP(blockID: blockDefs[blockID].name)
@@ -31,15 +69,20 @@ public func skillTreeAwardMiningBreak(_ player: Player, blockID: Int) -> SkillTr
     return report
 }
 
-/// Returns extra physical drops for an ore stack.  It is stateless: breaking
-/// the same block with the same stack and world seed always gives the same
-/// result, so the benefit cannot desynchronize the simulation RNG stream.
-public func skillTreeMiningBonusDrops(_ player: Player, blockID: Int,
+/// Returns extra physical drops for an ore stack broken from `cell`.  It is
+/// stateless: breaking the same block with the same stack and world seed
+/// always gives the same result, so the benefit cannot desynchronize the
+/// simulation RNG stream.  A player-placed resource block never gains a
+/// bonus, and neither does a drop that is the block's own item: it could be
+/// placed again, and the stateless roll would then duplicate it every cycle.
+public func skillTreeMiningBonusDrops(_ player: Player, cell: Int,
                                       x: Int, y: Int, z: Int,
                                       itemID: Int, baseDropCount: Int) -> Int {
+    let blockID = cell >> 4
     guard let trees = player.rpg.skillTrees,
-          blockID >= 0, blockID < blockDefs.count,
-          skillTreeMiningResource(blockID: blockDefs[blockID].name) != nil,
+          skillTreeIsMiningResourceBlock(blockID),
+          !skillTreeIsPlayerPlacedResourceCell(cell),
+          itemID != skillTreeOwnItemID(ofBlock: blockID),
           baseDropCount > 0 else { return 0 }
     let salt = UInt32(truncatingIfNeeded: itemID) ^ 0x51A7_0E11
     let roll = Int(hash3(player.world.seed, x, y, z, salt) % UInt32(SKILL_TREE_BASIS_POINTS))
@@ -114,12 +157,15 @@ public func skillTreeCraftingIngredients(_ names: [String?]) -> [SkillTreeCrafti
 /// Records completed, material-backed recipe rounds.  Recipes that produce
 /// the same output item share one 100-round cap before XP is calculated, so
 /// alternate ingredient variants cannot carry the crafting tree indefinitely.
+/// Repacking recipes (ingot <-> block and the like) earn nothing and consume
+/// no mastery rounds; the LAN host applies the same rule.
 @discardableResult
 public func skillTreeAwardCraftedRecipe(_ player: Player, recipeIndex: Int,
                                         completedRounds: Int,
                                         ingredients: [String?]) -> SkillTreeProgressionReport {
     guard player.rpg.skillTrees != nil, player.gameMode != GameMode.creative,
           recipeIndex >= 0, recipeIndex < craftingRecipes.count,
+          !craftingRecipeIsRepacking(recipeIndex: recipeIndex),
           completedRounds > 0 else {
         return skillTreeEmptyReport(for: rpgSkillTreeState(player.rpg).crafting.progress)
     }
@@ -190,15 +236,38 @@ private func skillTreeRayTarget(_ player: Player, range: Double,
     return .success(best.entity)
 }
 
-private func skillTreeSortedHostileTargets(near x: Double, y: Double, z: Double,
-                                           radius: Double, excluding player: Player) -> [LivingEntity] {
+/// Whether `mob` is currently hunting `actor`.  A LAN guest acts through a
+/// detached host ghost while mobs target that guest's in-world proxy, so the
+/// proxy is matched by the ghost's authoritative LAN peer identity.
+private func skillTreeMob(_ mob: Mob, isTargeting actor: Player) -> Bool {
+    guard let target = mob.target else { return false }
+    if target === actor { return true }
+    guard case .lanPlayer(let peerID) = actor.scriptEventActorIdentity.ref,
+          let proxy = target as? LANRemotePlayerEntity else { return false }
+    return proxy.multiplayerPlayerID == peerID
+}
+
+/// Whether an area technique (Round House, Volley) may hit `entity`:
+/// Monsters and the Ender Dragon, predatory prehistoric creatures, and any
+/// mob currently targeting the acting player.  Players, tamed pets,
+/// villagers, golems and passive livestock are never hit, so a pen or a
+/// village cannot become area-of-effect collateral.
+public func skillTreeIsAreaTechniqueTarget(_ entity: LivingEntity, actor: Player) -> Bool {
+    guard entity !== actor, !entity.isPlayer, !(entity.dead || entity.deathTime > 0),
+          entity.invulnTicks <= 0 else { return false }
+    if rpgIsHostileTarget(entity) { return true }
+    guard let mob = entity as? Mob, mob.ownerId == nil,
+          !((mob as? TamableAnimal)?.tamed ?? false), !((mob as? HorseBase)?.tamed ?? false),
+          !(mob is Villager), !(mob is IronGolem), !(mob is SnowGolem) else { return false }
+    if let creature = mob as? PrehistoricCreature, creature.definition.isPredatory { return true }
+    return skillTreeMob(mob, isTargeting: actor)
+}
+
+private func skillTreeSortedAreaTargets(near x: Double, y: Double, z: Double,
+                                        radius: Double, actor player: Player) -> [LivingEntity] {
     player.world.getEntitiesNear(x, y, z, radius)
         .compactMap { $0 as? LivingEntity }
-        // Ordinary weapon use may train against animals, but the specified
-        // circular/volley techniques hit enemies only; a livestock pen must
-        // never become incidental area-of-effect collateral.
-        .filter { $0 !== player && !($0.dead || $0.deathTime > 0)
-            && rpgIsHostileTarget($0) && $0.invulnTicks <= 0 }
+        .filter { skillTreeIsAreaTechniqueTarget($0, actor: player) }
         .sorted {
             let adx = $0.x - x, ady = $0.centerY() - y, adz = $0.z - z
             let bdx = $1.x - x, bdy = $1.centerY() - y, bdz = $1.z - z
@@ -208,13 +277,17 @@ private func skillTreeSortedHostileTargets(near x: Double, y: Double, z: Double,
         }
 }
 
-private func skillTreeConsumeArrow(_ player: Player) -> Bool {
-    guard player.gameMode != GameMode.creative else { return true }
-    for name in ["tipped_arrow", "spectral_arrow", "arrow"] {
-        guard let itemID = iidOpt(name), player.countItem(itemID) > 0 else { continue }
-        return player.removeItems(itemID, 1)
+/// The arrow a bow technique spends: `nil` when none is spent (Creative, or
+/// an Infinity bow, which fires a plain arrow), otherwise the first owned of
+/// plain, spectral, then tipped arrows, so special arrows are not wasted on
+/// a technique that does not apply their effect.  `.failure` when the player
+/// has no arrow to spend.
+private func skillTreeTechniqueArrow(_ player: Player, bow: ItemStack) -> Result<Int?, RPGActionFailure> {
+    if player.gameMode == GameMode.creative || enchLevel(bow, "infinity") > 0 { return .success(nil) }
+    for name in ["arrow", "spectral_arrow", "tipped_arrow"] {
+        if let itemID = iidOpt(name), player.countItem(itemID) > 0 { return .success(itemID) }
     }
-    return false
+    return .failure(.missingMaterial("arrow"))
 }
 
 private func skillTreeWeaponDamage(_ player: Player,
@@ -234,19 +307,20 @@ private func skillTreeWeaponDamage(_ player: Player,
         damage += Double(enchLevel(held, "sharpness")) * 0.5
             + (enchLevel(held, "sharpness") > 0 ? 0.5 : 0)
     case .bow:
-        // Bows use their ordinary projectile base rather than ToolDef's
-        // melee damage. Apply crafted quality before the ranged rank bonus,
-        // exactly as `shootBow` does; Power Shot, Volley, and Eagle Eye must
-        // not quietly ignore a master-crafted bow.
-        let bowBaseDamage = 2 + Double(enchLevel(held, "power")) * 0.5
-            + (enchLevel(held, "power") > 0 ? 0.5 : 0)
-        damage = skillTreeEffectiveWeaponDamage(
-            base: bowBaseDamage, qualityRank: held.data.craftingQuality ?? 0
-        ) * skillTreeWeaponDamageMultiplier(primaryRank: trees.ranged.primaryRank)
+        // An instant bow technique hits exactly like an ordinary fully drawn,
+        // non-critical arrow from the same bow and rank; `shootBow` uses the
+        // same owner, so the two cannot drift apart.
+        damage = bowFullDrawHitDamage(player, bow: held)
     case .none:
         return 0
     }
     return max(0, damage)
+}
+
+/// Bow techniques use the ordinary arrow damage source, so arrow immunity,
+/// the Enderman's dodge and Projectile Protection apply to them as well.
+private func skillTreeTechniqueDamageSource(_ descriptor: SkillTreeActionDescriptor) -> String {
+    descriptor.equipment == .bow ? "projectile" : "skill_tree_\(descriptor.id.rawValue)"
 }
 
 private func skillTreeDisarm(_ target: LivingEntity) -> Bool {
@@ -270,6 +344,9 @@ private func skillTreeDisarm(_ target: LivingEntity) -> Bool {
     return dropped
 }
 
+/// Records the action's cooldown and sequence.  `skillTreeExecuteAction`
+/// preflights every condition checked here before it mutates anything, so
+/// this commit cannot fail after an action's effect has been applied.
 private func skillTreeCommitActionState(_ player: Player,
                                         descriptor: SkillTreeActionDescriptor) -> Result<Int, RPGActionFailure> {
     var state = repairRPGCharacterState(player.rpg)
@@ -278,13 +355,10 @@ private func skillTreeCommitActionState(_ player: Player,
           let sequence = rpgNextActionSequence(state) else {
         return .failure(.authorityExhausted)
     }
-    if descriptor.cooldownTicks > 0 {
-        let others = state.activeCooldowns.filter { $0.id != descriptor.id.rawValue }
-        guard others.count < RPG_MAX_COOLDOWNS else { return .failure(.boundedStateLimit) }
-        state.activeCooldowns = others
-        state.activeCooldowns.append(RPGCooldown(id: descriptor.id.rawValue,
-                                                 remainingTicks: descriptor.cooldownTicks))
+    guard let cooldowns = skillTreeCooldownsAfterUse(descriptor.id, in: state.activeCooldowns) else {
+        return .failure(.boundedStateLimit)
     }
+    state.activeCooldowns = cooldowns
     state.actionSequence = sequence
     state.authorityRevision += 1
     player.rpg = repairRPGCharacterState(state)
@@ -300,11 +374,13 @@ private func skillTreeFieldRepair(_ player: Player,
     }
     let maximum = maxDamageOf(held)
     guard maximum > 0 else { return .failure(.noRepairTarget) }
-    guard case .success(let sequence) = skillTreeCommitActionState(player, descriptor: descriptor) else {
-        return .failure(.authorityExhausted)
-    }
+    // Spend the material first: it is the only step that can still refuse,
+    // and it fails without side effects.  The commit below was preflighted.
     guard player.gameMode == GameMode.creative || player.removeItems(materialID, 1) else {
         return .failure(.missingMaterial(materialName))
+    }
+    guard case .success(let sequence) = skillTreeCommitActionState(player, descriptor: descriptor) else {
+        return .failure(.authorityExhausted)
     }
     let base = max(1, Int((Double(maximum) / 4).rounded(.up)))
     let repair = skillTreeEffectiveRepairAmount(base: base,
@@ -315,10 +391,12 @@ private func skillTreeFieldRepair(_ player: Player,
                                     message: "Field-repaired \(itemDef(held.id).displayName)"))
 }
 
-/// Executes one unlocked fast-bar action.  It verifies actor authority,
-/// equipment, target line-of-sight, cooldown, and bounded sequence before
-/// mutating the world.  No class game rule is consulted: the tree is the
-/// authoritative advancement system for envelopes that contain it.
+/// Executes one unlocked fast-bar action.  Every check (actor authority,
+/// equipment, ammunition, target line-of-sight, cooldown, and bounded
+/// sequence) runs before anything is mutated; a technique that the target
+/// negates fails without spending ammunition, durability or its cooldown.
+/// No class game rule is consulted: the tree is the authoritative
+/// advancement system for envelopes that contain it.
 public func skillTreeExecuteAction(_ player: Player, id: SkillTreeActionID,
                                    authorization: RPGActionAuthorization) -> Result<RPGActionResult, RPGActionFailure> {
     guard !player.dead, player.deathTime <= 0, player.health > 0 else {
@@ -333,18 +411,19 @@ public func skillTreeExecuteAction(_ player: Player, id: SkillTreeActionID,
     let trees = skillTreeValidatedState(rawTrees, recipeCount: craftingRecipes.count)
     let descriptor = skillTreeActionDescriptor(id)
     guard skillTreeActionIsUnlocked(id, in: trees) else { return .failure(.skillNotPrepared(id.rawValue)) }
-    guard !state.activeCooldowns.contains(where: { $0.id == id.rawValue && $0.remainingTicks > 0 }) else {
+    // Stun Enemy and Pinning Shot share one cooldown (`skillTreeCooldownGroup`).
+    guard skillTreeCooldownRemainingTicks(id, in: state.activeCooldowns) == 0 else {
         return .failure(.skillOnCooldown(id.rawValue))
     }
     guard state.authorityRevision < RPG_MAX_NORMAL_AUTHORITY_REVISION,
           rpgNextActionSequence(state) != nil else { return .failure(.authorityExhausted) }
-    // Preflight the bounded cooldown write before any target, item, or world
-    // mutation.  A malformed-but-repaired envelope can legitimately carry a
-    // full cooldown list; in that case an action must fail atomically rather
-    // than damage/push a target and only then discover it cannot record its
-    // own cooldown.
-    if descriptor.cooldownTicks > 0,
-       state.activeCooldowns.filter({ $0.id != descriptor.id.rawValue }).count >= RPG_MAX_COOLDOWNS {
+    // Preflight the bounded cooldown write (one entry per action in the
+    // cooldown group) before any target, item, or world mutation.  A
+    // malformed-but-repaired envelope can legitimately carry a full cooldown
+    // list; in that case an action must fail atomically rather than
+    // damage/push a target and only then discover it cannot record its own
+    // cooldown.
+    guard skillTreeCooldownsAfterUse(id, in: state.activeCooldowns) != nil else {
         return .failure(.boundedStateLimit)
     }
 
@@ -361,11 +440,12 @@ public func skillTreeExecuteAction(_ player: Player, id: SkillTreeActionID,
     guard let held = player.mainHand, itemDef(held.id).tool?.type == requiredTool else {
         return .failure(.missingEquipment("a \(requiredTool) in your main hand"))
     }
-    if descriptor.equipment == .bow, player.gameMode != GameMode.creative,
-       !["tipped_arrow", "spectral_arrow", "arrow"].contains(where: {
-           iidOpt($0).map { player.countItem($0) > 0 } ?? false
-       }) {
-        return .failure(.missingMaterial("arrow"))
+    var arrowItemID: Int?
+    if descriptor.equipment == .bow {
+        switch skillTreeTechniqueArrow(player, bow: held) {
+        case .success(let itemID): arrowItemID = itemID
+        case .failure(let failure): return .failure(failure)
+        }
     }
 
     // Round House is a genuine 360-degree melee move. It deliberately does
@@ -381,22 +461,22 @@ public func skillTreeExecuteAction(_ player: Player, id: SkillTreeActionID,
         }
     }
     let damage = skillTreeWeaponDamage(player, descriptor: descriptor, trees: trees)
+    let damageSource = skillTreeTechniqueDamageSource(descriptor)
     var affected: [LivingEntity] = []
-    var didWork = false
+    var dealtDamage = false
     switch id {
     case .stunEnemy, .pinningShot:
         guard let primary else { return .failure(.noTarget(id.rawValue)) }
-        primary.skillTreeStunTicks = max(primary.skillTreeStunTicks, descriptor.stunDurationTicks)
+        let duration = descriptor.stunDurationTicks(bossTier: isBossTierEntityType(primary.type))
+        primary.skillTreeStunTicks = max(primary.skillTreeStunTicks, duration)
         primary.skillTreeStunProne = true
         primary.sneaking = true
         primary.vx = 0; primary.vz = 0
         affected = [primary]
-        didWork = true
     case .spartanKick, .powerShot:
         guard let primary else { return .failure(.noTarget(id.rawValue)) }
-        didWork = primary.hurt(damage * descriptor.weaponDamageMultiplier,
-                               "skill_tree_\(id.rawValue)", player)
-        if didWork {
+        dealtDamage = primary.hurt(damage * descriptor.weaponDamageMultiplier, damageSource, player)
+        if dealtDamage {
             let look = skillTreeActionLookVector(player)
             // `move` performs a swept collision check and respects finite-map
             // bounds, so a kick cannot phase an entity through geometry.
@@ -405,52 +485,47 @@ public func skillTreeExecuteAction(_ player: Player, id: SkillTreeActionID,
             primary.vx = 0; primary.vz = 0
             affected = [primary]
         }
-    case .roundHouse:
-        let targets = skillTreeSortedHostileTargets(near: player.x, y: player.centerY(), z: player.z,
-                                                    radius: 3, excluding: player)
-        for target in targets.prefix(16) where target.hurt(damage, "skill_tree_round_house", player) {
+    case .roundHouse, .volley:
+        let center = id == .roundHouse ? player : primary
+        guard let center else { return .failure(.noTarget(id.rawValue)) }
+        let targets = skillTreeSortedAreaTargets(near: center.x, y: center.centerY(), z: center.z,
+                                                 radius: id == .roundHouse ? 3 : 3.5, actor: player)
+        for target in targets.prefix(16)
+            where target.hurt(damage * descriptor.weaponDamageMultiplier, damageSource, player) {
             affected.append(target)
         }
-        didWork = !affected.isEmpty
-    case .volley:
-        guard let primary else { return .failure(.noTarget(id.rawValue)) }
-        let targets = skillTreeSortedHostileTargets(near: primary.x, y: primary.centerY(), z: primary.z,
-                                                    radius: 3.5, excluding: player)
-        for target in targets.prefix(16) where target.hurt(damage, "skill_tree_volley", player) {
-            affected.append(target)
-        }
-        didWork = !affected.isEmpty
+        dealtDamage = !affected.isEmpty
     case .disarmEnemy, .disarmingShot:
         guard let primary else { return .failure(.noTarget(id.rawValue)) }
-        didWork = skillTreeDisarm(primary)
-        affected = didWork ? [primary] : []
+        affected = skillTreeDisarm(primary) ? [primary] : []
     case .battleCry, .eagleEye:
         guard let primary else { return .failure(.noTarget(id.rawValue)) }
-        didWork = primary.hurt(damage * descriptor.weaponDamageMultiplier,
-                               "skill_tree_\(id.rawValue)", player)
-        affected = didWork ? [primary] : []
+        dealtDamage = primary.hurt(damage * descriptor.weaponDamageMultiplier, damageSource, player)
+        affected = dealtDamage ? [primary] : []
     case .fieldRepair:
         return skillTreeFieldRepair(player, descriptor: descriptor)
     }
-    guard didWork else { return .failure(.noEffect(descriptor.displayName)) }
-    // Advanced techniques are still actual sword/bow use against a qualifying
-    // living target. Award once per committed technique, rather than once per
-    // AoE victim, so using an unlocked move advances the matching tree without
-    // turning grouped enemies into an XP multiplier.
-    switch descriptor.equipment {
-    case .sword:
-        _ = skillTreeAwardMeleeHit(player, successfulSwordDamage: true)
-    case .bow:
-        _ = skillTreeAwardRangedHit(player, successfulBowDamage: true)
-    case .none:
-        break
-    }
-    if descriptor.equipment == .bow, !skillTreeConsumeArrow(player) {
-        return .failure(.missingMaterial("arrow"))
-    }
-    player.damageHeld(1)
+    // Nothing above has spent anything when the action had no effect: the
+    // only mutation so far is the target's own response to a hit it negated.
+    guard !affected.isEmpty else { return .failure(.noEffect(descriptor.displayName)) }
     guard case .success(let sequence) = skillTreeCommitActionState(player, descriptor: descriptor) else {
         return .failure(.authorityExhausted)
+    }
+    if let arrowItemID { player.removeItems(arrowItemID, 1) }
+    player.damageHeld(1)
+    // A technique is weapon use only when it actually damaged a qualifying
+    // living target.  Award once per committed technique, rather than once
+    // per AoE victim, so grouped enemies are not an XP multiplier; stuns and
+    // disarms deal no damage and award nothing.
+    if dealtDamage {
+        switch descriptor.equipment {
+        case .sword:
+            _ = skillTreeAwardMeleeHit(player, successfulSwordDamage: true)
+        case .bow:
+            _ = skillTreeAwardRangedHit(player, successfulBowDamage: true)
+        case .none:
+            break
+        }
     }
     player.world.hooks.playSound(descriptor.equipment == .bow ? "entity.arrow.shoot" : "entity.player.attack.strong",
                                  player.x, player.y, player.z, 0.9, 1)

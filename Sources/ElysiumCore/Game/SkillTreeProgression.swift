@@ -25,6 +25,12 @@ public let SKILL_TREE_ADVANCED_XP_THRESHOLDS = [0, 200, 450, 750, 1_100, 1_500]
 /// advanced tree.  A normal simulation runs at 20 ticks per second.
 public let SKILL_TREE_STUN_DURATION_TICKS = 600
 public let SKILL_TREE_BATTLE_CRY_COOLDOWN_TICKS = 2_400
+/// A stun on a boss-tier target (Warden, Wither, Ender Dragon, Elder
+/// Guardian) is capped at five seconds so a technique cannot freeze a boss
+/// fight.
+public let SKILL_TREE_BOSS_STUN_DURATION_TICKS = 100
+/// Longer than the stun itself, so one player cannot keep a target stunned.
+public let SKILL_TREE_STUN_COOLDOWN_TICKS = 900
 
 /// The four independently-progressing trees.  This is intentionally separate
 /// from old class/path identifiers so a migration can store it in any envelope.
@@ -550,6 +556,12 @@ public struct SkillTreeActionDescriptor: Codable, Equatable, Hashable {
         self.cooldownTicks = max(0, cooldownTicks)
     }
 
+    /// The stun this action applies to one target. Boss-tier targets receive
+    /// at most `SKILL_TREE_BOSS_STUN_DURATION_TICKS`.
+    public func stunDurationTicks(bossTier: Bool) -> Int {
+        bossTier ? min(stunDurationTicks, SKILL_TREE_BOSS_STUN_DURATION_TICKS) : stunDurationTicks
+    }
+
     public var fastbarToken: String { "skilltree.action.\(id.rawValue)" }
     public var iconAssetID: String { "skilltree.action.\(id.rawValue)" }
 }
@@ -559,28 +571,30 @@ public struct SkillTreeActionDescriptor: Codable, Equatable, Hashable {
 public let SKILL_TREE_ACTION_DESCRIPTORS: [SkillTreeActionDescriptor] = [
     SkillTreeActionDescriptor(id: .stunEnemy, tree: .melee, displayName: "Stun Enemy",
                               advancedRankRequired: 1, equipment: .sword, targeting: .hostileRay,
-                              weaponDamageMultiplier: 0, stunDurationTicks: SKILL_TREE_STUN_DURATION_TICKS),
+                              weaponDamageMultiplier: 0, stunDurationTicks: SKILL_TREE_STUN_DURATION_TICKS,
+                              cooldownTicks: SKILL_TREE_STUN_COOLDOWN_TICKS),
     SkillTreeActionDescriptor(id: .pinningShot, tree: .ranged, displayName: "Pinning Shot",
                               advancedRankRequired: 1, equipment: .bow, targeting: .hostileRay,
-                              weaponDamageMultiplier: 0, stunDurationTicks: SKILL_TREE_STUN_DURATION_TICKS),
+                              weaponDamageMultiplier: 0, stunDurationTicks: SKILL_TREE_STUN_DURATION_TICKS,
+                              cooldownTicks: SKILL_TREE_STUN_COOLDOWN_TICKS),
     SkillTreeActionDescriptor(id: .spartanKick, tree: .melee, displayName: "Spartan Kick",
                               advancedRankRequired: 2, equipment: .sword, targeting: .hostileRay,
-                              weaponDamageMultiplier: 1.5, pushDistanceBlocks: 5),
+                              weaponDamageMultiplier: 1.5, pushDistanceBlocks: 5, cooldownTicks: 100),
     SkillTreeActionDescriptor(id: .powerShot, tree: .ranged, displayName: "Power Shot",
                               advancedRankRequired: 2, equipment: .bow, targeting: .hostileRay,
-                              weaponDamageMultiplier: 1.5, pushDistanceBlocks: 5),
+                              weaponDamageMultiplier: 1.5, pushDistanceBlocks: 5, cooldownTicks: 100),
     SkillTreeActionDescriptor(id: .roundHouse, tree: .melee, displayName: "Round House",
                               advancedRankRequired: 3, equipment: .sword, targeting: .hostileArea,
-                              weaponDamageMultiplier: 1),
+                              weaponDamageMultiplier: 1, cooldownTicks: 200),
     SkillTreeActionDescriptor(id: .volley, tree: .ranged, displayName: "Volley",
                               advancedRankRequired: 3, equipment: .bow, targeting: .hostileArea,
-                              weaponDamageMultiplier: 1),
+                              weaponDamageMultiplier: 1, cooldownTicks: 200),
     SkillTreeActionDescriptor(id: .disarmEnemy, tree: .melee, displayName: "Disarm Enemy",
                               advancedRankRequired: 4, equipment: .sword, targeting: .hostileRay,
-                              weaponDamageMultiplier: 0, disarmsTarget: true),
+                              weaponDamageMultiplier: 0, disarmsTarget: true, cooldownTicks: 300),
     SkillTreeActionDescriptor(id: .disarmingShot, tree: .ranged, displayName: "Disarming Shot",
                               advancedRankRequired: 4, equipment: .bow, targeting: .hostileRay,
-                              weaponDamageMultiplier: 0, disarmsTarget: true),
+                              weaponDamageMultiplier: 0, disarmsTarget: true, cooldownTicks: 300),
     SkillTreeActionDescriptor(id: .battleCry, tree: .melee, displayName: "Battle Cry",
                               advancedRankRequired: 5, equipment: .sword, targeting: .hostileRay,
                               weaponDamageMultiplier: 3,
@@ -602,6 +616,34 @@ public func skillTreeActionDescriptor(_ id: SkillTreeActionID) -> SkillTreeActio
     // unreachable for shipped IDs and keeps call sites non-optional.
     SKILL_TREE_ACTION_DESCRIPTORS.first { $0.id == id }
         ?? SKILL_TREE_ACTION_DESCRIPTORS[0]
+}
+
+/// The actions that share `id`'s cooldown, in descriptor order: using one
+/// starts the cooldown for all of them, and a running one blocks them all.
+/// Every technique that stuns shares one cooldown, so a player with both Stun
+/// Enemy and Pinning Shot cannot alternate them to hold a target stunned.
+public func skillTreeCooldownGroup(_ id: SkillTreeActionID) -> [SkillTreeActionID] {
+    guard skillTreeActionDescriptor(id).stunDurationTicks > 0 else { return [id] }
+    return SKILL_TREE_ACTION_DESCRIPTORS.filter { $0.stunDurationTicks > 0 }.map(\.id)
+}
+
+/// The longest cooldown still running in `id`'s cooldown group, or 0.
+public func skillTreeCooldownRemainingTicks(_ id: SkillTreeActionID, in cooldowns: [RPGCooldown]) -> Int {
+    let group = skillTreeCooldownGroup(id).map(\.rawValue)
+    return cooldowns.filter { group.contains($0.id) }.map(\.remainingTicks).max() ?? 0
+}
+
+/// The cooldown list after `id` is used: every action in its cooldown group
+/// gets one entry of `id`'s full cooldown, replacing its old entries.  Nil
+/// when that would exceed `RPG_MAX_COOLDOWNS`.  An action without a cooldown
+/// leaves the list unchanged.
+public func skillTreeCooldownsAfterUse(_ id: SkillTreeActionID, in cooldowns: [RPGCooldown]) -> [RPGCooldown]? {
+    let descriptor = skillTreeActionDescriptor(id)
+    guard descriptor.cooldownTicks > 0 else { return cooldowns }
+    let group = skillTreeCooldownGroup(id).map(\.rawValue)
+    let others = cooldowns.filter { !group.contains($0.id) }
+    guard others.count + group.count <= RPG_MAX_COOLDOWNS else { return nil }
+    return others + group.map { RPGCooldown(id: $0, remainingTicks: descriptor.cooldownTicks) }
 }
 
 public func skillTreeActionID(fastbarToken: String) -> SkillTreeActionID? {

@@ -25,7 +25,7 @@ let AIAgentAreaSpawnVerticalReach = 24
 let AIAgentAreaSpawnPlacementBudget = 120_000_000
 /// Boss-tier mobs are summoned only where the player deliberately aims (the
 /// cursor), never scattered around the player by an area request.
-let AIAgentAreaSpawnExcludedEntities: Set<String> = ["wither", "ender_dragon", "warden", "elder_guardian"]
+let AIAgentAreaSpawnExcludedEntities = Set(BOSS_TIER_ENTITY_TYPES)
 
 // MARK: - prehistoric species names
 

@@ -262,7 +262,8 @@ final class SkillTreeScreen: Screen {
             itemName: { id in
                 id >= 0 && id < itemDefs.count ? itemDef(id).displayName : "Unknown item"
             },
-            isLANGuest: inputs.isLANGuest)
+            isLANGuest: inputs.isLANGuest,
+            outputEarnsMastery: { craftingOutputEarnsMastery(itemID: $0) })
         return (inputs, makeSkillsPresentation(state: state, context: context))
     }
 

@@ -1562,9 +1562,11 @@ public final class LANMultiplayerHostSession {
             let tz = intent.z + DIR_Z[intent.face]
             let existing = world.getBlock(tx, ty, tz)
             guard isReplaceableLANCell(existing) else { return .ignored("target occupied") }
-            _ = world.setBlock(tx, ty, tz, intent.cell)
+            // The host owns the player-placed resource mark; guest meta never sets or clears it.
+            let hostCell = skillTreePlayerPlacedCell(intent.cell)
+            _ = world.setBlock(tx, ty, tz, hostCell)
             let placedCell = world.getBlock(tx, ty, tz)
-            guard placedCell == intent.cell else { return .rejected("placement failed") }
+            guard placedCell == hostCell else { return .rejected("placement failed") }
             let change = LANBlockChange(
                 dimension: world.dim.rawValue, x: tx, y: ty, z: tz, cell: placedCell
             )
@@ -2931,6 +2933,7 @@ private func lanCraftingStateAfterCommit(
           completedRounds > 0,
           plan.recipeIndex >= 0,
           plan.recipeIndex < craftingRecipes.count,
+          !craftingRecipeIsRepacking(recipeIndex: plan.recipeIndex),
           var state = source,
           var trees = state.skillTrees
     else { return source }

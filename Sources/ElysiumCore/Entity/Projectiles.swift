@@ -152,7 +152,7 @@ public final class ArrowEntity: Projectile {
         // entity hook without the normal collision query.
         if lanPvEOnly && e.isPlayer { return }
         let speed = (vx * vx + vy * vy + vz * vz).squareRoot()
-        var dmg = (speed * damage).rounded(.up)
+        var dmg = arrowImpactDamage(speed: speed, arrowDamage: damage)
         if critical { dmg += (gameRng.nextFloat() * (dmg / 2 + 1)).rounded(.down) }
         if flame { e.fireTicks = max(e.fireTicks, 100) }
         // Determine whether this shot qualifies before damage resolves. A

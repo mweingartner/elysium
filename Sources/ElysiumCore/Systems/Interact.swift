@@ -1223,7 +1223,7 @@ public func placeBlock(_ ctx: InteractCtx, _ hit: RaycastHit, _ blockId: Int, _ 
         return false
     }
 
-    world.setBlock(px, py, pz, Int(cell(UInt16(blockId), meta)))
+    world.setBlock(px, py, pz, skillTreePlayerPlacedCell(Int(cell(UInt16(blockId), meta))))
     // multi-block: doors & beds & tall plants
     let shape = shapeOf(blockId)
     if shape == .door {
@@ -1664,15 +1664,14 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
     if !world.rule("doTileDrops") { return }
     if !canHarvest(player, c) { return }
 
-    // A resource award is tied to the same successful-harvest gate as the
-    // ordinary drops.  Breaking an ore with the wrong tool, in creative, or
-    // with tile drops disabled cannot farm usage progression.
-    _ = skillTreeAwardMiningBreak(player, blockID: id)
-
     let held = player.mainHand
     let fortune = held.map { enchLevel($0, "fortune") } ?? 0
     let silk = held.map { enchLevel($0, "silk_touch") > 0 } ?? false
     let toolDef = held.map { itemDef($0.id).tool } ?? nil
+    // A resource award is tied to the same successful-harvest gate as the
+    // ordinary drops.  Breaking an ore with the wrong tool, in creative, or
+    // with tile drops disabled cannot farm usage progression.
+    _ = skillTreeAwardMiningBreak(player, cell: c, silkTouch: silk)
 
     // silk touch: drop the block itself
     if silk {
@@ -1701,7 +1700,7 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
         else { count = d.countMin + gameRng.nextInt(max(0, d.countMax - d.countMin) + 1) }
         if d.chance != 1 && gameRng.nextFloat() > d.chance { continue }
         if count > 0 {
-            count += skillTreeMiningBonusDrops(player, blockID: id, x: x, y: y, z: z,
+            count += skillTreeMiningBonusDrops(player, cell: c, x: x, y: y, z: z,
                                                 itemID: itemId, baseDropCount: count)
             spawnItem(world, Double(x) + 0.5, Double(y) + 0.3, Double(z) + 0.5,
                       ItemStack(itemId, count))

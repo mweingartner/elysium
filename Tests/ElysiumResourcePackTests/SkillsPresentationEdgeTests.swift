@@ -408,14 +408,14 @@ final class SkillsPresentationEdgeTests: XCTestCase {
 
     func testActionEffectStringsForAllDescriptors() {
         let expected: [SkillTreeActionID: String] = [
-            .stunEnemy: "Stops a target’s actions and movement for 30 seconds",
-            .pinningShot: "Stops a target’s actions and movement for 30 seconds",
-            .spartanKick: "1.5× sword damage and a shove of up to 5 blocks",
-            .powerShot: "1.5× bow damage and a shove of up to 5 blocks",
-            .roundHouse: "1× sword damage to every hostile around you",
-            .volley: "1× bow damage to every hostile around the aimed target",
-            .disarmEnemy: "The target drops its equipped items",
-            .disarmingShot: "The target drops its equipped items",
+            .stunEnemy: "Stops a target’s actions and movement for 30 seconds (5 seconds on bosses) · 45-second cooldown shared with Pinning Shot",
+            .pinningShot: "Stops a target’s actions and movement for 30 seconds (5 seconds on bosses) · 45-second cooldown shared with Stun Enemy",
+            .spartanKick: "1.5× sword damage and a shove of up to 5 blocks · 5-second cooldown",
+            .powerShot: "1.5× bow damage and a shove of up to 5 blocks · 5-second cooldown",
+            .roundHouse: "1× sword damage to every hostile around you · 10-second cooldown",
+            .volley: "1× bow damage to every hostile around the aimed target · 10-second cooldown",
+            .disarmEnemy: "The target drops its equipped items · 15-second cooldown",
+            .disarmingShot: "The target drops its equipped items · 15-second cooldown",
             .battleCry: "3× sword damage · 2-minute cooldown",
             .eagleEye: "3× bow damage · 2-minute cooldown",
             .fieldRepair: "Restores a quarter of a damaged item’s durability with its repair material · 30-second cooldown",
@@ -435,14 +435,18 @@ final class SkillsPresentationEdgeTests: XCTestCase {
                 equipment: equipment, targeting: .hostileRay, weaponDamageMultiplier: multiplier,
                 stunDurationTicks: stun, pushDistanceBlocks: push, cooldownTicks: cooldown))
         }
-        XCTAssertEqual(effect(stun: 1_200), "Stops a target’s actions and movement for 1 minute")
-        XCTAssertEqual(effect(stun: 3_600), "Stops a target’s actions and movement for 3 minutes")
-        XCTAssertEqual(effect(stun: 1_300), "Stops a target’s actions and movement for 65 seconds")
+        XCTAssertEqual(effect(stun: 1_200), "Stops a target’s actions and movement for 1 minute (5 seconds on bosses)")
+        XCTAssertEqual(effect(stun: 3_600), "Stops a target’s actions and movement for 3 minutes (5 seconds on bosses)")
+        XCTAssertEqual(effect(stun: 1_300), "Stops a target’s actions and movement for 65 seconds (5 seconds on bosses)")
+        XCTAssertEqual(effect(stun: 60), "Stops a target’s actions and movement for 3 seconds",
+                       "a stun no longer than the boss cap names no boss duration")
         XCTAssertEqual(effect(cooldown: 1_200), "1× sword damage · 1-minute cooldown")
         XCTAssertEqual(effect(cooldown: 1_300), "1× sword damage · 65-second cooldown")
         XCTAssertEqual(effect(2.25, equipment: .none), "2.25× sword damage")
         XCTAssertEqual(effect(0, equipment: .bow), "0× bow damage")
         XCTAssertEqual(effect(push: 2, cooldown: 20), "1× sword damage and a shove of up to 2 blocks · 1-second cooldown")
+        XCTAssertEqual(effect(stun: 60, cooldown: 20), "Stops a target’s actions and movement for 3 seconds · 1-second cooldown",
+                       "sharing comes from the registered cooldown group, not from the text's own fields")
     }
 
     // MARK: - Earning

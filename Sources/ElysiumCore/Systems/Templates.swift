@@ -1306,7 +1306,9 @@ private func adjacentFoundationCell(_ world: World, _ x: Int, _ y: Int, _ z: Int
     let deltas = [(-1, 0, 0), (1, 0, 0), (0, 0, -1), (0, 0, 1), (0, -1, 0), (0, 1, 0)]
     for d in deltas {
         let cellValue = world.getBlock(x + d.0, y + d.1, z + d.2)
-        if isTemplateFoundationMaterial(cellValue) {
+        // A support column must never mint ore: a resource neighbour is skipped, not copied.
+        if isTemplateFoundationMaterial(cellValue),
+           skillTreeMiningResource(blockID: blockDefs[cellValue >> 4].name) == nil {
             return normalizedFoundationCell(cellValue)
         }
     }
@@ -1608,7 +1610,8 @@ public final class ObjectTemplatePlacementJob {
                 let block = template.blocks[blockIndex]
                 blockIndex += 1
                 let p = TemplatePos(x: originX + block.dx, y: originY + block.dy, z: originZ + block.dz)
-                _ = world.setBlock(p.x, p.y, p.z, Int(block.cell), SET_NO_NEIGHBORS)
+                // A pasted resource block is player-placed; undo restores the raw captured cells.
+                _ = world.setBlock(p.x, p.y, p.z, skillTreePlayerPlacedCell(Int(block.cell)), SET_NO_NEIGHBORS)
                 completedOperationCount += 1
                 budget -= 1
             case .placingBlockEntities:
@@ -1821,7 +1824,7 @@ public func placeObjectTemplate(_ rawTemplate: ObjectTemplate, in world: World,
     let positions = template.blocks.map { TemplatePos(x: originX + $0.dx, y: originY + $0.dy, z: originZ + $0.dz) }
     for block in template.blocks {
         _ = world.setBlock(originX + block.dx, originY + block.dy, originZ + block.dz,
-                           Int(block.cell), SET_NO_NEIGHBORS)
+                           skillTreePlayerPlacedCell(Int(block.cell)), SET_NO_NEIGHBORS)
     }
     var placedBEs = 0
     for be in template.blockEntities {

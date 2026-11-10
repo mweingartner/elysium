@@ -101,13 +101,50 @@ final class SkillsPresentationTests: XCTestCase {
         XCTAssertEqual(rows.first?.name, "Item 8")
     }
 
+    func testItemMasteryOmitsOutputsThatOnlyRepack() {
+        var ctx = context(outputs: [7, 8, 9])
+        // Core's `craftingOutputEarnsMastery` says output 8 (e.g. a gold block)
+        // is made only by repacking, so a legacy ledger count for it is hidden.
+        ctx.outputEarnsMastery = { $0 != 8 }
+        let rows = skillsItemMastery(counts: [3, 50, 1], context: ctx)
+        XCTAssertEqual(rows.map(\.id), [7, 9])
+    }
+
+    func testItemMasteryOverTheRealRegistryHidesRepackingOnlyOutputsOnly() throws {
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        registerAllRecipes()
+        let outputs = craftingRecipes.map { craftingRecipeOutput($0).id }
+        func index(of output: String, from input: String) throws -> Int {
+            try XCTUnwrap(craftingRecipes.indices.first { index in
+                guard outputs[index] == iid(output) else { return false }
+                switch craftingRecipes[index] {
+                case .shaped(_, _, let grid, _, _): return grid.contains(input)
+                case .shapeless(let inputs, _, _): return inputs.contains(input)
+                }
+            }, "\(input) -> \(output)")
+        }
+        var ctx = context(outputs: outputs)
+        ctx.outputEarnsMastery = { craftingOutputEarnsMastery(itemID: $0) }   // as SkillTreeScreen wires it
+        var counts = [UInt8](repeating: 0, count: outputs.count)
+        counts[try index(of: "gold_block", from: "gold_ingot")] = 60      // legacy repacking ledger
+        counts[try index(of: "iron_nugget", from: "iron_ingot")] = 40
+        counts[try index(of: "chest", from: "#planks")] = 5
+        counts[try index(of: "bone_meal", from: "bone_block")] = 3       // a mixed output stays listed
+
+        let rows = skillsItemMastery(counts: counts, context: ctx)
+
+        XCTAssertEqual(rows.map(\.id), [iid("chest"), iid("bone_meal")])
+        XCTAssertEqual(rows.map(\.crafts), [5, 3])
+    }
+
     func testActionEffectsComeFromDescriptors() {
         XCTAssertEqual(skillsActionEffect(skillTreeActionDescriptor(.stunEnemy)),
-                       "Stops a target’s actions and movement for 30 seconds")
+                       "Stops a target’s actions and movement for 30 seconds (5 seconds on bosses) · 45-second cooldown shared with Pinning Shot")
         XCTAssertEqual(skillsActionEffect(skillTreeActionDescriptor(.spartanKick)),
-                       "1.5× sword damage and a shove of up to 5 blocks")
+                       "1.5× sword damage and a shove of up to 5 blocks · 5-second cooldown")
         XCTAssertEqual(skillsActionEffect(skillTreeActionDescriptor(.volley)),
-                       "1× bow damage to every hostile around the aimed target")
+                       "1× bow damage to every hostile around the aimed target · 10-second cooldown")
         XCTAssertEqual(skillsActionEffect(skillTreeActionDescriptor(.battleCry)),
                        "3× sword damage · 2-minute cooldown")
     }

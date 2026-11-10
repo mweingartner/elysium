@@ -30,6 +30,10 @@ public var craftingRecipes: [CraftRecipe] = []
 /// Nil until the append-only crafting registry has finished registering.
 /// RPG repair must not infer an empty recipe registry from early startup.
 public private(set) var registeredCraftingRecipeCount: Int? = nil
+/// Per recipe index: whether the recipe only repacks one item type into
+/// another that crafts straight back (see `craftingRepackingRecipeFlags`).
+/// Computed once when the append-only registry finishes registering.
+public private(set) var craftingRecipeIsRepackingByIndex: [Bool] = []
 public var smeltingRecipes: [SmeltRecipe] = []
 public var stonecuttingRecipes: [StonecutRecipe] = []
 public var smithingRecipes: [SmithRecipe] = []
@@ -555,4 +559,5 @@ public func registerAllRecipes() {
     shaped("X/S/S", ["X": "copper_ingot", "S": "stick"], "copper_shovel")
     shaped("XX/ S/ S", ["X": "copper_ingot", "S": "stick"], "copper_hoe")
     registeredCraftingRecipeCount = craftingRecipes.count
+    craftingRecipeIsRepackingByIndex = craftingRepackingRecipeFlags(craftingRecipes)
 }

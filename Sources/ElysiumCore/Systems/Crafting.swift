@@ -93,6 +93,64 @@ public func craftingOutputMasteryKey(forRecipeIndex recipeIndex: Int) -> Craftin
                                     equivalentRecipeIndices: matching)
 }
 
+/// The one concrete item type a recipe consumes, or nil when it mixes item
+/// types or accepts a tag.  Counts are irrelevant: nine ingots and one block
+/// are both "a single item type".
+private func craftingRecipeSingleInputItem(_ recipe: CraftRecipe) -> String? {
+    let inputs: [String]
+    switch recipe {
+    case .shaped(_, _, let grid, _, _): inputs = grid.compactMap { $0 }
+    case .shapeless(let shapelessInputs, _, _): inputs = shapelessInputs
+    }
+    guard let first = inputs.first, !first.hasPrefix("#"),
+          inputs.allSatisfy({ $0 == first }) else { return nil }
+    return first
+}
+
+private func craftingRecipeOutputName(_ recipe: CraftRecipe) -> String {
+    switch recipe {
+    case .shaped(_, _, _, let out, _), .shapeless(_, let out, _): return out
+    }
+}
+
+/// Flags every "repacking" recipe: its inputs are a single item type X and it
+/// makes Y, while another registered recipe turns a single item type Y back
+/// into X (ingot <-> block, nugget <-> ingot, wheat <-> hay bale, ...).  Such a
+/// pair is a lossless loop, so it must never train Crafting.  The result is a
+/// pure function of the registry in index order; the set is used only for
+/// membership lookups, never iterated.
+public func craftingRepackingRecipeFlags(_ recipes: [CraftRecipe]) -> [Bool] {
+    let conversions = recipes.map { recipe in
+        (input: craftingRecipeSingleInputItem(recipe), output: craftingRecipeOutputName(recipe))
+    }
+    var singleInputPairs = Set<String>()
+    for conversion in conversions {
+        if let input = conversion.input { singleInputPairs.insert(input + "\u{0}" + conversion.output) }
+    }
+    return conversions.map { conversion in
+        guard let input = conversion.input else { return false }
+        return singleInputPairs.contains(conversion.output + "\u{0}" + input)
+    }
+}
+
+/// Whether a registered recipe only repacks items.  Repacking recipes earn no
+/// Crafting XP and consume no mastery rounds, for local and LAN crafting alike.
+public func craftingRecipeIsRepacking(recipeIndex: Int) -> Bool {
+    recipeIndex >= 0 && recipeIndex < craftingRecipeIsRepackingByIndex.count
+        && craftingRecipeIsRepackingByIndex[recipeIndex]
+}
+
+/// Whether crafting an output item can earn Crafting mastery: true when at
+/// least one registered recipe makes it without merely repacking.
+public func craftingOutputEarnsMastery(itemID: Int) -> Bool {
+    for index in 0..<craftingRecipes.count
+        where craftingRecipeOutput(craftingRecipes[index]).id == itemID
+            && !craftingRecipeIsRepacking(recipeIndex: index) {
+        return true
+    }
+    return false
+}
+
 private func inventoryCounts(_ inventory: [ItemStack?]) -> [String: Int] {
     var counts: [String: Int] = [:]
     for stack in inventory {

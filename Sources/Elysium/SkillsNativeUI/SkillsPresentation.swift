@@ -115,6 +115,9 @@ struct SkillsPresentationContext {
     /// Display name for an item ID.
     var itemName: (Int) -> String
     var isLANGuest: Bool
+    /// Whether crafting an output item can earn mastery (Core's
+    /// `craftingOutputEarnsMastery`); repacking-only outputs are not listed.
+    var outputEarnsMastery: (Int) -> Bool = { _ in true }
 }
 
 func makeSkillsPresentation(state rawState: SkillTreeState,
@@ -249,7 +252,7 @@ private func skillsTreeCopy(_ id: SkillTreeID) -> SkillsTreeCopy {
         return SkillsTreeCopy(
             name: "Mining", summary: "Harvest ore to earn XP. Rarer ore earns more.",
             symbol: "hammer", primaryTrack: "Mining speed", advancedTrack: "Ore yield",
-            earningNote: "Only successful ore harvests in Survival count.")
+            earningNote: "Only successful ore harvests in Survival count. Silk Touch and blocks a player placed earn nothing.")
     case .melee:
         return SkillsTreeCopy(
             name: "Melee", summary: "Land sword hits on animals and hostile enemies.",
@@ -267,7 +270,7 @@ private func skillsTreeCopy(_ id: SkillTreeID) -> SkillsTreeCopy {
             summary: "Complete crafting-grid recipes. More and rarer ingredients earn more.",
             symbol: "wrench.and.screwdriver", primaryTrack: "Batch size",
             advancedTrack: "Quality and repair",
-            earningNote: "Each item earns XP for its first \(SKILL_TREE_RECIPE_MASTERY_CAP) crafts. XP grows with the number and tier of the ingredients a finished craft uses.")
+            earningNote: "Each item earns XP for its first \(SKILL_TREE_RECIPE_MASTERY_CAP) crafts. XP grows with the number and tier of the ingredients a finished craft uses. Repacking, such as ingots into a block and back, earns nothing.")
     }
 }
 
@@ -355,6 +358,10 @@ func skillsActionEffect(_ action: SkillTreeActionDescriptor) -> String {
     } else if action.stunDurationTicks > 0 {
         effect = "Stops a target’s actions and movement for "
             + skillsDuration(ticks: action.stunDurationTicks)
+        let bossTicks = action.stunDurationTicks(bossTier: true)
+        if bossTicks < action.stunDurationTicks {
+            effect += " (" + skillsDuration(ticks: bossTicks) + " on bosses)"
+        }
     } else if action.disarmsTarget {
         effect = "The target drops its equipped items"
     } else if action.targeting == .hostileArea {
@@ -369,6 +376,9 @@ func skillsActionEffect(_ action: SkillTreeActionDescriptor) -> String {
     }
     if action.cooldownTicks > 0 {
         effect += " · " + skillsCooldown(ticks: action.cooldownTicks)
+        let sharedWith = skillTreeCooldownGroup(action.id).filter { $0 != action.id }
+            .map { skillTreeActionDescriptor($0).displayName }
+        if !sharedWith.isEmpty { effect += " shared with " + sharedWith.joined(separator: ", ") }
     }
     return effect
 }
@@ -448,6 +458,7 @@ func skillsItemMastery(counts: [UInt8], context: SkillsPresentationContext) -> [
     var totals: [Int: Int] = [:]
     for index in 0..<min(counts.count, outputs.count) where counts[index] > 0 {
         let item = outputs[index]
+        guard context.outputEarnsMastery(item) else { continue }
         if totals[item] == nil { order.append(item) }
         totals[item] = min(SKILL_TREE_RECIPE_MASTERY_CAP, (totals[item] ?? 0) + Int(counts[index]))
     }
