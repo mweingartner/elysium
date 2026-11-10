@@ -56,7 +56,11 @@ rules, unioning every affected group. Initial groups cover dedicated rendering c
 release workflow (`AutomatedReleaseSourceTests` plus selector self-tests), and the broader app shell
 (`ElysiumResourcePackTests`, `ElysiumDebugProtocolTests`, and `AutomatedReleaseSourceTests`).
 Shared entrypoints such as `main.swift`, `HudM.swift`, and `DebugControlRuntime.swift` broaden the
-selection to app-shell coverage. Unknown paths, sweeping changes, and shared-engine changes
+selection to app-shell coverage. The `audio` group runs the mixer, recording and script-sound
+suites for the audio engine and its assets; the `scripting` group runs the Lua sandbox, the script
+runtime's own and consumer suites and the app bundle for changes under `Sources/ElysiumScript` and
+`Sources/ElysiumCore/Scripting` (the `GameCore+Scripting.swift` seam stays full-suite). Unknown
+paths, sweeping changes, and shared-engine changes
 select the full suite; there are no narrow changed-line exceptions for shared entrypoints.
 This is a maintained impact map, not universal automatic dependency discovery.
 

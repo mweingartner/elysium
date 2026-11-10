@@ -645,6 +645,16 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
 - Revisit when an omitted downstream regression demonstrates an incomplete mapping
   or when another contained domain warrants its own reviewed scope. This is not
   whole-program static dependency analysis or a claim that tests prove visual quality.
+- November 9, 2026 extension: the `audio` group (the mixer, its scheduler/limiter/device
+  support, the bundled recordings and the script-sound gain path) replaces the earlier
+  recordings-only group and now requires the mixer suites, so an `Audio.swift` change can no
+  longer skip them. The `scripting` group covers `Sources/ElysiumScript` and
+  `Sources/ElysiumCore/Scripting`: that layer's own Core suites, the suites of its only outside
+  consumers (LAN replication/multiplayer, entity/chunk/world object records, the AI tool loop,
+  `SaveDB`), `ElysiumScriptTests` and the app bundle, about half of all cases. The
+  `GameCore+Scripting.swift` seam, the consumer suites' own files and the vendored interpreter
+  stay unmapped. No skill-tree group was added: the skill rules are called from block placement,
+  mining, combat and crafting, so an honest dependency set is nearly the whole Core suite.
 
 First-person presentation uses `FirstPersonRenderer.swift` and `FirstPersonViewmodel.swift` in a
 camera-space Metal pass with an independent cleared depth buffer and fixed 70-degree lens. It runs
@@ -805,9 +815,64 @@ Crafting recipe planning stays in `ElysiumCore/Systems/Crafting.swift`. The surv
 - Revisit if: a legacy save loses a mapped advancement, a host and client observe a different resolved action/state, real play shows a tree can be farmed without meaningful play, or a new requirement needs a fifth tree or a class-like exclusive identity.
 - Relevant implementation and verification links: [`CharacterProgression.swift`](Sources/ElysiumCore/Game/CharacterProgression.swift), [`SkillTreeProgression.swift`](Sources/ElysiumCore/Game/SkillTreeProgression.swift), [`RPGActions.swift`](Sources/ElysiumCore/Systems/RPGActions.swift), and [`SkillTreeProgressionTests.swift`](Tests/ElysiumCoreTests/SkillTreeProgressionTests.swift), followed by the repository release gates.
 
+### Decision: close the progression farms and bound every technique — November 9, 2026
+
+- Status: accepted
+- User outcome and acceptance example: Mining XP comes from ore a player finds, Crafting XP from
+  making things, and a technique is a decision with a cooldown. Re-placing and re-mining one ancient
+  debris block, turning nine ingots into a block and back, or pressing Stun Enemy repeatedly no
+  longer advances a tree, and ancient debris can no longer be duplicated.
+- Fixed constraints: no new save field or LAN message; the host stays the only authority, including
+  for guest placements; deterministic simulation with no new RNG draw; old saves load unchanged.
+- Chosen approach and strongest feasible alternative: a "player placed" mark in the block cell's
+  metadata (bit `0x8`, free on every mining-resource block, like Minecraft's `persistent` leaves),
+  set by local placement, the LAN host placement path and template paste. The alternative was a
+  persisted per-chunk ledger of placed positions, which needs a save-format change for the same
+  result.
+- Reason and accepted downside: reproduced against 1.4.3, the ore-yield bonus doubled ancient
+  debris on every re-place at a "lucky" position (20 cycles, 40 debris), one block re-mined ten
+  times gave 60 Mining XP, Stun Enemy was accepted ten times in one tick for 40 Melee XP, and bow
+  techniques hit for half an ordinary full-draw arrow. The downside is that an ore carried home
+  with Silk Touch and mined there earns no Mining XP.
+- Evidence or probe result: failing-first regression tests for each farm, a table over all 20
+  resource blocks and every metadata value (tiles, light, shape, drops and section mesh identical
+  with and without the mark), a technique matrix over all eleven actions, and a property test of
+  the shared bow-damage owner; elysmoke unchanged at 491.
+- Unverified assumption: the cooldown values (stun 45 s shared, kick 5 s, area 10 s, disarm 15 s)
+  feel right in real play; they were chosen at the desk.
+- Revisit if: redstone ore gains in-place lighting (a rewrite with `cell(B.redstone_ore, 1)` would
+  drop the mark), a new placement route bypasses `skillTreePlayerPlacedCell`, or play shows a
+  remaining loop worth more than its per-item mastery cap.
+
+The rules, each with one owner:
+
+- **Placed resource blocks** (`skillTreePlayerPlacedCell`, `skillTreeIsPlayerPlacedResourceCell` in
+  [`SkillTreeGameplay.swift`](Sources/ElysiumCore/Game/SkillTreeGameplay.swift)): a marked cell
+  earns no Mining XP and no ore-yield bonus; a Silk Touch break earns no XP; a drop that is the
+  block's own item never gets a bonus. A LAN guest's metadata is OR-ed with the mark on the host, so
+  a guest can neither clear it nor lose real state such as an amethyst cluster's facing. Privileged
+  routes that write raw metadata (`/setblock`, `/fill`, the script `meta` attribute, AI ore
+  generation) do not mark and are gated by their own permissions.
+- **Repacking recipes** (`craftingRepackingRecipeFlags` in
+  [`Crafting.swift`](Sources/ElysiumCore/Systems/Crafting.swift)): a recipe whose inputs are one
+  item type X and whose output Y has a recipe back into X earns no Crafting XP and no mastery,
+  locally and on the LAN guest path. The flags are computed once from the registry.
+- **Technique cooldowns** (`skillTreeCooldownGroup`, `skillTreeCooldownsAfterUse` in
+  [`SkillTreeProgression.swift`](Sources/ElysiumCore/Game/SkillTreeProgression.swift)): every
+  technique has one; anything that stuns shares a single cooldown longer than the stun, and a stun
+  on a boss-tier mob (`BOSS_TIER_ENTITY_TYPES`) lasts 100 ticks. A technique earns XP only when it
+  dealt damage, and every check runs before any mutation.
+- **Area targets** (`skillTreeIsAreaTechniqueTarget`): Monsters, the Ender Dragon, predatory
+  prehistoric creatures and any mob targeting the acting player (or that LAN guest's proxy); never
+  players, tamed or owned animals, villagers or golems.
+- **Bow damage** (`bowArrowDamage`, `arrowImpactDamage`, `bowFullDrawHitDamage` in
+  [`Combat.swift`](Sources/ElysiumCore/Systems/Combat.swift)): `shootBow`, the arrow's impact and
+  the bow techniques share one definition, and techniques use the ordinary `projectile` damage
+  source, so arrow immunities apply.
+
 `Sources/ElysiumCore/Game/SkillTreeProgression.swift` owns pure, deterministic rank/XP arithmetic for **Mining**, **Melee**, **Ranged**, and **Crafting**. Each tree derives five primary ranks and, only after primary rank 5, five advanced ranks from bounded XP; decoded ranks are never trusted independently. Crafting's 100-round mastery is canonical per output item type, so alternate ingredient recipes share one cap; its serialized recipe-index ledger remains compatibility-safe and folds legacy alternatives at the authoritative craft boundary. Crafting converts actual consumed item names into a progression resource tier rather than reusing cosmetic registry rarity, so iron/gold/redstone/diamond inputs stay meaningfully distinct even where their display item is common. Ordinary `player.xp`, `xpLevel`, `xpProgress`, and Advancements remain the inventory/enchanting journey and are not skill-tree currency. Successful authoritative gameplay events are the only source of skill XP; creative play, misses, malformed inputs, and non-qualifying blocks/targets do not advance a tree.
 
-The primary branches provide five 10-percent steps: mining speed, equipped sword damage, equipped bow damage, and crafting throughput. Advanced Mining adds deterministic ore-yield bonuses. Advanced Melee and Ranged unlock ordered, fast-bar-ready actions; their target validation, damage, displacement, dropped-item, stun, and cooldown effects remain host-authoritative and use the same `World`/`LivingEntity` state as ordinary combat. Advanced Crafting quality is stored with crafted gear so maximum durability, weapon base damage, and repair calculations agree everywhere that consumes an `ItemStack`; its rank-5 capstone is a material-backed, cooldown-limited **Field Repair** action for the held damaged item.
+The primary branches provide five steps: 10 percent each of mining speed, equipped sword damage and equipped bow damage, and a crafting batch limit of 1, 2, 4, 8, 16, then 32 rounds. Advanced Mining adds deterministic ore-yield bonuses. Advanced Melee and Ranged unlock ordered, fast-bar-ready actions; their target validation, damage, displacement, dropped-item, stun, and cooldown effects remain host-authoritative and use the same `World`/`LivingEntity` state as ordinary combat. Advanced Crafting quality is stored with crafted gear so maximum durability, weapon base damage, and repair calculations agree everywhere that consumes an `ItemStack`; its rank-5 capstone is a material-backed, cooldown-limited **Field Repair** action for the held damaged item.
 
 `CharacterProgression.swift` retains the historical `rpg` envelope name strictly for save, LAN, and local-preference compatibility. Version 4 carries `skillTrees`; its repair path clears retired path, spell, fatigue, and class-action fields so they cannot remain active after migration. At the `Player.load` boundary, known legacy records translate the closest relevant ranks—Delver mining, Warden melee, Ranger ranged, and Tinker crafting—then are rewritten as the repaired tree state. Former class-only ranks have no speculative equivalent and retire. New players receive a tree immediately; the only retained class constructor is an internal raw legacy-fixture/decode seam, requiring a true historical rule and refusing transient LAN mirrors, while every GameCore/UI/LAN route rejects a tree envelope. Unknown future-version records still fail closed rather than being downgraded and rewritten.
 
@@ -848,10 +913,52 @@ future authority boundary.
 
 `Audio.swift` remains the engine for ordinary game audio: most effects use a synthesized recipe that
 spawns oscillator or filtered-noise voices with envelopes, pitch sweeps, and vibrato, mixed in an
-`AVAudioSourceNode` render callback at 48 kHz. RBJ biquad filters, positional stereo panning,
-underwater lowpass, and two coprime-length feedback delays provide the effects and cave reverb;
-ambient music and jukebox discs are still generated from scale/tempo configurations. The render
-thread owns the synthesized voice list and receives main-thread work through its locked inbox.
+`AVAudioSourceNode` render callback at the output device's sample rate (48 kHz for the offline
+engines tests use). RBJ biquad filters, positional stereo panning, underwater lowpass, and two
+coprime-length feedback delays provide the effects and cave reverb; ambient music and jukebox discs
+are still generated from scale/tempo configurations.
+
+### Decision: schedule future notes outside the voice cap, mix sliders live, limit the bus — November 9, 2026
+
+- Status: accepted
+- User outcome and acceptance example: a jukebox disc plays from its first note without cutting
+  other sounds, the Music and Jukebox sliders change what is playing now, a pile-up of explosions
+  does not clip, and plugging in headphones does not silence the game.
+- Fixed constraints: the render thread owns the voice list and is reached only through the locked
+  inbox; no allocation or unbounded work on that thread in steady state; presentation only, with no
+  simulation RNG, save or LAN field.
+- Chosen approach and strongest feasible alternative: keep the one synthesized mixer and give it a
+  scheduler (`VoiceScheduler` in `AudioMixerSupport.swift`). The alternative was moving music and
+  discs to `AVAudioPlayerNode`s, which would have split volume, underwater and reverb handling
+  across two engines.
+- Reason and accepted downside: music and discs schedule up to about a thousand notes ahead, and
+  the old 512-voice cap counted them and dropped the oldest, so Wander lost its first 20 seconds
+  and Descent 25 (measured offline). Sliders were baked into each voice at creation. The downside
+  is one more per-block pass over the voice list.
+- Evidence or probe result: offline renders before and after (per-5-second RMS for all three
+  discs, slider at 0 against a playing track, 24 simultaneous explosions peaking at 17 times full
+  scale before and 1.0 after) and zero render-thread allocations across 3,000 blocks in a release
+  build.
+- Unverified assumption: a real device or sample-rate change restarts cleanly; only a posted
+  configuration-change notification on a 48 kHz device was exercised.
+- Revisit if: discs or music become recordings, the sounding cap is reached in ordinary play, or
+  slider steps become audible as zipper noise.
+
+The render thread owns `VoiceScheduler` outright. The main thread only appends to the inbox, which
+the render thread swaps out under the lock in O(1). A voice whose start lies after the current block
+is pending: it never counts against the 512 sounding voices and is never stolen (pending voices and
+the inbox are each bounded at 8,192). When more than 512 would sound, the voices with the lowest
+"seconds left times level" are stolen; music and disc voices go only when nothing else is left.
+`MixSettings` (master, per-category gains, environment, device rate) is copied once per block, so a
+slider, environment or rate change reaches every voice, including notes scheduled a minute ahead,
+within one block. `OutputLimiter` is last on the master bus: bit-transparent below 0.9, about 1 ms
+attack and 150 ms release above it, then a clamp to full scale. `AudioOutputDevice` rebuilds the
+connection on `AVAudioEngineConfigurationChange`, retries a failed start with a 1-to-8-second
+backoff, and nothing is queued while the device is down, so no stale burst plays on its return.
+
+Jukebox discs are heard from the jukebox, attenuated and panned over 64 blocks. Ejecting or breaking
+the jukebox that is playing stops its disc (`jukebox.stop`), generative music waits for a disc to
+end, and leaving a world resets the underwater and cave mix and stops script sounds.
 
 The 36 prehistoric species also have three bundled mono PCM recordings each: grazing/quiet
 feeding, attack, and injury. Eighteen officially exported Suno source masters supply six voice
@@ -1394,6 +1501,57 @@ given a Lua closure (rather than a name) behave as one-shot regardless of which 
 closure repetition isn't implemented. The `attach`/`detach` per-tick verb caps are both enforced
 (§8.4: at most 2 per script and 32 per world). Handler-mode source is compiled once
 when its script instance loads and that `ScriptFunction` is reused for later deliveries.
+
+### Decision: tell the author when a script fails, without breaking saved scripts — November 9, 2026
+
+- Status: accepted
+- User outcome and acceptance example: an author who attaches a script with a mistake sees one chat
+  line naming the object, the script, the error and its true line, instead of a script that
+  silently does nothing; `every(n, fn)` repeats; a typo of a built-in name is pointed out.
+- Fixed constraints: the sandbox boundary is unchanged apart from one new global, `cancel`; all new
+  host work is bounded per tick independently of what a script does; nothing consumes simulation
+  RNG; saved scripts keep working, so the typo guards warn and never refuse.
+- Chosen approach and strongest feasible alternative: route every fault through one owner
+  (`recordFault`) that stores `lastError`, raises `script.faulted` and posts a notice through
+  `ScriptFaultNotices.swift`. The alternative, an in-game console pane, is the better long-term
+  surface and is deferred; a chat line needs no new UI.
+- Reason and accepted downside: faults were visible only through `/script list`, the Inspector and
+  an F3 counter, and runtime line numbers were one too high because the preamble sat on its own
+  line. The first version of the attribute guard refused the write; a tester found about forty
+  plausible custom names it would have rejected (`night`, `layer`, `targets`), so it became a
+  warning. The downside is that a real typo still creates the misspelled attribute.
+- Evidence or probe result: failing-first tests for each item, a 400-program corpus showing the
+  `; `-joined preamble changes only line numbers, a measured stress case for the typo check (450
+  fresh names per tick: 26 to 47 ms before bounding, 2 ms after) and for chat attach validation of
+  a 16 KiB source (about 330 ms before, 4 ms after); elysmoke unchanged at 491.
+- Unverified assumption: the notice rate limits (same message once per 1,200 ticks, a different
+  one per 200, four per tick world-wide) are quiet enough in a world with many scripts.
+- Revisit if: an output console lands, or authors ask for the attribute warning to be an error.
+
+`ScriptFaultNotices.swift` owns the chat channel for faults and typo warnings: every line passes
+`ScriptingDisplayText.line`, is capped at 256 bytes with the `/script show` hint kept, and is
+rate-limited by a 256-entry, tick-keyed, unpersisted table that never evicts an entry still inside
+its quiet window (an overflow is summarised at most once per 200 ticks). Check and dry runs post
+nothing. `wrappedChunkSource` is the single owner of the source preamble. `/script attach` from chat
+and the AI attach tool share `AIScriptValidationGate.validateForAttach`, which scans a source once.
+
+`ScriptClosureTimers.swift` holds repeating function timers: `every(n, fn)` fires a fresh callback
+per beat under the normal instruction budget, skips a beat whose predecessor is still suspended,
+and is dropped on unload, detach, edit, disable, any fault in the script and world exit; 16 per
+script and 256 per world. `after(n, fn)` stays a one-shot scheduled run. Both return an id that
+`cancel(id)` accepts only from the script that owns it. Named durable timers are unchanged.
+
+`ScriptNameSuggestions.swift` is the one edit-distance helper behind every "did you mean". An event
+name that is not built in, is not declared on its target and is one or two edits from a built-in
+still subscribes and warns. A dot-sugar write that creates a new custom attribute whose name is a
+likely typo of a built-in for that object kind (a swapped pair from three characters, one edit from
+five, two from eight) warns once; the write is never refused. The check is limited to 8 per script
+and 64 per world per tick, skips names longer than any built-in plus two, and compares against a
+static per-kind table. Attribute-name normalization itself (`boundedAttributeNameInput` in
+`ObjectRecord.swift`) reads at most the first 128 characters of a raw name: a normalized name is 32
+bytes built left to right, so the result is unchanged, and a script can no longer buy host time
+with a multi-kilobyte handle key (a pre-existing stall: one tick of 4 KiB-key reads took 326 ms in
+a debug build and takes 6.5 ms now).
 
 ## Native Lua editor and authoring intelligence
 

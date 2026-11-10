@@ -403,35 +403,43 @@ ranks. Advanced ranks begin only after primary rank 5.
 
 Breaking a supported ore block with a successful harvest gives Mining XP. Coal, copper, iron, and nether quartz give 2 XP; lapis, amethyst, and emerald give 4; gold, nether gold, redstone, diamond, ancient debris, and labradorite give 6. Labradorite is included in the progression table for compatible future content; this update does not itself add a labradorite block, item, or world-generation feature.
 
-Each primary Mining rank adds 10% harvesting speed on hard stone and ore, up to 50%. After reaching primary rank 5, each advanced rank adds a 10% ore-yield bonus, up to 50%. Yield rolls are deterministic for the same authoritative world state, so this benefit never consumes or perturbs world-generation randomness.
+Mining XP rewards ore you find. Each naturally generated resource block earns XP once, when you break it without Silk Touch. A resource block that a player placed earns nothing: an ore carried home with Silk Touch, ancient debris you set down, or a pasted object template. Breaking with Silk Touch earns nothing either, because the block comes away whole.
+
+Each primary Mining rank adds 10% harvesting speed on hard stone and ore, up to 50%. After reaching primary rank 5, each advanced rank adds a 10% ore-yield bonus, up to 50%. The bonus applies to ore mined where it formed; a player-placed block, or a block that drops itself such as ancient debris, never yields extra. Yield rolls are deterministic for the same authoritative world state, so this benefit never consumes or perturbs world-generation randomness.
 
 ### Melee
 
 A successful sword hit on an animal or hostile enemy gives 4 Melee XP. Each primary rank adds 10% to the equipped sword's base damage, up to 50%; enchantments, criticals, and special-action multipliers apply separately. After primary rank 5, each advanced rank unlocks one sword action. The actions appear in the first available slot of the second fast bar and can be used with `Shift+1` through `Shift+9`.
 
-| Advanced rank | Action | Effect |
-|---|---|---|
-| 1 | **Stun Enemy** | Stops a targeted enemy's actions and horizontal movement for 30 seconds (600 simulation ticks). It is mechanically prone during that control state; this release does not add a separate prone model pose. |
-| 2 | **Spartan Kick** | Deals 1.5× equipped-sword damage and safely shoves the target up to 5 blocks. |
-| 3 | **Round House** | Deals 1× equipped-sword damage to each hostile surrounding the player. |
-| 4 | **Disarm Enemy** | Forces the target to drop its equipped items. |
-| 5 | **Battle Cry** | Deals 3× equipped-sword damage; it has a 2-minute cooldown. |
+Every action has a cooldown, and an action earns its 4 XP only when it deals damage, so Stun Enemy and Disarm Enemy earn none.
+
+| Advanced rank | Action | Effect | Cooldown |
+|---|---|---|---|
+| 1 | **Stun Enemy** | Stops a targeted enemy's actions and horizontal movement for 30 seconds (600 simulation ticks), or 5 seconds on a Warden, Wither, Ender Dragon or Elder Guardian. It is mechanically prone during that control state; this release does not add a separate prone model pose. | 45 seconds, shared with Pinning Shot |
+| 2 | **Spartan Kick** | Deals 1.5× equipped-sword damage and safely shoves the target up to 5 blocks. | 5 seconds |
+| 3 | **Round House** | Deals 1× equipped-sword damage to up to 16 enemies within 3 blocks: hostile mobs, predatory dinosaurs, and any creature that is attacking you. Livestock, pets, villagers and golems are never hit. | 10 seconds |
+| 4 | **Disarm Enemy** | Forces the target to drop its equipped items. | 15 seconds |
+| 5 | **Battle Cry** | Deals 3× equipped-sword damage. | 2 minutes |
 
 ### Ranged
 
 A successful bow hit on an animal or hostile enemy gives 4 Ranged XP. Each primary rank adds 10% to the equipped bow's base damage, up to 50%. Ranged uses the same five-rank gate and fast-bar pattern as Melee, with bow-specific counterparts.
 
-| Advanced rank | Action | Effect |
-|---|---|---|
-| 1 | **Pinning Shot** | Stops a targeted enemy's actions and horizontal movement for 30 seconds (600 simulation ticks). It is mechanically prone during that control state; this release does not add a separate prone model pose. |
-| 2 | **Power Shot** | Deals 1.5× equipped-bow damage and safely shoves the target up to 5 blocks. |
-| 3 | **Volley** | Deals 1× equipped-bow damage to hostile enemies around the aimed target. |
-| 4 | **Disarming Shot** | Forces the targeted enemy to drop its equipped items. |
-| 5 | **Eagle Eye** | Deals 3× equipped-bow damage; it has a 2-minute cooldown. |
+Bow actions hit instantly at up to 18 blocks. Their damage is measured against a fully drawn, non-critical arrow from the same bow, so Power Shot always hits harder than an ordinary shot. They count as arrow hits: an Enderman still dodges, an armored Wither is still immune, and Projectile Protection still applies. A hit that the target shrugs off spends nothing. Each action uses one arrow, taking plain arrows before spectral and tipped ones, and none from an Infinity bow.
+
+| Advanced rank | Action | Effect | Cooldown |
+|---|---|---|---|
+| 1 | **Pinning Shot** | Stops a targeted enemy's actions and horizontal movement for 30 seconds (600 simulation ticks), or 5 seconds on a Warden, Wither, Ender Dragon or Elder Guardian. It is mechanically prone during that control state; this release does not add a separate prone model pose. | 45 seconds, shared with Stun Enemy |
+| 2 | **Power Shot** | Deals 1.5× a fully drawn arrow and safely shoves the target up to 5 blocks. | 5 seconds |
+| 3 | **Volley** | Deals 1× a fully drawn arrow to up to 16 enemies within 3.5 blocks of the aimed target, by the same rule as Round House. | 10 seconds |
+| 4 | **Disarming Shot** | Forces the targeted enemy to drop its equipped items. | 15 seconds |
+| 5 | **Eagle Eye** | Deals 3× a fully drawn arrow. | 2 minutes |
 
 ### Crafting
 
 Completing a crafting-grid recipe awards Crafting XP from the actual resolved ingredients: more and rarer resources contribute more. Crafting treats copper as tier 1, iron as tier 2, gold/redstone/lapis/quartz/amethyst as tier 3, emerald/diamond as tier 4, and ancient-debris/netherite as tier 5 (or a higher registered rarity when one exists). Each output item type can contribute XP for its first 100 completed craft rounds, then that item is mastered and stops granting Crafting XP even when another recipe makes the same output. The mastery counter is attached to a committed output, not to a preview or attempted craft, so cancelled or failed crafts do not consume its limit.
+
+Repacking earns nothing and does not count towards mastery: turning items into a storage block and back (ingots and blocks, nuggets and ingots, wheat and hay bales, bone meal and bone blocks, and the like) is a lossless loop, not crafting practice.
 
 Primary Crafting ranks improve batch throughput: the maximum committed rounds per craft request progress from 1 to 2, 4, 8, 16, and 32. Advanced ranks improve the quality recorded on eligible crafted gear. Quality increases maximum durability by 10%, 20%, 35%, 55%, and 80%, and weapon base damage by 2.5%, 5%, 10%, 15%, and 25%. It also improves compatible repair outcomes by 5%, 10%, 15%, 20%, and 30%. These bonuses stay with the crafted stack and are used consistently by durability, damage, and repair logic.
 
@@ -767,6 +775,14 @@ below); until then they're refused exactly as before.
   — no `on(...)` needed). Attaching from chat always targets the trigger at `self`; a script's own
   `h:attach(name, source, {on=..., attr=..., target=...})` call (see below) can target any object.
 - `/script detach <target> <name>` — remove a script.
+- `/help script` — a short getting-started: how to open the editor (`/script edit` or Command-E),
+  attach and list scripts, open the Inspector, and where the full guide is. `/help` lists the
+  scripting commands with the rest.
+- When a script fails, the host sees one chat line naming the object, the script and the error, with
+  the `/script show` command to look closer. Line numbers match your source. A source attached from
+  chat is checked first and refused with its error if it does not compile. `every(n, fn)` repeats
+  until the script stops or you `cancel` it. See [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md)
+  for the details and the typo warnings.
 - A running script may perform at most 2 combined `h:attach`/`h:detach` operations per simulation
   tick, while all scripts share a 32-operation world-wide limit for that tick. This prevents a
   handler storm from creating unbounded lifecycle work; both limits reset on the next tick.
@@ -937,7 +953,10 @@ that metadata grants no execution or mutation authority.
   map opened with `M`. In the Nether, both map views follow the open cavern around your current
   height instead of drawing the sealed ceiling.
 - **Audio** controls the master level and categories such as music, blocks, creatures, players, ambient,
-  jukebox, and UI.
+  jukebox, and UI. Every slider takes effect immediately, including on music or a disc that is already
+  playing. A jukebox is heard from where it stands and fades out over 64 blocks; taking the disc out or
+  breaking the jukebox stops it, and background music waits until a disc has finished. If you switch
+  the Mac's sound output (for example by connecting headphones), the game follows it.
 - **World** sets **Creature Respawn** to Daily, Alternate Days, or Weekly. These are in-game dawn
   intervals for your local/host worlds; see [Wildlife renewal and forests](#wildlife-renewal-and-forests).
 - **Controls** manages sensitivity, inverted Y, and configurable gameplay bindings.

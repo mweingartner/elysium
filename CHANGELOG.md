@@ -5,6 +5,39 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **Scripting fixes for authors.** A script that fails now says so: the host sees one rate-limited
+  chat line naming the object, the script and the error, with the `/script show` command to look
+  closer. Runtime error line numbers were one too high and now match the source. `/script attach`
+  from chat checks the source first and refuses a broken one with its error instead of storing it.
+  `every(n, fn)` repeats (it used to run once); `after` and `every` with a function return an id,
+  and the new `cancel(id)` stops one. A mistyped built-in event name (`block.broke`) or a new
+  attribute that looks like a mistyped built-in (`self.helth = 5`) still works as before but warns
+  with a suggestion. `/help` lists the scripting commands and `/help script` prints a getting-started.
+  A script can no longer stall the game by indexing an object with a huge key. The scripting guide
+  now documents `player:give` and no longer shows an example that exceeded the attach budget.
+
+- **Skill-tree fixes.** Closed three progression farms: ancient debris could be duplicated by
+  re-placing and mining it once Mining had an advanced rank, any placed ore could be re-mined for
+  Mining XP, and turning items into a storage block and back maxed Crafting. A resource block a
+  player placed (by hand, as a LAN guest, or by pasting a template) now earns no Mining XP and no
+  yield bonus, Silk Touch breaks earn none, and repacking recipes earn no Crafting XP or mastery.
+  Every technique now has a cooldown (stuns 45 seconds, shared between Stun Enemy and Pinning Shot;
+  Spartan Kick and Power Shot 5; Round House and Volley 10; Disarm 15), earns XP only when it deals
+  damage, and stuns a Warden, Wither, Ender Dragon or Elder Guardian for 5 seconds instead of 30.
+  Round House and Volley now hit predatory dinosaurs and anything attacking you, and still never
+  livestock, pets, villagers or golems. Bow techniques are measured against a fully drawn arrow
+  (Power Shot was hitting for half an ordinary shot), count as arrow hits, spend plain arrows
+  first, and respect Infinity.
+
+- **Audio fixes.** Jukebox discs play from their first note: two of the three (Wander and Descent)
+  used to open with 20 to 25 seconds of silence, starting a disc cut every sound already playing, and
+  each sound effect removed upcoming notes. Volume sliders now act on music and discs that are
+  already playing instead of waiting for the next track. Loud pile-ups no longer clip. Switching the
+  sound output device no longer leaves the game silent until relaunch. A jukebox is heard from where
+  it stands over 64 blocks, stops when its disc is taken out or it is broken, and holds background
+  music off while it plays. Leaving a world while underwater no longer muffles the title screen, and
+  script sounds stop when the world ends.
+
 - New dinosaur maps (**v4** Lost World, Jurassic Giants, Cretaceous Frontiers, and Ancient Seas)
   have a warm climate: no snow or ice generates anywhere, and weather rains instead of snowing.
   Small surface volcanoes are roughly twenty times as common. Existing v1-v3 dinosaur maps keep

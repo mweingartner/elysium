@@ -263,7 +263,10 @@ payloads are ordinary string-keyed tables and need no JSON escaping.
 - `list [target]` (default `self`) — each script's mode, and `(disabled)`/last-error if any. *(no)*
 - `show <target> <name>` — full source (first 30 lines), mode, author, trigger(s), last error. *(no)*
 - `attach <target> <name> module <source...>` — a **module**-mode script: runs once at load, is
-  expected to call `on`/`subscribe`/`every`/`after`/`register` to set itself up. *(yes)*
+  expected to call `on`/`subscribe`/`every`/`after`/`register` to set itself up. The source is
+  checked before it is stored, exactly as the AI's attach is (syntax, lint, event-name literals):
+  a bad source is refused with `attach refused — line N: …` and nothing changes. The check is
+  read-only, so it also runs on an untrusted world or with scripts switched off. *(yes)*
 - `attach <target> <name> handler <event> <source...>` — a **handler**-mode script: the whole
   source *is* the handler, auto-subscribed to `<event>` on the attach target itself (an `ev` local
   is bound automatically, no `on(...)` call needed). Attaching from chat can only trigger on the
@@ -634,7 +637,8 @@ produce visible output — see the note right after the table on `log`/`print`, 
 |---|---|
 | `on(event, fn)` / `on(event, opts, fn)` | compatibility helper that subscribes on `self`, or on `opts.target` when that is a handle. The only option fields are `target`, `attr`, and `name`; `opts.attr` narrows `attribute.changed`, while `opts.name = "foo"` also registers `fn` under that valid handler name (equivalent to calling `register("foo", fn)`). Non-table options, unknown fields, wrong value types, unavailable events, and incompatible event/target/filter shapes are errors. Check/dry-run performs the same validation without retaining the closure |
 | `subscribe(target, event[, opts], fn)` | subscribe anywhere; the optional table accepts only string `opts.attr`, which may narrow `attribute.changed`. Non-table options, unknown fields, wrong value types, unavailable events, and incompatible target/event/filter shapes are errors in both Check/dry-run and live execution |
-| `every(n, handlerOrName)` / `after(n, handlerOrName)` | schedule after `n` ticks (§9). A **string** name schedules a durable, persisted timer that survives reload — only `every` with a name truly repeats. A **function** schedules a live, one-shot run — `every(n, fn)` behaves exactly like `after(n, fn)`, once only, not repeating (documented simplification; `ScriptRuntimeAPI.swift:429-436`) |
+| `every(n, handlerOrName)` / `after(n, handlerOrName)` | schedule after `n` ticks (§9). A **string** name schedules a durable, persisted timer that survives reload. A **function** schedules a live timer and returns its id: `after(n, fn)` runs `fn` once, `every(n, fn)` runs it every `n` ticks until the script stops or you cancel it |
+| `cancel(id)` | stop a function timer started by this script with `after` or `every`; returns whether one was stopped. It cannot touch another script's timers |
 | `wait(n)` | yield the current handler for `n` ticks |
 | `emit(name[, payload][, target])` | emit a custom event with exactly 1–3 arguments; default target is `self`, and an explicit target must be an object handle (a string/ref-shaped table is an error, never a silent fallback to `self`). A declaration on the target strictly validates the payload; otherwise valid custom names remain open. Engine-produced built-ins are rejected |
 | `tick()` | the current world tick |
@@ -690,6 +694,30 @@ if not started then
 end
 ```
 
+#### When a script fails
+
+A script that fails tells you. Any fault — a syntax error found at load, an error in a handler or
+timer, a budget fault — posts one chat line to the host naming the object, the script and the
+message, with the command to look closer:
+
+```text
+[script] greeter on block:overworld:10,64,3 failed: line 3: attempt to index a nil value (/script show block:overworld:10,64,3 greeter)
+```
+
+Line numbers are the lines of the source as you wrote it. Notices are rate-limited so a script that
+fails on every event cannot flood chat: the same message from one script appears at most once a
+minute, a different message at most once every ten seconds, and the world shows at most four per
+tick, summarising the rest as `…and N more script faults (/script list)`. Every fault is still
+recorded as the script's last error (`/script list`, `/script show`, the Inspector) and raises
+`script.faulted`. Check and dry runs never post notices.
+
+Two typo guards use the same channel, and neither changes what the script does. A name passed to
+`on`, `subscribe`, `h:on`, a handler attach or `/on` that is not a built-in event, is not declared
+on its target, and is one or two letters from a built-in still subscribes (custom event names stay
+open) but warns: `'block.broke' is not a built-in event — did you mean 'block.broken'?`. A dot-sugar
+write that creates a new custom attribute whose name looks like a mistyped built-in (`self.helth = 5`)
+still creates it and warns that `health` may have been meant.
+
 There is no bare `log(...)` global — calling it errors ("attempt to call a nil value"). There *is* a
 `print(...)`, but it is not a player-facing print: it's wired to the sandbox's own log sink, which
 writes to the host application's own console/stdout only (`[script] <line>`), never to chat, and
@@ -705,7 +733,7 @@ Every object (`self`, `world`, `player`, anything from `objects.get`/`.find`/`.b
 |---|---|
 | `h.ref`, `h.kind`, `h.name` | canonical ref text, kind string, display name |
 | `h:exists()` | whether it currently resolves live |
-| `h.<builtIn>` / `h.<builtIn> = v` | read/write a built-in field by dot-sugar; unknown/inapplicable reads as `nil`, an unknown write errors with a did-you-mean. Built-ins are matched snake_case-first, camelCase retried on a miss (`ev.subject.maxHealth` and `ev.subject.max_health` both work) |
+| `h.<builtIn>` / `h.<builtIn> = v` | read/write a built-in field by dot-sugar; unknown/inapplicable reads as `nil`. A write to a name that is not a built-in creates or updates a custom attribute of that name, and warns in chat when a new name looks like a mistyped built-in. Built-ins are matched snake_case-first, camelCase retried on a miss (`ev.subject.maxHealth` and `ev.subject.max_health` both work) |
 | `h:get(name)` / `h:set(name, value)` | same read/write, by call instead of dot-sugar — works for both built-ins and custom attributes. `h:set` requires exactly two arguments; Check validates the same liveness, protected-name, applicability, mutability, value, collision, and storage-cap rules as live execution without writing |
 | `h.attrs.<name>` / `h.attrs.<name> = v` | a custom attribute directly; `= nil` removes it. **`pairs(h.attrs)` is not supported** (no iteration hook) — read/write named custom attributes individually with `:get`/`:set`/`h.attrs.<name>` |
 | `h:define(name, value[, opts])` | declare a custom attribute with an initial value; later writes may change its supported value type. The optional table accepts only boolean `readonly` and `force` fields. Non-table options, unknown fields/typos, wrong types, and extra arguments are errors. Check also runs the same liveness, protected-name, value, script-collision, readonly/force, revision, and storage-cap admission as live execution without writing |
@@ -721,6 +749,7 @@ Every object (`self`, `world`, `player`, anything from `objects.get`/`.find`/`.b
 | `furnace:setFurnaceOutput(item)` | on the attached script's own loaded furnace, blast furnace, or smoker, replace the existing output-slot stack on the next furnace tick and redirect future matched-recipe output to a registered item while that script remains live. `"default"` clears the caller's registration. The recipe still consumes its original input and credits its original XP. Check performs the same target/item/stack-limit validation without registering; Run Once and unload refuse this lifecycle capability; another current script cannot silently take control |
 | `block:setBlock(name[, opts])` | replace the block; extra `opts` keys (besides the accepted-but-unused `notify`) are planned in deterministic key order as built-in attribute writes, e.g. `{facing="north"}`. The block name and complete options table are preflighted for field name, applicability, mutability, value type/enum, and range before any cell changes. CamelCase built-ins are canonicalized, and the first invalid option is reported with the original block left byte-for-byte unchanged. A valid plan is then committed with no fallible validation remaining; Check/dry-run runs the same preflight without committing it |
 | `block:breakBlock()` | break it naturally (drops items); takes no arguments |
+| `player:give(item[, count])` | grant a registered item to a player handle (typically `ev.by` in a `block.used` handler); `count` defaults to 1 and may not exceed the item's stack limit. Returns `false` when the inventory is full. Allowed in Run Once |
 
 Script-created lifecycle churn is bounded as well as validated: one originating script may perform
 at most 2 combined `h:attach`/`h:detach` operations per simulation tick, and all scripts together may
@@ -814,10 +843,23 @@ bounded); there is no `os`, `io`, `debug`, `package`, `load`, `require`, or `cor
 to 256 per world, `Sources/ElysiumCore/Scripting/ScriptTimers.swift:48`), surviving unload/reload
 and app restarts, firing the named handler (found via `register`, same as `/on`) at the due tick, or
 in the first phase after its owner next loads if it was overdue while the object was unloaded.
-`every` with a name is the *only* form that truly repeats — a durable timer's interval reschedules
-it every time it fires (`ScriptRuntimeAPI.swift:409-440`). A closure form (`after(n, fn)` /
-`every(n, fn)`) is live-only and always one-shot regardless of which of the two you call — it dies
-with the script's own unload and does not survive a save/reload.
+A durable `every` reschedules itself each time it fires. The function forms are live-only: they end
+when the script unloads, is edited, disabled or detached, when any part of the script faults, and at
+world exit, and they do not survive a save/reload. `after(n, fn)` runs once. `every(n, fn)` runs
+every `n` ticks, each beat as a fresh callback with the normal instruction budget; if a beat is
+still waiting (it called `wait`) when the next is due, that beat is skipped rather than piling up.
+A script may hold 16 repeating function timers and the world 256. Both forms return an id for
+`cancel(id)`.
+
+```lua
+-- blink a lamp every second for as long as this script is attached
+local on = false
+local blink = every(20, function()
+  on = not on
+  self:setBlock(on and "glowstone" or "sea_lantern")
+end)
+-- later: cancel(blink)
+```
 
 ```lua
 -- module-mode: register the handler, then schedule it
@@ -1035,7 +1077,8 @@ payload discoverable and strict; the handler can therefore complete and validate
 
 ```lua
 -- /script attach player equip module <this body> — proven by ScriptingSuiteSmoke.swift
-for _, b in ipairs(objects.find{kind = "block", type = "oak_sign", near = self, radius = 8, limit = 8}) do
+-- A script may attach or detach at most twice per tick, so this handles two signs per run.
+for _, b in ipairs(objects.find{kind = "block", type = "oak_sign", near = self, radius = 8, limit = 2}) do
   local has_greeter = false
   for _, attached in ipairs(b:scripts()) do
     if attached.name == "greeter" then has_greeter = true; break end
