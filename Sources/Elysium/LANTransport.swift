@@ -2515,10 +2515,15 @@ final class LANMultiplayerManager {
         }
     }
 
+    /// The join handshake calls this on the network queue, where the sound library must not be
+    /// read (it is main-actor state and the read traps). Only a main-thread caller refreshes the
+    /// script-sound catalog; the handshake sends the one captured when hosting started, and the
+    /// next replication batch that carries a summary brings the guest up to date.
     private func makeWorldSummary(playerCount: Int) -> LANWorldSummary {
+        let currentSounds = Thread.isMainThread ? activeGame?.scriptSoundNames() : nil
         if var summary = hostWorldSummary {
             summary.playerCount = max(1, min(summary.maxPlayers, playerCount + 1))
-            summary.scriptSoundNames = activeGame?.scriptSoundNames() ?? summary.scriptSoundNames
+            summary.scriptSoundNames = currentSounds ?? summary.scriptSoundNames
             return summary
         }
         return LANWorldSummary(
@@ -2531,7 +2536,7 @@ final class LANMultiplayerManager {
             playerCount: max(1, playerCount + 1),
             worldPreset: activeGame?.world.generationSettings.preset.rawValue ?? WorldPreset.normal.rawValue,
             rpgClassesEnabled: activeGame?.world.rule(RPG_CLASSES_GAME_RULE) ?? true,
-            scriptSoundNames: activeGame?.scriptSoundNames() ?? []
+            scriptSoundNames: currentSounds ?? []
         )
     }
 

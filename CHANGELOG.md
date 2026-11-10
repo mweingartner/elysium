@@ -5,6 +5,12 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **LAN hosting no longer crashes when a guest joins.** Since 1.3.0 the host read its script-sound
+  list from the network thread while answering a guest's join request, which stopped the game on
+  the spot: hosting a LAN world crashed the host as soon as anyone connected. The join now uses
+  the list captured when hosting started, and guests receive the current list with the next world
+  update.
+
 - Bumped the release and exact-LAN-compatibility version to 1.4.5 for the object-template fixes
   below.
 
