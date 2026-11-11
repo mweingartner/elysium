@@ -408,9 +408,11 @@ final class LANClientTemplateRoutingTests: XCTestCase {
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "guest", displayName: "Alex")
         session.updatePlayerState(makeLANPlayerState(guest.game.player, playerID: "guest", displayName: "Alex"))
-        guest.game.lanInventoryPublishHandler = { snapshot, revision in
-            _ = session.applyInventoryUpdate(LANInventoryUpdate(playerID: "guest", revision: revision, snapshot: snapshot),
-                                             from: "guest")
+        // As the transport does: each publish says which grants the guest had applied.
+        guest.game.lanInventoryPublishHandler = { [unowned game = guest.game] snapshot, revision in
+            _ = session.applyInventoryUpdate(LANInventoryUpdate(
+                playerID: "guest", revision: revision, snapshot: snapshot,
+                appliedGrantID: game.lanLastAppliedGrantID), from: "guest")
         }
         func carried(_ name: String = "oak_planks") -> Int { guest.game.player.countItem(iid(name)) }
         func hostCopy(_ name: String = "oak_planks") -> Int {

@@ -352,6 +352,8 @@ public final class LANMultiplayerHostSession {
         var lastTemplateUndo: TemplatePlacementUndoSnapshot?
         /// The grant that told this guest what its last paste cost; see `LANTemplateIntent.appliedGrantID`.
         var lastPaymentGrantID = 0
+        /// The payment this guest has not yet said it applied; see `lanInventory(_:without:)`.
+        var pendingTake: LANTemplatePendingTake?
         var lastAckTick = 0
         var lastAckSequence: UInt32 = 0
         /// Event-only block strikes have their own semantic sequence. Wire-frame sequencing
@@ -1559,14 +1561,15 @@ public final class LANMultiplayerHostSession {
             before: peer.inventory,
             after: normalized
         ) else { return false }
-        peer.inventory = LANPlayerInventorySnapshot(
+        if let pending = peer.pendingTake, pending.grantID <= update.appliedGrantID { peer.pendingTake = nil }
+        peer.inventory = lanInventory(LANPlayerInventorySnapshot(
             playerID: peer.playerID,
             selectedHotbarSlot: normalized.selectedHotbarSlot,
             slots: normalized.slots,
             xp: normalized.xp,
             xpLevel: normalized.xpLevel,
             xpProgress: normalized.xpProgress
-        )
+        ), without: peer.pendingTake)
         peer.inventoryRevision = update.revision
         peers[playerID] = peer
         return true

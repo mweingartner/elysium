@@ -542,7 +542,7 @@ public final class GameCore {
     public private(set) var rpgClockAdvancedThisTick = false
 
     // LAN client-authoritative inventory / container-edit / connection state
-    private var lanLocalInventoryRevision = 0
+    public private(set) var lanLocalInventoryRevision = 0
     private var lanLastPublishedInventory: LANPlayerInventorySnapshot?
     public private(set) var lanApplyingReplication = false
     private var lanContainerEditSeq = 0
@@ -561,7 +561,7 @@ public final class GameCore {
     /// player is temporarily held for unloaded chunks and their entity tick is
     /// not advancing `attackAnim`.
     private var miningSwingTicksRemaining = 0
-    private(set) var lanLastAppliedGrantID = 0
+    public private(set) var lanLastAppliedGrantID = 0
     public private(set) var lanConnectionLost = false
     private var lanDeferredReplication = LANDeferredReplicationBuffer()
     /// position/type of the mirrored container screen currently open (if any) — used to detect

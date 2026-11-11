@@ -42,6 +42,11 @@ extension LANMultiplayerHostSession {
             guard !pays || intent.appliedGrantID >= peer.lastPaymentGrantID else {
                 return .rejected(LANTemplateRefusal.paymentPending)
             }
+            // The guest publishes what it carries just before it asks. If that publish has not
+            // arrived (the host refuses guest messages while it catches up), wait for it.
+            guard !pays || peer.inventoryRevision >= intent.inventoryRevision else {
+                return .rejected(LANTemplateRefusal.inventoryNotHeard)
+            }
             guard let payload = intent.templateData else {
                 return .rejected(LANTemplateRefusal.missingTemplate)
             }
@@ -114,6 +119,9 @@ extension LANMultiplayerHostSession {
             // what is paid back is counted cell by cell as the job restores each one.
             var refundTally: LANTemplateRefundTally?
             if let receipt = undo.materials, receipt.total > 0 {
+                guard peer.inventoryRevision >= intent.inventoryRevision else {
+                    return .rejected(LANTemplateRefusal.inventoryNotHeard)
+                }
                 let short = lanTemplateRefundShortfall(
                     templateStandingMaterials(in: world, restoring: undo.cells),
                     receipt: receipt, inventory: peer.inventory, playerID: playerID)
@@ -243,6 +251,7 @@ extension LANMultiplayerHostSession {
               let grant = enqueueGrant(items: [], xp: 0, clearAll: false, to: playerID, take: payment.take)
         else { return }
         peers[playerID]?.lastPaymentGrantID = grant.grantID
+        peers[playerID]?.pendingTake = LANTemplatePendingTake(grantID: grant.grantID, take: payment.take)
     }
 
     /// A finished paste: pays back what the guest paid for blocks the job could not write and

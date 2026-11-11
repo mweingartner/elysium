@@ -52,7 +52,7 @@ extension GameCore {
             action: .placeTemplate, templateName: session.name,
             x: target.targetX, y: target.targetY, z: target.targetZ,
             rotation: session.rotationSteps, templateData: payload,
-            appliedGrantID: lanLastAppliedGrantID))
+            appliedGrantID: lanLastAppliedGrantID, inventoryRevision: lanLocalInventoryRevision))
         lanClientTemplates.awaiting = (.placeTemplate, LAN_CLIENT_TEMPLATE_ANSWER_TIMEOUT_TICKS)
         lanClientTemplates.placeRequestArm = lanClientTemplates.armSerial
         host?.showActionBar("Asking the host to place \"\(session.name)\"", 60)
@@ -71,7 +71,7 @@ extension GameCore {
         // The host sizes the refund to the room it believes this inventory has.
         publishLANInventoryNow()
         handler(LANTemplateIntent(action: .undoPlacement, templateName: "", x: 0, y: 0, z: 0, rotation: 0,
-                                  appliedGrantID: lanLastAppliedGrantID))
+                                  appliedGrantID: lanLastAppliedGrantID, inventoryRevision: lanLocalInventoryRevision))
         lanClientTemplates.awaiting = (.undoPlacement, LAN_CLIENT_TEMPLATE_ANSWER_TIMEOUT_TICKS)
         host?.showActionBar("Asking the host to undo your last object", 60)
         return true

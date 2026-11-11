@@ -679,9 +679,11 @@ final class LANMultiplayerManager {
                 self.send(.templateIntent(playerID: self.localPeerID, intent: intent), to: peer)
             }
         }
-        game.lanInventoryPublishHandler = { [weak self] snapshot, revision in
+        game.lanInventoryPublishHandler = { [weak self, weak game] snapshot, revision in
             guard let self else { return }
-            let update = LANInventoryUpdate(playerID: self.localPeerID, revision: revision, snapshot: snapshot)
+            // Read here, on the thread that built the snapshot: the two must describe one moment.
+            let update = LANInventoryUpdate(playerID: self.localPeerID, revision: revision, snapshot: snapshot,
+                                            appliedGrantID: game?.lanLastAppliedGrantID ?? 0)
             self.queue.async { [weak self] in
                 guard let self, let peer = self.clientPeer else { return }
                 self.send(.inventoryUpdate(update), to: peer)

@@ -2158,16 +2158,21 @@ public struct LANInventoryUpdate: Codable, Equatable {
         case playerID
         case revision
         case snapshot
+        case appliedGrantID
     }
 
     public var playerID: String
     public var revision: Int
     public var snapshot: LANPlayerInventorySnapshot
+    /// The last grant the guest had applied when it built this snapshot. A take the host sent
+    /// after that is not in the snapshot yet, and the host takes it out again before storing it.
+    public var appliedGrantID: Int
 
-    public init(playerID: String, revision: Int, snapshot: LANPlayerInventorySnapshot) {
+    public init(playerID: String, revision: Int, snapshot: LANPlayerInventorySnapshot, appliedGrantID: Int = 0) {
         self.playerID = String(playerID.prefix(128))
         self.revision = max(0, revision)
         self.snapshot = snapshot
+        self.appliedGrantID = max(0, appliedGrantID)
     }
 
     public init(from decoder: Decoder) throws {
@@ -2175,7 +2180,8 @@ public struct LANInventoryUpdate: Codable, Equatable {
         self.init(
             playerID: try c.decode(String.self, forKey: .playerID),
             revision: try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0,
-            snapshot: try c.decode(LANPlayerInventorySnapshot.self, forKey: .snapshot)
+            snapshot: try c.decode(LANPlayerInventorySnapshot.self, forKey: .snapshot),
+            appliedGrantID: try c.decodeIfPresent(Int.self, forKey: .appliedGrantID) ?? 0
         )
     }
 }

@@ -113,6 +113,25 @@ func lanTemplateRefundShortfall(_ materials: [Int: Int], receipt: TemplateMateri
     return TemplateMaterialRefund(leftover: refund.leftover).leftoverStacks
 }
 
+/// The payment the host has sent a guest and the guest has not yet said it applied. There is at
+/// most one: the next paying paste is admitted only after the guest has applied this one.
+struct LANTemplatePendingTake {
+    let grantID: Int
+    let take: [LANInventorySlotSnapshot]
+}
+
+/// An inventory the guest published, as the host must store it. A snapshot built before the
+/// guest applied a take still holds what that take removes; stored as it is, it would put paid
+/// materials back into the host's copy, and a guest that then died or reconnected would get
+/// them a second time. So a take the snapshot does not include yet is taken out of it here,
+/// with the function the guest itself will use.
+func lanInventory(_ published: LANPlayerInventorySnapshot,
+                  without pending: LANTemplatePendingTake?) -> LANPlayerInventorySnapshot {
+    guard let pending, var stacks = makeInventory(from: published) else { return published }
+    lanApplyTemplateTake(pending.take, to: &stacks)
+    return lanTemplateInventory(published, playerID: published.playerID, holding: stacks)
+}
+
 /// A guest removes what the host took for its paste: plain stacks of each item, wherever they
 /// sit now. An item the guest no longer holds is simply not there to remove.
 func lanApplyTemplateTake(_ take: [LANInventorySlotSnapshot], to inventory: inout [ItemStack?]) {

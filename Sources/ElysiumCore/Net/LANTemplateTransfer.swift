@@ -33,7 +33,7 @@ public struct LANTemplateIntent: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case action, templateName, x, y, z, rotation, templateData, appliedGrantID
+        case action, templateName, x, y, z, rotation, templateData, appliedGrantID, inventoryRevision
     }
 
     public var action: Action
@@ -50,12 +50,16 @@ public struct LANTemplateIntent: Codable, Equatable {
     /// paste from its copy of the guest's inventory, and that copy is only right once the guest
     /// has removed what the previous paste cost.
     public var appliedGrantID: Int
+    /// The revision of the inventory the guest published just before this request. The host
+    /// charges only once it holds that inventory, whatever happened to the publish on the way.
+    public var inventoryRevision: Int
 
     public init(action: Action, templateName: String, x: Int, y: Int, z: Int, rotation: Int,
-                templateData: Data? = nil, appliedGrantID: Int = 0) {
+                templateData: Data? = nil, appliedGrantID: Int = 0, inventoryRevision: Int = 0) {
         let limit = LAN_TEMPLATE_INTENT_MAX_COORDINATE
         self.action = action
         self.appliedGrantID = max(0, appliedGrantID)
+        self.inventoryRevision = max(0, inventoryRevision)
         self.templateName = sanitizedLANTemplateName(templateName)
         self.x = max(-limit, min(limit, x))
         self.y = max(-limit, min(limit, y))
@@ -80,7 +84,8 @@ public struct LANTemplateIntent: Codable, Equatable {
             rotation: try c.decodeIfPresent(Int.self, forKey: .rotation) ?? 0,
             templateData: (try c.decodeIfPresent(String.self, forKey: .templateData))
                 .flatMap(lanTemplateData(fromWireText:)),
-            appliedGrantID: try c.decodeIfPresent(Int.self, forKey: .appliedGrantID) ?? 0
+            appliedGrantID: try c.decodeIfPresent(Int.self, forKey: .appliedGrantID) ?? 0,
+            inventoryRevision: try c.decodeIfPresent(Int.self, forKey: .inventoryRevision) ?? 0
         )
     }
 
@@ -94,6 +99,7 @@ public struct LANTemplateIntent: Codable, Equatable {
         try c.encode(rotation, forKey: .rotation)
         try c.encodeIfPresent(templateData.map(lanTemplateWireText), forKey: .templateData)
         try c.encode(appliedGrantID, forKey: .appliedGrantID)
+        try c.encode(inventoryRevision, forKey: .inventoryRevision)
     }
 }
 
@@ -127,6 +133,7 @@ public enum LANTemplateRefusal {
     public static let undoOtherDimension = "The host is in another dimension than the object, so it cannot be undone now."
     public static let undoNotLoaded = "Move closer to the object to undo it."
     public static let paymentPending = "Your last object is still being paid for. Try again in a moment."
+    public static let inventoryNotHeard = "The host has not heard what you carry yet. Try again in a moment."
 
     /// The player-facing sentence for a refusal from `LANMultiplayerHostSession.authorize`.
     static func authorization(_ result: LANAuthorizationResult, for permission: LANGameplayPermission) -> String? {

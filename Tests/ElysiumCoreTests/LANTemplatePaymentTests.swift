@@ -45,6 +45,17 @@ final class LANTemplatePaymentTests: XCTestCase {
             LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: slots), from: "guest")
     }
 
+    /// The guest publishes what it carries, saying which grants it had applied when it looked.
+    @discardableResult
+    private func publish(_ session: LANMultiplayerHostSession, _ items: [(String, Int)], revision: Int,
+                         applied: Int, selectedHotbarSlot: Int = 0) -> Bool {
+        let slots = items.enumerated().map { LANInventorySlotSnapshot(slot: $0.offset, itemID: iid($0.element.0), count: $0.element.1) }
+        return session.applyInventoryUpdate(LANInventoryUpdate(
+            playerID: "guest", revision: revision,
+            snapshot: LANPlayerInventorySnapshot(playerID: "", selectedHotbarSlot: selectedHotbarSlot, slots: slots),
+            appliedGrantID: applied), from: "guest")
+    }
+
     /// What the host believes the guest carries, by item name.
     private func hostCopy(_ session: LANMultiplayerHostSession) -> [String: Int] {
         var counts: [String: Int] = [:]
@@ -60,14 +71,15 @@ final class LANTemplatePaymentTests: XCTestCase {
     }
 
     private func placeIntent(_ template: ObjectTemplate, x: Int = 4, y: Int = 64, z: Int = 4,
-                             appliedGrantID: Int = 0) throws -> LANTemplateIntent {
+                             appliedGrantID: Int = 0, inventoryRevision: Int = 0) throws -> LANTemplateIntent {
         LANTemplateIntent(action: .placeTemplate, templateName: template.name, x: x, y: y, z: z, rotation: 0,
-                          templateData: try lanGuestTemplatePayload(for: template), appliedGrantID: appliedGrantID)
+                          templateData: try lanGuestTemplatePayload(for: template), appliedGrantID: appliedGrantID,
+                          inventoryRevision: inventoryRevision)
     }
 
-    private func undoIntent(appliedGrantID: Int = 0) -> LANTemplateIntent {
+    private func undoIntent(appliedGrantID: Int = 0, inventoryRevision: Int = 0) -> LANTemplateIntent {
         LANTemplateIntent(action: .undoPlacement, templateName: "", x: 0, y: 0, z: 0, rotation: 0,
-                          appliedGrantID: appliedGrantID)
+                          appliedGrantID: appliedGrantID, inventoryRevision: inventoryRevision)
     }
 
     private func finish(_ session: LANMultiplayerHostSession, in world: World, budgetPerPeer: Int = 2_048,
@@ -222,29 +234,120 @@ final class LANTemplatePaymentTests: XCTestCase {
         _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 6)), from: "guest", world: world)
         let payment = try XCTUnwrap(session.drainGrants(for: "guest").first)
         _ = finish(session, in: world)
-        // A publish that left the guest before the grant arrived puts the old inventory back
-        // into the host's copy. Charging the next paste against it would be paying twice with
-        // the same planks.
-        XCTAssertTrue(session.applyInventoryUpdate(LANInventoryUpdate(
-            playerID: "guest", revision: 1,
-            snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: [
-                LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 10)])), from: "guest"))
-        XCTAssertEqual(hostCopy(session), ["oak_planks": 10])
-        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6), z: 8, appliedGrantID: payment.grantID - 1),
+        // The guest asks again before the payment has reached it. It still holds all ten planks
+        // and says so; six of them are spent.
+        XCTAssertTrue(publish(session, [("oak_planks", 10)], revision: 1, applied: payment.grantID - 1))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 4), z: 8, appliedGrantID: payment.grantID - 1),
                                                    from: "guest", world: world),
                        .rejected(LANTemplateRefusal.paymentPending))
         XCTAssertEqual(world.getBlock(4, 64, 8), 0)
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 4])
         // The guest applies the grant and publishes what it really holds; now it can ask again.
-        XCTAssertTrue(session.applyInventoryUpdate(LANInventoryUpdate(
-            playerID: "guest", revision: 2,
-            snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: [
-                LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 4)])), from: "guest"))
+        XCTAssertTrue(publish(session, [("oak_planks", 4)], revision: 2, applied: payment.grantID))
         XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6), z: 8, appliedGrantID: payment.grantID),
                                                    from: "guest", world: world),
                        .rejected("Missing 2 Oak Planks - nothing was placed."))
         XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 4), z: 8, appliedGrantID: payment.grantID),
                                                    from: "guest", world: world),
                        .accepted(action: .placeTemplate, name: "Row"))
+    }
+
+    /// Review finding: the guest publishes its inventory whenever it changes, and the selected
+    /// hotbar slot is part of it. A publish that left the guest after the click and before the
+    /// payment reached it still shows the materials. Stored as it came, it put them back into
+    /// the host's copy, and a guest that then reconnected was handed them a second time.
+    func testAPublishFromBeforeThePaymentArrivedDoesNotPutThePaidMaterialsBack() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 10), ("glass", 3)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6)), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        let payment = try XCTUnwrap(session.drainGrants(for: "guest").first)
+        _ = finish(session, in: world)
+
+        XCTAssertTrue(publish(session, [("oak_planks", 10), ("glass", 3)], revision: 1,
+                              applied: payment.grantID - 1, selectedHotbarSlot: 3))
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 4, "glass": 3])
+        let stored = try XCTUnwrap(session.peerInventorySnapshotsByPlayerID()["guest"])
+        XCTAssertEqual(stored.selectedHotbarSlot, 3, "everything else in the publish is kept")
+        // A guest that reconnects is given the host's copy as its inventory.
+        let restore = try XCTUnwrap(session.peerRestoreState(playerID: "guest"))
+        XCTAssertEqual(restore.inventory.slots.filter { $0.itemID == iid("oak_planks") }.reduce(0) { $0 + $1.count }, 4)
+        XCTAssertGreaterThanOrEqual(restore.grantID, payment.grantID, "and it will not apply the payment again")
+
+        // A second publish from before the payment is treated the same way.
+        XCTAssertTrue(publish(session, [("glass", 3), ("oak_planks", 10)], revision: 2, applied: 0))
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 4, "glass": 3])
+        // The guest applied the payment and says so: from here its inventory is stored as it is.
+        XCTAssertTrue(publish(session, [("oak_planks", 4), ("glass", 3)], revision: 3, applied: payment.grantID))
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 4, "glass": 3])
+        XCTAssertTrue(publish(session, [("oak_planks", 9), ("glass", 3)], revision: 4, applied: payment.grantID))
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 9, "glass": 3], "a payment is taken out once")
+    }
+
+    /// The same window, ending in the guest's death: what lies on the ground is what the guest
+    /// owned after paying, not what it owned before.
+    func testAGuestThatDiesBeforeThePaymentArrivedDropsOnlyWhatItStillOwns() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 10)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 6)), from: "guest", world: world)
+        let payment = try XCTUnwrap(session.drainGrants(for: "guest").first)
+        _ = finish(session, in: world)
+        XCTAssertTrue(publish(session, [("oak_planks", 10)], revision: 1, applied: payment.grantID - 1))
+        session.updatePlayerState(playerState(dead: true))
+        let drops = try XCTUnwrap(session.consumeDeathDrops(for: "guest"))
+        XCTAssertEqual(drops.inventory.slots.map(\.count), [4])
+        XCTAssertEqual((0..<6).filter { world.getBlockId(4 + $0, 64, 4) == Int(B.oak_planks) }.count, 6)
+    }
+
+    /// Review finding: a host that is catching up refuses guest messages, so the publish a guest
+    /// sends just before its request can be lost while the request arrives. The request names
+    /// the inventory it was made with, and the host waits until it holds that one.
+    func testAPayingPasteWaitsForTheInventoryItWasMadeWith() throws {
+        let world = loadedWorld()
+        let session = hostSession()
+        XCTAssertTrue(publish(session, [("oak_planks", 64)], revision: 4, applied: 0))
+        // Since then the guest used most of its planks; the publish that says so was lost.
+        let ask = try placeIntent(row("oak_planks", 6), inventoryRevision: 5)
+        XCTAssertEqual(session.applyTemplateIntent(ask, from: "guest", world: world),
+                       .rejected(LANTemplateRefusal.inventoryNotHeard))
+        XCTAssertEqual(world.getBlock(4, 64, 4), 0)
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 64])
+        XCTAssertTrue(session.drainGrants(for: "guest").isEmpty)
+        XCTAssertTrue(publish(session, [("oak_planks", 2)], revision: 5, applied: 0))
+        XCTAssertEqual(session.applyTemplateIntent(ask, from: "guest", world: world),
+                       .rejected("Missing 4 Oak Planks - nothing was placed."))
+        XCTAssertTrue(publish(session, [("oak_planks", 8)], revision: 6, applied: 0))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6), inventoryRevision: 6),
+                                                   from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+    }
+
+    func testAFreePasteDoesNotWaitForAnInventory() throws {
+        let world = loadedWorld()
+        let session = hostSession()
+        session.letPasteForFree("guest")
+        session.updatePlayerState(playerState(gameMode: GameMode.creative))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6), inventoryRevision: 99),
+                                                   from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+    }
+
+    func testAPaidUndoWaitsForTheInventoryItWasMadeWith() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 6)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 6)), from: "guest", world: world)
+        let payment = try XCTUnwrap(session.drainGrants(for: "guest").first)
+        _ = finish(session, in: world)
+        XCTAssertTrue(publish(session, [], revision: 1, applied: payment.grantID))
+        // The refund is sized to the room in the host's copy, so the copy must be the current one.
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(appliedGrantID: payment.grantID, inventoryRevision: 2),
+                                                   from: "guest", world: world),
+                       .rejected(LANTemplateRefusal.inventoryNotHeard))
+        XCTAssertEqual(world.getBlockId(4, 64, 4), Int(B.oak_planks))
+        XCTAssertTrue(publish(session, [], revision: 2, applied: payment.grantID))
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(appliedGrantID: payment.grantID, inventoryRevision: 2),
+                                                   from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
     }
 
     // MARK: - Undo
@@ -348,6 +451,37 @@ final class LANTemplatePaymentTests: XCTestCase {
         XCTAssertEqual(hostCopy(session), ["oak_planks": 8])
     }
 
+    /// Review finding: a potted plant is charged as a pot and a plant, and the plant is read
+    /// from the pot's block entity. When the job could not place the pot, only the pot was
+    /// paid back.
+    func testAPotThePasteCouldNotPlaceIsPaidBackWithItsPlant() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("flower_pot", 2), ("poppy", 2)])
+        func potted(_ dx: Int) -> BlockEntityData {
+            let pot = BlockEntityData(type: "lectern", x: dx, y: 0, z: 0)
+            pot.plant = "poppy"
+            return pot
+        }
+        // Two potted poppies at x 14 and x 17: one in chunk (0,0), one in chunk (1,0).
+        let pots = ObjectTemplate(name: "Pots", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 4, sizeY: 1, sizeZ: 1,
+                                  blocks: [0, 3].map { TemplateBlock(dx: $0, dy: 0, dz: 0, cell: cell(B.flower_pot, 0)) },
+                                  blockEntities: [potted(0), potted(3)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(pots, x: 14), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Pots"))
+        let paid = session.drainGrants(for: "guest")
+        XCTAssertEqual(takeCount(paid, "flower_pot"), 2)
+        XCTAssertEqual(takeCount(paid, "poppy"), 2)
+        world.removeChunk(1, 0)                             // unloads before the job reaches it
+        let results = finish(session, in: world)
+        guard case .placed(_, _, _, _, _, let payment)? = results.last else { return XCTFail("\(results)") }
+        XCTAssertEqual(payment, "Used 2 materials.")
+        let back = session.drainGrants(for: "guest")
+        XCTAssertEqual(itemCount(back, "flower_pot"), 1)
+        XCTAssertEqual(itemCount(back, "poppy"), 1, "the plant of the pot that was never placed")
+        XCTAssertEqual(hostCopy(session), ["flower_pot": 1, "poppy": 1])
+        XCTAssertEqual(world.getBlockEntity(14, 64, 4)?.plant, "poppy")
+    }
+
     // MARK: - The guest's side of a take
 
     func testATakeRemovesPlainItemsWhereverTheySitAndNothingElse() {
@@ -392,6 +526,26 @@ final class LANTemplatePaymentTests: XCTestCase {
         XCTAssertEqual(undoIntent(appliedGrantID: -9).appliedGrantID, 0)
         let legacy = Data(#"{"action":"undoPlacement","templateName":"","x":0,"y":0,"z":0,"rotation":0}"#.utf8)
         XCTAssertEqual(try JSONDecoder().decode(LANTemplateIntent.self, from: legacy).appliedGrantID, 0)
+        XCTAssertEqual(try JSONDecoder().decode(LANTemplateIntent.self, from: legacy).inventoryRevision, 0)
+    }
+
+    func testAnIntentAndAPublishCarryWhatTheHostChecksThroughTheCodec() throws {
+        let intent = try placeIntent(row("oak_planks", 1), appliedGrantID: 41, inventoryRevision: 17)
+        let decoded = try JSONDecoder().decode(LANTemplateIntent.self, from: JSONEncoder().encode(intent))
+        XCTAssertEqual(decoded.inventoryRevision, 17)
+        XCTAssertEqual(decoded, intent)
+        XCTAssertEqual(undoIntent(inventoryRevision: -3).inventoryRevision, 0)
+
+        let update = LANInventoryUpdate(
+            playerID: "guest", revision: 9,
+            snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: []), appliedGrantID: 12)
+        let message = try LANMultiplayerFrameCodec.decode(try LANMultiplayerFrameCodec.encode(.inventoryUpdate(update), sequence: 1)).message
+        guard case .inventoryUpdate(let received) = message else { return XCTFail("an inventory update must survive the frame codec") }
+        XCTAssertEqual(received.appliedGrantID, 12)
+        XCTAssertEqual(received, update)
+        let older = Data(#"{"playerID":"guest","revision":3,"snapshot":{"playerID":"guest","selectedHotbarSlot":0,"slots":[]}}"#.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(LANInventoryUpdate.self, from: older).appliedGrantID, 0)
+        XCTAssertEqual(LANInventoryUpdate(playerID: "guest", revision: 1, snapshot: update.snapshot, appliedGrantID: -5).appliedGrantID, 0)
     }
 
     // MARK: - Seeded: an unmodified guest never ends up ahead
@@ -432,7 +586,8 @@ final class LANTemplatePaymentTests: XCTestCase {
                 _ = session.applyInventoryUpdate(LANInventoryUpdate(
                     playerID: "guest", revision: revision,
                     snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0,
-                                                         slots: makeLANInventorySlotSnapshots(inventory))), from: "guest")
+                                                         slots: makeLANInventorySlotSnapshots(inventory)),
+                    appliedGrantID: appliedGrantID), from: "guest")
             }
             func deliverOne() {
                 guard !wire.isEmpty else { return }
@@ -451,37 +606,6 @@ final class LANTemplatePaymentTests: XCTestCase {
                 case 0:
                     publish()
                 case 1:
-    /// Review finding: a potted plant is charged as a pot and a plant, and the plant is read
-    /// from the pot's block entity. When the job could not place the pot, only the pot was
-    /// paid back.
-    func testAPotThePasteCouldNotPlaceIsPaidBackWithItsPlant() throws {
-        let world = loadedWorld()
-        let session = hostSession(carrying: [("flower_pot", 2), ("poppy", 2)])
-        func potted(_ dx: Int) -> BlockEntityData {
-            let pot = BlockEntityData(type: "lectern", x: dx, y: 0, z: 0)
-            pot.plant = "poppy"
-            return pot
-        }
-        // Two potted poppies at x 14 and x 17: one in chunk (0,0), one in chunk (1,0).
-        let pots = ObjectTemplate(name: "Pots", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 4, sizeY: 1, sizeZ: 1,
-                                  blocks: [0, 3].map { TemplateBlock(dx: $0, dy: 0, dz: 0, cell: cell(B.flower_pot, 0)) },
-                                  blockEntities: [potted(0), potted(3)])
-        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(pots, x: 14), from: "guest", world: world),
-                       .accepted(action: .placeTemplate, name: "Pots"))
-        let paid = session.drainGrants(for: "guest")
-        XCTAssertEqual(takeCount(paid, "flower_pot"), 2)
-        XCTAssertEqual(takeCount(paid, "poppy"), 2)
-        world.removeChunk(1, 0)                             // unloads before the job reaches it
-        let results = finish(session, in: world)
-        guard case .placed(_, _, _, _, _, let payment)? = results.last else { return XCTFail("\(results)") }
-        XCTAssertEqual(payment, "Used 2 materials.")
-        let back = session.drainGrants(for: "guest")
-        XCTAssertEqual(itemCount(back, "flower_pot"), 1)
-        XCTAssertEqual(itemCount(back, "poppy"), 1, "the plant of the pot that was never placed")
-        XCTAssertEqual(hostCopy(session), ["flower_pot": 1, "poppy": 1])
-        XCTAssertEqual(world.getBlockEntity(14, 64, 4)?.plant, "poppy")
-    }
-
                     let a = random.int(36), b = random.int(36)
                     inventory.swapAt(a, b)
                 case 2:
@@ -489,8 +613,9 @@ final class LANTemplatePaymentTests: XCTestCase {
                 case 3 where !pasted:
                     publish()                               // the client publishes before it asks
                     let count = 1 + random.int(12)
-                    let result = session.applyTemplateIntent(try placeIntent(row("oak_planks", count), x: 0, appliedGrantID: appliedGrantID),
-                                                             from: "guest", world: world)
+                    let result = session.applyTemplateIntent(
+                        try placeIntent(row("oak_planks", count), x: 0, appliedGrantID: appliedGrantID, inventoryRevision: revision),
+                        from: "guest", world: world)
                     wire.append(contentsOf: session.drainGrants(for: "guest"))
                     if case .accepted = result {
                         if random.int(2) == 0 { publish() } // a publish that crosses the grant
@@ -500,7 +625,8 @@ final class LANTemplatePaymentTests: XCTestCase {
                     }
                 case 4 where pasted:
                     publish()
-                    if case .accepted = session.applyTemplateIntent(undoIntent(appliedGrantID: appliedGrantID), from: "guest", world: world) {
+                    if case .accepted = session.applyTemplateIntent(
+                        undoIntent(appliedGrantID: appliedGrantID, inventoryRevision: revision), from: "guest", world: world) {
                         _ = finish(session, in: world)
                         wire.append(contentsOf: session.drainGrants(for: "guest"))
                         pasted = false
@@ -512,6 +638,9 @@ final class LANTemplatePaymentTests: XCTestCase {
                 // too much for a moment) or refunds it has yet to receive (too little).
                 let owedByGuest = wire.flatMap(\.take).reduce(0) { $0 + $1.count }
                 XCTAssertLessThanOrEqual(held() - owedByGuest + standing(), start, "round \(round)")
+                // And the host never believes the guest holds planks that stand in the world:
+                // its copy is what a reconnect hands back and what a death drops.
+                XCTAssertLessThanOrEqual((hostCopy(session)["oak_planks"] ?? 0) + standing(), start, "round \(round): host copy")
             }
             while !wire.isEmpty { deliverOne() }
             publish()
