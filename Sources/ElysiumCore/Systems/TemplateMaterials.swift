@@ -173,11 +173,18 @@ public enum TemplateMaterialError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-/// "12 Oak Planks, 2 Glass Panes and 3 more kinds": the first `limit` lines by name, then how
-/// many kinds are left out. The text has to fit a chat line and a LAN event.
-public func templateMaterialListText(_ lines: [TemplateMaterialLine], limit: Int = 4) -> String {
+/// "12 Oak Planks, 2 Glass Panes and 3 more kinds": the largest counts first, then by name, so
+/// the same materials read the same wherever they are listed; the first `limit` kinds, then
+/// how many are left out. The text has to fit a chat line and a LAN event.
+public func templateMaterialListText(_ unordered: [TemplateMaterialLine], limit: Int = 4) -> String {
+    func name(_ line: TemplateMaterialLine) -> String {
+        line.itemID >= 0 && line.itemID < itemDefs.count ? itemDefs[line.itemID].displayName : "items"
+    }
+    let lines = unordered.sorted { a, b in
+        a.count != b.count ? a.count > b.count : (name(a) != name(b) ? name(a) < name(b) : a.itemID < b.itemID)
+    }
     let shown = lines.prefix(max(1, limit)).map { line in
-        "\(line.count) \(line.itemID >= 0 && line.itemID < itemDefs.count ? itemDefs[line.itemID].displayName : "items")"
+        "\(line.count) \(name(line))"
     }
     let rest = lines.count - shown.count
     guard rest > 0 else {
@@ -185,6 +192,19 @@ public func templateMaterialListText(_ lines: [TemplateMaterialLine], limit: Int
                                : shown.joined()
     }
     return shown.joined(separator: ", ") + " and \(rest) more \(rest == 1 ? "kind" : "kinds")"
+}
+
+/// A refusal for the action bar, which holds one short line: a list of missing materials does
+/// not fit there and is in chat. Any other sentence is shown as it is.
+public func templateRefusalActionBarText(_ sentence: String) -> String {
+    if sentence.hasPrefix("Missing ") { return "Missing materials - nothing was placed" }
+    if sentence.hasPrefix("Survival can't place ") { return String(sentence.prefix { $0 != "." }) }
+    return sentence
+}
+
+extension TemplateError {
+    /// The error as the action bar shows it.
+    public var actionBarText: String { templateRefusalActionBarText(description) }
 }
 
 /// What the blocks of `template` cost, including the plant in each flower pot. `template` is

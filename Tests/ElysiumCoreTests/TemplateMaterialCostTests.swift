@@ -398,12 +398,24 @@ final class TemplateMaterialCostTests: XCTestCase {
         let lines = ["oak_planks", "glass", "oak_door", "stone", "dirt", "torch"].enumerated().map {
             TemplateMaterialLine(itemID: iid($0.element), count: $0.offset + 1)
         }
+        // The largest counts first, then by name, whatever order the lines come in.
         XCTAssertEqual(templateMaterialListText(Array(lines.prefix(1))), "1 Oak Planks")
-        XCTAssertEqual(templateMaterialListText(Array(lines.prefix(2))), "1 Oak Planks and 2 Glass")
-        XCTAssertEqual(templateMaterialListText(Array(lines.prefix(4))), "1 Oak Planks, 2 Glass, 3 Oak Door and 4 Stone")
+        XCTAssertEqual(templateMaterialListText(Array(lines.prefix(2))), "2 Glass and 1 Oak Planks")
+        XCTAssertEqual(templateMaterialListText(Array(lines.prefix(4))), "4 Stone, 3 Oak Door, 2 Glass and 1 Oak Planks")
         XCTAssertEqual(templateMaterialListText(Array(lines.prefix(5))),
-                       "1 Oak Planks, 2 Glass, 3 Oak Door, 4 Stone and 1 more kind")
-        XCTAssertEqual(templateMaterialListText(lines), "1 Oak Planks, 2 Glass, 3 Oak Door, 4 Stone and 2 more kinds")
+                       "5 Dirt, 4 Stone, 3 Oak Door, 2 Glass and 1 more kind")
+        XCTAssertEqual(templateMaterialListText(lines), "6 Torch, 5 Dirt, 4 Stone, 3 Oak Door and 2 more kinds")
+        XCTAssertEqual(templateMaterialListText(lines.reversed()), templateMaterialListText(lines))
+        let ties = ["torch", "glass", "oak_planks"].map { TemplateMaterialLine(itemID: iid($0), count: 2) }
+        XCTAssertEqual(templateMaterialListText(ties), "2 Glass, 2 Oak Planks and 2 Torch")
+        XCTAssertEqual(templateRefusalActionBarText("Missing 12 Oak Planks and 2 Glass - nothing was placed."),
+                       "Missing materials - nothing was placed")
+        XCTAssertEqual(templateRefusalActionBarText("Survival can't place Water. Switch to Creative to place this object."),
+                       "Survival can't place Water")
+        XCTAssertEqual(templateRefusalActionBarText(LANTemplateRefusal.outOfReach), LANTemplateRefusal.outOfReach)
+        XCTAssertEqual(TemplateError.materials("Missing 1 Dirt - nothing was placed.").actionBarText,
+                       "Missing materials - nothing was placed")
+        XCTAssertEqual(TemplateError.missingTarget.actionBarText, TemplateError.missingTarget.description)
         XCTAssertEqual(TemplateMaterialError.missing(Array(lines.prefix(1))).description,
                        "Missing 1 Oak Planks - nothing was placed.")
         XCTAssertEqual(TemplateMaterialError.noRoomForRefund(stacks: 1).description,

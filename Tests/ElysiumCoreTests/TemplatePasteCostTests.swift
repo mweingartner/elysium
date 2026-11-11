@@ -199,7 +199,8 @@ final class TemplatePasteCostTests: XCTestCase {
         fixture.game.mouseDown(0)
         XCTAssertFalse(fixture.game.hasActiveTemplatePlacementJob())
         XCTAssertTrue(fixture.screen.chat.contains("§cMissing 4 Oak Planks - nothing was placed."), "\(fixture.screen.chat)")
-        XCTAssertEqual(fixture.screen.actionBars.last, "Missing 4 Oak Planks - nothing was placed.")
+        XCTAssertEqual(fixture.screen.actionBars.last, "Missing materials - nothing was placed",
+                       "the action bar holds one short line; the list is in chat")
         for dx in 0..<9 { XCTAssertEqual(fixture.world.getBlock(origin.x + dx, origin.y, origin.z), 0) }
         XCTAssertEqual(carried(fixture, "oak_planks"), 2)
         XCTAssertEqual(stored(fixture, at: chestAt, "oak_planks"), 3)

@@ -6166,7 +6166,7 @@ public final class GameCore {
                     _ = try commitTemplatePlacement()
                 } catch let error as TemplateError {
                     host?.pushChat("§c" + error.description)
-                    host?.showActionBar(error.description, 70)
+                    host?.showActionBar(error.actionBarText, 70)
                 } catch {
                     host?.pushChat("§cPlace failed: \(error)")
                     host?.showActionBar("Place failed", 70)

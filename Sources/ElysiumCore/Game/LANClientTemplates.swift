@@ -129,6 +129,6 @@ extension GameCore {
 
     private func showLANClientTemplateProblem(_ text: String) {
         host?.pushChat("§c" + text)
-        host?.showActionBar(text, 70)
+        host?.showActionBar(templateRefusalActionBarText(text), 70)
     }
 }

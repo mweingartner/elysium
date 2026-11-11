@@ -3589,7 +3589,7 @@ final class TemplateBrowserScreen: Screen {
             game.host?.pushChat("§7Placing object \"\(template.name)\" - Left/Right arrows or scroll rotate, Up/Down arrows push/pull, left click to place")
         } catch let error as TemplateError {
             game.host?.pushChat("§c" + error.description)
-            game.host?.showActionBar(error.description, 70)
+            game.host?.showActionBar(error.actionBarText, 70)
         } catch {
             game.host?.pushChat("§cPlace failed: \(error)")
             game.host?.showActionBar("Place failed", 70)
