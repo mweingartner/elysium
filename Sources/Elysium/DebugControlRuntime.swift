@@ -1183,7 +1183,7 @@ final class DebugControlRuntime {
             return RuntimeError(.boundedLimit, error.description)
         case .destinationUnavailable:
             return RuntimeError(.unloaded, error.description, retryable: true)
-        case .destinationBlocked, .foundationTooDeep:
+        case .destinationBlocked, .foundationTooDeep, .materials:
             return RuntimeError(.placementRejected, error.description)
         case .invalidName, .missingTarget, .targetNotCloneable, .templateEmpty,
              .unsupportedVersion, .corruptTemplate:
