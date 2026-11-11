@@ -1061,6 +1061,10 @@ public final class LANMultiplayerHostSession {
 
         if shape == .door {
             guard id != Int(B.iron_door) else { return .ignored("unsupported use target") }
+            // Half a door does not open: the same rule as `useBlock` for the player at the keyboard.
+            guard twoCellPartnerCell(in: world, of: targetCell, intent.x, intent.y, intent.z) != nil else {
+                return .ignored("missing door half")
+            }
             let lowerY = (meta & 8) != 0 ? intent.y - 1 : intent.y
             let lowerCell = world.getBlock(intent.x, lowerY, intent.z)
             guard isValidLANReplicatedCell(lowerCell), (lowerCell >> 4) == id else {

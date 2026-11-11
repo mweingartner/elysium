@@ -1393,8 +1393,11 @@ public func registerRedstoneHandlers() {
             // support check
             let below = world.getBlock(x, lowerY - 1, z)
             if !blockDefs[below >> 4].fullCube && !isUpper {
+                // Only this door's own upper half goes with it. A lower half that stands alone
+                // has none, and what stands above it is somebody else's block.
+                let hasUpper = twoCellPartnerCell(in: world, of: lower, x, lowerY, z) != nil
                 world.breakBlockNaturally(x, lowerY, z)
-                world.setBlock(x, lowerY + 1, z, 0)
+                if hasUpper { world.setBlock(x, lowerY + 1, z, 0) }
             }
         }
     }

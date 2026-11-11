@@ -317,6 +317,27 @@ final class TwoCellBlockDropTests: XCTestCase {
         XCTAssertEqual(world.getBlock(9, 65, 6), Int(cell(B.stone)))
     }
 
+    /// A door that loses the block under it breaks, and its upper half goes with it. The lower
+    /// half of a door that has no upper half used to take whatever stood above it instead: any
+    /// block, with no drop.
+    func testADoorThatLosesItsSupportTakesOnlyItsOwnUpperHalf() {
+        let (world, _) = makeFixture()
+        registerAllSystems()                                // the door's neighbour handler
+        let door = Int(B.oak_door)
+        // A lone lower half under a chest, standing on nothing solid.
+        world.setBlock(6, 64, 6, Int(cell(B.oak_door, 0)), SET_NO_NEIGHBORS)
+        world.setBlock(6, 65, 6, Int(cell(B.chest, 2)), SET_NO_NEIGHBORS)
+        neighborHandlers[door]?(world, 6, 64, 6, world.getBlock(6, 64, 6), 6, 63, 6)
+        XCTAssertEqual(world.getBlock(6, 64, 6), 0, "the unsupported half breaks")
+        XCTAssertEqual(world.getBlock(6, 65, 6), Int(cell(B.chest, 2)), "the chest above it is not the door's")
+        // A whole door on nothing solid: both halves go.
+        world.setBlock(9, 64, 6, Int(cell(B.oak_door, 0)), SET_NO_NEIGHBORS)
+        world.setBlock(9, 65, 6, Int(cell(B.oak_door, 8)), SET_NO_NEIGHBORS)
+        neighborHandlers[door]?(world, 9, 64, 6, world.getBlock(9, 64, 6), 9, 63, 6)
+        XCTAssertEqual(world.getBlock(9, 64, 6), 0)
+        XCTAssertEqual(world.getBlock(9, 65, 6), 0)
+    }
+
     func testAWholeDoorStillOpensFromEitherHalf() {
         let (world, player) = makeFixture()
         world.setBlock(6, 63, 6, Int(cell(B.stone)))

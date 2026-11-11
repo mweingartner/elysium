@@ -41,7 +41,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   broken. A half left standing without its partner is worth nothing, also with Silk Touch, and
   breaking it leaves the neighbouring block alone. Such a half can no longer be used either:
   clicking the upper half of a door that had lost its lower half turned the block below it into
-  a door, and half a bed could be slept in.
+  a door, and half a bed could be slept in. And when the lower half of a door stood alone and lost
+  the block under it, it took whatever stood above it along; now only a door's own upper half
+  goes with it.
 
 - **A bed stays one bed when its template is turned.** A bed's two halves find each other through
   the way the bed faces. Turning a template with `R` moved the halves and left the facing as it

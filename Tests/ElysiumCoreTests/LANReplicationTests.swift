@@ -136,6 +136,23 @@ final class LANReplicationTests: XCTestCase {
                         "recording a legacy envelope cannot reintroduce class-only LAN authority")
     }
 
+    /// The host opens a door for a guest by the rule the local player has: half a door, pasted
+    /// or left by an explosion, does not open.
+    func testHostSessionDoesNotOpenHalfADoorForAGuest() {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5, yaw: .pi / 2)
+        forceSetBlock(world, x: 2, y: 63, z: 1, cell: Int(cell(B.stone, 0)))
+        forceSetBlock(world, x: 2, y: 64, z: 1, cell: Int(cell(B.oak_door, 0)))
+        forceSetBlock(world, x: 2, y: 65, z: 1, cell: Int(cell(B.stone, 0)))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 2, y: 64, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a", to: world),
+            .ignored("missing door half"))
+        XCTAssertEqual(world.getBlock(2, 64, 1), Int(cell(B.oak_door, 0)))
+        XCTAssertTrue(session.drainBlockChanges().isEmpty)
+    }
+
     func testHostSessionAppliesUseBlockIntentForOpenableBlocks() {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5, yaw: .pi / 2)
