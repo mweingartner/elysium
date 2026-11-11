@@ -330,7 +330,7 @@ public func registerAllBlocks() {
         registerBlock("\(c)_stained_glass", opaque: false, lightOpacity: 0, hardness: 0.3, sound: "glass", translucent: true, cullSame: true, drops: .none)
         registerBlock("\(c)_stained_glass_pane", shape: .pane, tex: .named("\(c)_stained_glass"), opaque: false, fullCube: false, hardness: 0.3, sound: "glass", translucent: true, drops: .none)
         registerBlock("\(c)_bed", shape: .bed, tex: .named("\(c)_wool"), opaque: false, fullCube: false, hardness: 0.2, sound: "wood", piston: .destroy,
-                      drops: .fn { m, _ in (m & 8) != 0 ? [] : [Drop("\(c)_bed")] })
+                      drops: .fn { m, _ in (m & 4) != 0 ? [] : [Drop("\(c)_bed")] })
         registerBlock("\(c)_candle", shape: .candle, tex: .named("\(c)_candle"), opaque: false, solid: false, fullCube: false, hardness: 0.1, sound: "candle", piston: .destroy,
                       drops: .fn { m, _ in [Drop("\(c)_candle", (m & 3) + 1)] })
         registerBlock("\(c)_shulker_box", opaque: false, hardness: 2, tool: .pickaxe, sound: "stone", piston: .blockEntity, drops: .none)

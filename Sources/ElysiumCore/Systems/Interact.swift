@@ -1635,21 +1635,17 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
         }
     }
 
-    // door/bed upper-half cleanup
-    let shape = shapeOf(id)
-    if shape == .door {
-        let upper = (c & 8) != 0
-        world.setBlock(x, upper ? y - 1 : y + 1, z, 0)
-    } else if shape == .bed {
-        let f = c & 3
-        let head = (c & 4) != 0
-        let ox = x + (head ? -1 : 1) * [0, 0, -1, 1][f]
-        let oz = z + (head ? -1 : 1) * [-1, 1, 0, 0][f]
-        if shapeOf(world.getBlock(ox, y, oz) >> 4) == .bed { world.setBlock(ox, y, oz, 0) }
-    } else if shape == .tallCross {
-        let upper = (c & 1) != 0
-        let oy = upper ? y - 1 : y + 1
-        if (world.getBlock(x, oy, z) >> 4) == id { world.setBlock(x, oy, z, 0, 2 | 4) }
+    // A two-cell block breaks as one: its other half goes with it. The pair's drop belongs to
+    // the primary half (`TwoCellBlocks.swift`), so a secondary half pays out only when its
+    // primary went with it, and then as that primary. `dropCell` 0 means nothing drops.
+    var dropCell = c
+    if let half = twoCellHalf(of: c) {
+        // A small dripleaf's halves fall separately, so its partner is left to pop.
+        let partner = shapeOf(id) == .smallDripleafShape ? nil : twoCellPartnerCell(in: world, of: c, x, y, z)
+        if partner != nil, let p = twoCellPartnerPosition(of: c, x, y, z) {
+            world.setBlock(p.x, p.y, p.z, 0, shapeOf(id) == .tallCross ? SET_NO_NEIGHBORS : SET_DEFAULT)
+        }
+        if half == .secondary { dropCell = partner ?? 0 }
     }
 
     // infested → spawn silverfish
@@ -1686,7 +1682,7 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
     _ = skillTreeAwardMiningBreak(player, cell: c, silkTouch: silk)
 
     // silk touch: drop the block itself
-    if silk {
+    if silk, dropCell != 0 {
         let itemId = blockToItem[id]
         if itemId >= 0 {
             spawnItem(world, Double(x) + 0.5, Double(y) + 0.3, Double(z) + 0.5, ItemStack(Int(itemId), 1))
@@ -1700,8 +1696,10 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
                        shears: toolDef?.type == "shears",
                        random: { gameRng.nextFloat() })
     let drops: [Drop]
-    if let dropsFn = def.drops {
-        drops = dropsFn(c & 15, ctx2)
+    if dropCell == 0 {
+        drops = []
+    } else if let dropsFn = def.drops {
+        drops = dropsFn(dropCell & 15, ctx2)
     } else {
         drops = defaultDrop(id)
     }

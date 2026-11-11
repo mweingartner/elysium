@@ -5,6 +5,14 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **Doors, beds and tall flowers drop exactly one item.** Each of them stands on two cells but is
+  one item, and the two halves were handled separately. Breaking a door or a tall flower by its
+  upper half dropped nothing; a bed caught in an explosion could drop two beds; and breaking a
+  door half that had lost its partner removed whatever block stood above or below it. The lower
+  half of a door, the foot of a bed and the base of a plant now carry the item, whichever half is
+  broken. A half left standing without its partner is worth nothing, also with Silk Touch, and
+  breaking it leaves the neighbouring block alone.
+
 - Bumped the release and exact-LAN-compatibility version to 1.4.6 for the LAN join fix and the
   guest object templates below. The template intent changed shape, so older binaries are rejected
   during the exact-version handshake.
