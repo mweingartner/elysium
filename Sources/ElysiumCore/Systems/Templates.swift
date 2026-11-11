@@ -1567,7 +1567,7 @@ public final class ObjectTemplatePlacementJob {
                 if notifyIndex >= undoLedger.positions.count {
                     resultValue = TemplatePlacementResult(
                         originX: originX, originY: originY, originZ: originZ,
-                        blocksPlaced: template.blocks.count,
+                        blocksPlaced: template.blocks.count - unplacedBlocks.count,
                         blockEntitiesPlaced: blockEntitiesPlaced,
                         blocksCleared: blocksCleared,
                         supportBlocksFilled: supportBlocksFilled)
