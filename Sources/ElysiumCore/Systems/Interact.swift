@@ -347,8 +347,8 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
     }
     // beds
     if shape == .bed {
-        // Half a bed is no bed: it gives no rest, no spawn point and no explosion.
-        guard twoCellPartnerCell(in: world, of: c, x, y, z) != nil else { return false }
+        // A head without a foot is no bed: it gives no rest, no spawn point and no explosion.
+        guard bedCellWorks(in: world, c, x, y, z) else { return false }
         return useBed(ctx, x, y, z, c)
     }
     if id == Int(B.respawn_anchor) {

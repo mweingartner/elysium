@@ -349,16 +349,19 @@ final class TwoCellBlockDropTests: XCTestCase {
         XCTAssertEqual(world.getBlock(6, 64, 6), Int(cell(B.oak_door, 1)))
     }
 
-    /// Half a bed gives no spawn point and, where beds explode, no explosion.
-    func testHalfABedIsNoBed() {
-        for head in [true, false] {
-            let (world, player) = makeFixture()
-            let before = player.spawnPoint.map { [$0.0, $0.1, $0.2] }
-            world.setBlock(6, 64, 6, Int(cell(B.red_bed, head ? 4 : 0)))
-            XCTAssertFalse(use(world, player, 6, 64, 6), head ? "head" : "foot")
-            XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, before)
-            XCTAssertEqual(world.getBlockId(6, 64, 6), Int(B.red_bed))
-        }
+    /// The foot is the bed: it carries the item, so a foot alone still gives a spawn point. A
+    /// head without a foot is a leftover: no spawn point and, where beds explode, no explosion.
+    func testAHeadWithoutAFootIsNoBedAndAFootAloneStillIs() {
+        let (world, player) = makeFixture()
+        let before = player.spawnPoint.map { [$0.0, $0.1, $0.2] }
+        world.setBlock(6, 64, 6, Int(cell(B.red_bed, 4)))
+        XCTAssertFalse(use(world, player, 6, 64, 6), "a head alone")
+        XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, before)
+        XCTAssertEqual(world.getBlockId(6, 64, 6), Int(B.red_bed))
+        world.setBlock(9, 64, 9, Int(cell(B.red_bed, 0)))
+        XCTAssertTrue(use(world, player, 9, 64, 9), "a foot alone")
+        XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, [9, 64, 9])
+
         let nether = World(dim: .nether, seed: 0xBED3)
         let info = dimInfo(.nether)
         let chunk = Chunk(cx: 0, cz: 0, minY: info.minY, height: info.height)
@@ -372,6 +375,25 @@ final class TwoCellBlockDropTests: XCTestCase {
         XCTAssertFalse(use(nether, visitor, 6, 64, 6))
         XCTAssertEqual(nether.getBlockId(6, 64, 6), Int(B.red_bed), "a loose head does not explode")
         XCTAssertEqual(nether.getBlockId(6, 64, 8), Int(B.glass))
+    }
+
+    /// World generation wrote an igloo's bed with its head south of its foot while both halves
+    /// say the bed faces west. Such a bed stands in existing worlds, and both ends of it must
+    /// stay a bed: a head counts when a foot of its own block lies next to it, wherever it faces.
+    func testAGeneratedBedWhoseHalvesDisagreeAboutItsFacingWorksFromBothEnds() {
+        let (world, player) = makeFixture()
+        world.setBlock(6, 64, 7, Int(cell(B.red_bed, 2 | 4)))      // as StructOverworld places it
+        world.setBlock(6, 64, 6, Int(cell(B.red_bed, 2)))
+        XCTAssertNil(twoCellPartnerCell(in: world, of: world.getBlock(6, 64, 7), 6, 64, 7),
+                     "by its facing this head has no foot, which is why the bed rule looks beside it")
+        XCTAssertTrue(use(world, player, 6, 64, 7), "the head end")
+        XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, [6, 64, 7])
+        XCTAssertTrue(use(world, player, 6, 64, 6), "the foot end")
+        XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, [6, 64, 6])
+        // A head beside a foot of another colour is still nobody's head.
+        world.setBlock(10, 64, 7, Int(cell(B.red_bed, 2 | 4)))
+        world.setBlock(10, 64, 6, Int(cell(B.blue_bed, 2)))
+        XCTAssertFalse(use(world, player, 10, 64, 7))
     }
 
     func testAWholeBedSetsTheSpawnPointFromEitherHalf() {
@@ -475,10 +497,11 @@ final class TwoCellBlockDropTests: XCTestCase {
         XCTAssertGreaterThan(doors, 8, "every wood's door is checked")
     }
 
-    /// A bed of every facing works from either half; a foot or a head of every facing alone does
-    /// not; and a head lying where its foot's head belongs but facing another way, or of another
-    /// colour, is not that bed's head, so neither half is a bed.
-    func testABedIsABedOnlyWithItsOwnOtherHalfInEveryFacing() {
+    /// A bed of every facing works from either half. A foot is the bed and works whatever lies
+    /// beside it. A head works only with a foot of its own block next to it: alone, or beside a
+    /// foot of another colour, it is no bed; beside a foot that faces another way it still is
+    /// (generated beds can disagree about their facing).
+    func testAFootIsTheBedAndAHeadNeedsAFootOfItsOwnBlockInEveryFacing() {
         let headOffset = [(0, -1), (0, 1), (-1, 0), (1, 0)]
         for facing in 0..<4 {
             let foot = (6, 64, 6)
@@ -509,8 +532,10 @@ final class TwoCellBlockDropTests: XCTestCase {
                     default:
                         break
                     }
-                    XCTAssertFalse(use(world, player, target.0, target.1, target.2), "\(half), \(which)")
-                    XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, before, "\(half), \(which)")
+                    let works = !useHead || half == "turned"
+                    XCTAssertEqual(use(world, player, target.0, target.1, target.2), works, "\(half), \(which)")
+                    XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] },
+                                   works ? [target.0, target.1, target.2] : before, "\(half), \(which)")
                     XCTAssertEqual(world.getBlock(target.0, target.1, target.2), ownCell, "\(half), \(which)")
                 }
             }

@@ -41,7 +41,8 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   broken. A half left standing without its partner is worth nothing, also with Silk Touch, and
   breaking it leaves the neighbouring block alone. Such a half can no longer be used either:
   clicking the upper half of a door that had lost its lower half turned the block below it into
-  a door, and half a bed could be slept in. And when the lower half of a door stood alone and lost
+  a door, and the head of a bed that had lost its foot could be slept in. The foot of a bed is
+  the bed and still works alone. And when the lower half of a door stood alone and lost
   the block under it, it took whatever stood above it along; now only a door's own upper half
   goes with it.
 

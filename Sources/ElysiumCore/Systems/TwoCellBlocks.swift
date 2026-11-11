@@ -52,6 +52,21 @@ func rotatedTemplateCell(_ cell: UInt16, rotationSteps: Int) -> UInt16 {
     return (cell & ~3) | UInt16(facing)
 }
 
+/// Whether the bed cell `cell` at `x, y, z` works as a bed. The foot is the bed: it carries the
+/// item, so a foot works by itself. A head works when a foot of its own block lies beside it:
+/// the one its facing names, or any foot of that block next to it, because worlds hold beds
+/// whose two halves disagree about the way the bed faces (world generation wrote an igloo's bed
+/// that way). A head with no foot beside it is a leftover and no bed.
+func bedCellWorks(in world: World, _ cell: Int, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+    guard twoCellHalf(of: cell) == .secondary else { return true }
+    if twoCellPartnerCell(in: world, of: cell, x, y, z) != nil { return true }
+    for side in 0..<4 {
+        let other = world.getBlock(x + FACE_DX[side], y, z + FACE_DZ[side])
+        if other >> 4 == cell >> 4, twoCellHalf(of: other) == .primary { return true }
+    }
+    return false
+}
+
 /// The other half of the two-cell block at `x, y, z`, as it stands in `world`: the same block,
 /// the opposite half and, for a bed, the same facing. Nil when the half stands alone.
 func twoCellPartnerCell(in world: World, of cell: Int, _ x: Int, _ y: Int, _ z: Int) -> Int? {
