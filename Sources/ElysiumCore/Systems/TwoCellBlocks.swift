@@ -33,9 +33,10 @@ func twoCellPartnerPosition(of cell: Int, _ x: Int, _ y: Int, _ z: Int) -> (x: I
     guard let half = twoCellHalf(of: cell) else { return nil }
     let towardSecondary = half == .primary ? 1 : -1
     if blockDefs[cell >> 4].shape == .bed {
-        // A bed's head lies one cell from its foot, in the direction the bed faces.
+        // A bed's head lies one cell from its foot, in the direction the bed faces. Its two
+        // facing bits are the horizontal facing of `FACE_DX` and `FACE_DZ`: the bed compass.
         let facing = cell & 3
-        return (x + towardSecondary * [0, 0, -1, 1][facing], y, z + towardSecondary * [-1, 1, 0, 0][facing])
+        return (x + towardSecondary * FACE_DX[facing], y, z + towardSecondary * FACE_DZ[facing])
     }
     return (x, y + towardSecondary, z)
 }
@@ -44,12 +45,17 @@ func twoCellPartnerPosition(of cell: Int, _ x: Int, _ y: Int, _ z: Int) -> (x: I
 /// template keeps the facing of its blocks when it is turned, with one exception: a bed's two
 /// halves find each other through their facing, so a bed that is turned without it is two loose
 /// halves. Each quarter turn takes north to east, east to south, south to west, west to north.
+/// That is not a second table: the step from the bed's foot to its head is turned the way the
+/// template's cells are, so the head is always where the turned foot looks for it.
 func rotatedTemplateCell(_ cell: UInt16, rotationSteps: Int) -> UInt16 {
     let id = Int(cell >> 4)
     guard id > 0, id < blockDefs.count, blockDefs[id].shape == .bed else { return cell }
-    var facing = Int(cell & 3)
-    for _ in 0..<(((rotationSteps % 4) + 4) % 4) { facing = [3, 2, 0, 1][facing] }
-    return (cell & ~3) | UInt16(facing)
+    // In a template one cell wide and one deep, turning moves a position about the origin.
+    let facing = Int(cell & 3)
+    let step = rotatedTemplateCoordinate(x: FACE_DX[facing], y: 0, z: FACE_DZ[facing],
+                                         sizeX: 1, sizeZ: 1, rotationSteps: rotationSteps)
+    guard let turned = (0..<4).first(where: { FACE_DX[$0] == step.x && FACE_DZ[$0] == step.z }) else { return cell }
+    return (cell & ~3) | UInt16(turned)
 }
 
 /// Whether the bed cell `cell` at `x, y, z` works as a bed. The foot is the bed: it carries the
