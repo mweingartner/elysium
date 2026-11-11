@@ -5,6 +5,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.5.1 for the LAN inventory fixes
+  below. The inventory grant and the container edit changed shape, so older binaries are
+  rejected during the exact-version handshake.
+
 - **A LAN guest's items no longer end up in two places, or in none.** The host keeps a copy of
   what each guest carries, and the two could drift apart when messages crossed on the way.
   - Placing a block, wearing a tool or shooting an arrow and then moving that stack before the
