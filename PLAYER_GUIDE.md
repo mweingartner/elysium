@@ -593,7 +593,11 @@ filled in under the object is part of the cost. An object that holds a block no 
 (water, lava, fire, a portal, bedrock) cannot be placed in survival, and chat names the block.
 
 `Command-Z` pays you back for every block of the placement that still stands. A block you mined or
-replaced in the meantime is not paid back. What came from your inventory returns there and the
+replaced in the meantime is not paid back. One case costs more than it looks: if you place an
+object onto blocks that are already the same (the same object twice on one spot, or two
+placements that overlap), those blocks are paid for again, and undo does not return them, because
+undo puts back what stood there before and that is the same block. To repair a damaged build,
+place the missing blocks by hand. What came from your inventory returns there and the
 rest goes back into nearby containers. If there is no room for it, undo changes nothing and says
 how many stacks it needs room for.
 

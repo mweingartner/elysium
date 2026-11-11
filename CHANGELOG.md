@@ -22,7 +22,8 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   holding a block no item places (water, lava, fire, a portal, bedrock) cannot be placed in
   survival. `Command-Z` pays back every block of the placement that still stands, to where it came
   from; a block you mined or replaced is not paid back, and without room for the refund undo
-  changes nothing and says how much room it needs. LAN guests pay too, from what they carry: the
+  changes nothing and says how much room it needs. Placing an object onto blocks that are already
+  the same pays for them again, and undo does not return those. LAN guests pay too, from what they carry: the
   host takes the materials when it accepts a placement and pays them back on undo, and a guest
   places for free only in creative mode the host has granted.
 
