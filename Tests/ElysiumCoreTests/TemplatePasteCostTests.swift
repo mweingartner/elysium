@@ -509,6 +509,268 @@ final class TemplatePasteCostTests: XCTestCase {
         XCTAssertEqual(counts, [iid("oak_planks"): 1, iid("oak_slab"): 2, iid("oak_door"): 1])
     }
 
+    // MARK: - The click decides
+
+    /// The game mode that counts is the one at the click, not the one at arming: a preview
+    /// armed in Creative and placed in Survival is charged, and the other way round is free.
+    func testTheModeAtTheClickDecidesWhetherAPasteIsCharged() throws {
+        let armedInCreative = try makeFixture(mode: GameMode.creative)
+        try arm(armedInCreative, planks(3))
+        armedInCreative.player.setGameMode(GameMode.survival)
+        XCTAssertThrowsError(try armedInCreative.game.commitTemplatePlacement()) { error in
+            XCTAssertEqual(error as? TemplateError, .materials("Missing 3 Oak Planks - nothing was placed."))
+        }
+        XCTAssertFalse(armedInCreative.game.hasActiveTemplatePlacementJob())
+
+        let pond = object("Pond", [(0, 0, 0, "oak_planks", 0), (1, 0, 0, "water", 0)])
+        let pondInCreative = try makeFixture(mode: GameMode.creative)
+        give(pondInCreative, "oak_planks", 5, slot: 0)
+        try arm(pondInCreative, pond)
+        pondInCreative.player.setGameMode(GameMode.survival)
+        XCTAssertThrowsError(try pondInCreative.game.commitTemplatePlacement()) { error in
+            XCTAssertEqual(error as? TemplateError,
+                           .materials("Survival can't place Water. Switch to Creative to place this object."))
+        }
+        XCTAssertEqual(carried(pondInCreative, "oak_planks"), 5)
+
+        let armedInSurvival = try makeFixture()
+        give(armedInSurvival, "oak_planks", 3, slot: 0)
+        let origin = try arm(armedInSurvival, planks(3))
+        armedInSurvival.player.setGameMode(GameMode.creative)
+        _ = try armedInSurvival.game.commitTemplatePlacement()
+        finishJob(armedInSurvival)
+        XCTAssertEqual(carried(armedInSurvival, "oak_planks"), 3, "a Creative click is free")
+        XCTAssertEqual(armedInSurvival.world.getBlockId(origin.x, origin.y, origin.z), Int(B.oak_planks))
+        XCTAssertNil(armedInSurvival.game.lastTemplatePlacementUndo?.materials)
+    }
+
+    /// The charge comes after the job is admitted, so a paste the world refuses (here, no
+    /// ground within reach under it) costs nothing and leaves the preview armed.
+    func testAPasteTheWorldRefusesCostsNothing() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 2, slot: 0)
+        give(fixture, "dirt", 64, slot: 1)
+        let origin = try arm(fixture, planks(2))
+        for y in 56..<origin.y { fixture.world.setBlock(origin.x, y, origin.z, 0, SET_SILENT) }
+        XCTAssertThrowsError(try fixture.game.commitTemplatePlacement()) { error in
+            guard case .foundationTooDeep? = error as? TemplateError else { return XCTFail("\(error)") }
+        }
+        XCTAssertEqual(carried(fixture, "oak_planks"), 2)
+        XCTAssertEqual(carried(fixture, "dirt"), 64)
+        XCTAssertFalse(fixture.game.hasActiveTemplatePlacementJob())
+        XCTAssertNotNil(fixture.game.templatePlacementTarget(), "the preview stays armed")
+    }
+
+    // MARK: - Settling a finished paste
+
+    /// The dirt for the ground is charged at the click for every cell the plan will fill. A
+    /// cell that holds dirt by the time the job gets there is not filled, so its dirt comes back
+    /// when the job finishes, and the chat counts only what the paste kept.
+    func testGroundThatNoLongerNeedsFillingWhenTheJobGetsThereIsPaidBack() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 3, slot: 0)
+        give(fixture, "dirt", 5, slot: 1)
+        let origin = try arm(fixture, planks(3))
+        fixture.world.setBlock(origin.x, origin.y - 1, origin.z, 0, SET_SILENT)
+        fixture.world.setBlock(origin.x + 1, origin.y - 1, origin.z, 0, SET_SILENT)
+        _ = try fixture.game.commitTemplatePlacement()
+        XCTAssertEqual(carried(fixture, "dirt"), 3, "two cells of ground are paid at the click")
+
+        // Before the job reaches the ground, the player fills one of the two cells by hand.
+        fixture.world.setBlock(origin.x + 1, origin.y - 1, origin.z, Int(cell(B.dirt)), SET_SILENT)
+        finishJob(fixture)
+        XCTAssertEqual(carried(fixture, "dirt"), 4, "the cell that needed no filling is paid back")
+        XCTAssertEqual(fixture.game.lastTemplatePlacementUndo?.materials?.paid(iid("dirt")), 1)
+        XCTAssertTrue(fixture.screen.chat.contains("§7Used 4 materials: 4 from your inventory."), "\(fixture.screen.chat)")
+
+        // Undo pays back the dirt the paste filled, and not the dirt the player put there.
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(carried(fixture, "dirt"), 5)
+        XCTAssertEqual(carried(fixture, "oak_planks"), 3)
+        XCTAssertEqual(fixture.world.getBlockId(origin.x + 1, origin.y - 1, origin.z), Int(B.dirt),
+                       "undo puts back what stood there when the job took the cell")
+    }
+
+    /// Blocks in a chunk that unloaded after the click and before the job reached them are not
+    /// written, so they are paid back when the job finishes, to where they came from. A chest
+    /// the paste itself just placed is never where that refund goes: the next undo removes it.
+    func testBlocksThePasteCouldNotWriteArePaidBackButNotIntoAChestThePasteJustPlaced() throws {
+        let fixture = try makeFixture()
+        let width = 24
+        let probe = planks(width)
+        let origin = try arm(fixture, probe)
+        fixture.game.cancelTemplatePlacement(showMessage: false)
+        let removedCX = floorDiv(origin.x, CHUNK_W), removedCZ = floorDiv(origin.z, CHUNK_W)
+        XCTAssertNotEqual(removedCZ, 0, "the chunk that unloads must not be the player's")
+        let unplaced = (0..<(width - 1)).filter { floorDiv(origin.x + $0, CHUNK_W) == removedCX }.count
+        XCTAssertGreaterThan(unplaced, 0)
+        XCTAssertNotEqual(floorDiv(origin.x + width - 1, CHUNK_W), removedCX, "the chest lands in a loaded chunk")
+
+        // Planks along x, a chest at the far end; the planks come from a chest farther away. The
+        // paste empties the source's first slot and leaves a full stack beside it, so the refund
+        // finds no part stack to top up and must pick an empty slot: the nearest is in the
+        // pasted chest, which is exactly where it must not go.
+        let object = self.object("Shed", (0..<(width - 1)).map { ($0, 0, 0, "oak_planks", 0) }
+                                   + [(width - 1, 0, 0, "chest", 2)])
+        give(fixture, "chest", 1, slot: 0)
+        let source = (30, 64, -35)
+        placeChest(fixture, at: source, [("oak_planks", width - 1), ("oak_planks", 64)])
+        XCTAssertEqual(try arm(fixture, object).x, origin.x)
+        let pasted = (origin.x + width - 1, origin.y, origin.z)
+        XCTAssertLessThan(pasted.0 * pasted.0 + pasted.2 * pasted.2, source.0 * source.0 + source.2 * source.2,
+                          "the pasted chest is nearer the player than the source chest")
+        _ = try fixture.game.commitTemplatePlacement()
+        XCTAssertEqual(stored(fixture, at: source, "oak_planks"), 64)
+        fixture.world.removeChunk(removedCX, removedCZ)
+        finishJob(fixture)
+
+        XCTAssertEqual(fixture.world.getBlockId(pasted.0, pasted.1, pasted.2), Int(B.chest))
+        XCTAssertEqual(fixture.world.getBlockEntity(pasted.0, pasted.1, pasted.2)?.items?.compactMap { $0 }.count, 0,
+                       "nothing is refunded into the chest the paste just placed")
+        XCTAssertEqual(stored(fixture, at: source, "oak_planks"), 64 + unplaced,
+                       "the planks that were not placed go back to the chest they came from")
+        let receipt = try XCTUnwrap(fixture.game.lastTemplatePlacementUndo?.materials)
+        XCTAssertEqual(receipt.paid(iid("oak_planks")), width - 1 - unplaced)
+        XCTAssertEqual(receipt.paid(iid("chest")), 1)
+        XCTAssertEqual(dropped(fixture, "oak_planks"), 0)
+    }
+
+    /// A flower pot whose chunk unloads before the job reaches it was charged for the pot and
+    /// for its plant. Both should come back when the job finishes.
+    func testAPottedPlantThePasteCouldNotWriteIsPaidBackWithItsPot() throws {
+        let fixture = try makeFixture()
+        let width = 20
+        let origin = try arm(fixture, planks(width))
+        fixture.game.cancelTemplatePlacement(showMessage: false)
+        let removedCX = floorDiv(origin.x, CHUNK_W), removedCZ = floorDiv(origin.z, CHUNK_W)
+        XCTAssertNotEqual(removedCZ, 0)
+        let pot = BlockEntityData(type: "lectern", x: 0, y: 0, z: 0)
+        pot.plant = "poppy"
+        let object = self.object("Potted", [(0, 0, 0, "flower_pot", 0)]
+                                   + (1..<width).map { ($0, 0, 0, "oak_planks", 0) }, blockEntities: [pot])
+        give(fixture, "flower_pot", 1, slot: 0)
+        give(fixture, "poppy", 1, slot: 1)
+        give(fixture, "oak_planks", width - 1, slot: 2)
+        XCTAssertEqual(try arm(fixture, object).x, origin.x)
+        _ = try fixture.game.commitTemplatePlacement()
+        XCTAssertEqual(carried(fixture, "poppy"), 0)
+        fixture.world.removeChunk(removedCX, removedCZ)
+        finishJob(fixture)
+
+        XCTAssertEqual(carried(fixture, "flower_pot"), 1, "the pot that was not placed is paid back")
+        // The plant is charged from the pot's block entity, so it is paid back from the block
+        // entities the job did not attach. No later undo could return it: no pot ever stood.
+        XCTAssertEqual(carried(fixture, "poppy"), 1, "and so is the plant that was charged with it")
+    }
+
+    /// Pasting the same object twice on the same spot charges twice, and undoing the second
+    /// paste pays nothing back: the restore puts back the first paste's planks, which are the
+    /// planks that stand, so it destroys nothing it could pay for. This is the accepted downside
+    /// named in the decision record ("a block pasted onto an identical block is not refunded on
+    /// undo"). Paying the second paste back when it finishes was considered and refused: the
+    /// undo record still holds the first planks, so mining the row and then undoing would hand
+    /// out three planks from nothing. The second half of this test walks that loop.
+    func testAPasteOverTheSameObjectIsPaidForAndItsUndoNeitherPaysNorMakesBlocks() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 6, slot: 0)
+        let first = try paste(fixture, planks(3))
+        XCTAssertEqual(carried(fixture, "oak_planks"), 3)
+        let second = try paste(fixture, planks(3))
+        XCTAssertEqual([second.x, second.y, second.z], [first.x, first.y, first.z], "the same spot")
+        XCTAssertEqual(carried(fixture, "oak_planks"), 0, "the second paste is charged in full")
+        XCTAssertEqual(fixture.game.lastTemplatePlacementUndo?.materials?.paid(iid("oak_planks")), 3)
+
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        for dx in 0..<3 {
+            XCTAssertEqual(fixture.world.getBlockId(first.x + dx, first.y, first.z), Int(B.oak_planks),
+                           "the first paste's planks are what undo puts back")
+        }
+        XCTAssertEqual(carried(fixture, "oak_planks"), 0, "the restore changed no cell, so nothing is paid back")
+
+        // The loop a refund at completion would open: paste over the row, mine it, undo.
+        give(fixture, "oak_planks", 3, slot: 0)
+        let again = try paste(fixture, planks(3))
+        XCTAssertEqual([again.x, again.y, again.z], [first.x, first.y, first.z])
+        XCTAssertEqual(carried(fixture, "oak_planks"), 0)
+        for dx in 0..<3 { fixture.world.setBlock(first.x + dx, first.y, first.z, 0) }
+        give(fixture, "oak_planks", 3, slot: 0)                     // what mining the row yields
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        let standing = (0..<3).filter { fixture.world.getBlockId(first.x + $0, first.y, first.z) == Int(B.oak_planks) }.count
+        XCTAssertEqual(standing, 3, "undo puts back the row that stood before the paste")
+        XCTAssertEqual(carried(fixture, "oak_planks") + standing, 6,
+                       "six planks before the paste (three carried to pay, three standing), six after")
+    }
+
+    // MARK: - Where a refund may go
+
+    /// An undo removes the chest the paste placed. A refund put into it would vanish with it,
+    /// so when the inventory is full the undo refuses rather than refund into that chest.
+    func testAnUndoRefundIsNeverPutIntoAContainerTheUndoRemoves() throws {
+        let fixture = try makeFixture()
+        give(fixture, "chest", 1, slot: 0)
+        give(fixture, "oak_planks", 4, slot: 1)
+        let origin = try paste(fixture, object("Crate", [(0, 0, 0, "chest", 2), (1, 0, 0, "oak_planks", 0),
+                                                         (2, 0, 0, "oak_planks", 0), (3, 0, 0, "oak_planks", 0),
+                                                         (4, 0, 0, "oak_planks", 0)]))
+        XCTAssertEqual(fixture.world.getBlockId(origin.x, origin.y, origin.z), Int(B.chest))
+        for slot in fixture.player.inventory.indices { give(fixture, "cobblestone", 64, slot: slot) }
+
+        XCTAssertFalse(fixture.game.undoLastTemplatePlacement())
+        XCTAssertTrue(fixture.screen.chat.contains("§cMake room for 2 more stacks to undo this object."), "\(fixture.screen.chat)")
+        XCTAssertEqual(fixture.world.getBlockId(origin.x, origin.y, origin.z), Int(B.chest), "nothing was undone")
+        XCTAssertEqual(stored(fixture, at: (origin.x, origin.y, origin.z), "oak_planks"), 0)
+
+        fixture.player.inventory[10] = nil
+        fixture.player.inventory[11] = nil
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(carried(fixture, "chest"), 1)
+        XCTAssertEqual(carried(fixture, "oak_planks"), 4)
+    }
+
+    /// A container whose loot has not been rolled, and a furnace, may pay for a paste but never
+    /// take a refund: the loot roll would overwrite it, and a furnace is no storage.
+    func testARefundIsNeverPutIntoAnUnrolledLootChestOrAFurnace() throws {
+        for kind in ["loot chest", "furnace"] {
+            let fixture = try makeFixture()
+            give(fixture, "oak_planks", 3, slot: 0)
+            let origin = try paste(fixture, planks(3))
+            let at = (-5, 64, -5)
+            if kind == "loot chest" {
+                let chest = placeChest(fixture, at: at, [])
+                chest.lootTable = "chests/simple_dungeon"
+            } else {
+                fixture.world.setBlock(at.0, at.1, at.2, Int(cell(B.furnace, 2)), SET_SILENT)
+                fixture.world.setBlockEntity(try XCTUnwrap(placementBlockEntity(Int(B.furnace), at.0, at.1, at.2)))
+            }
+            for slot in fixture.player.inventory.indices { give(fixture, "cobblestone", 64, slot: slot) }
+
+            XCTAssertFalse(fixture.game.undoLastTemplatePlacement(), kind)
+            XCTAssertEqual(fixture.world.getBlockId(origin.x, origin.y, origin.z), Int(B.oak_planks), kind)
+            XCTAssertEqual(stored(fixture, at: at, "oak_planks"), 0, kind)
+        }
+    }
+
+    /// Undo pays back from what stands in the cells, not from the receipt: the dirt a paste
+    /// filled and the player then dug out is not paid back, nor is anything the receipt never
+    /// held, however much of it stands in the paste's cells.
+    func testUndoPaysForTheGroundOnlyWhereThePastesDirtStillStands() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 2, slot: 0)
+        give(fixture, "dirt", 2, slot: 1)
+        let origin = try arm(fixture, planks(2))
+        for dx in 0..<2 { fixture.world.setBlock(origin.x + dx, origin.y - 1, origin.z, 0, SET_SILENT) }
+        _ = try fixture.game.commitTemplatePlacement()
+        finishJob(fixture)
+        XCTAssertEqual(carried(fixture, "dirt"), 0)
+        fixture.world.setBlock(origin.x, origin.y - 1, origin.z, 0)                       // dug out, kept nothing
+        fixture.world.setBlock(origin.x + 1, origin.y, origin.z, Int(cell(B.diamond_block)))  // a plank replaced
+
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(carried(fixture, "dirt"), 1)
+        XCTAssertEqual(carried(fixture, "oak_planks"), 1)
+        XCTAssertEqual(carried(fixture, "diamond_block"), 0)
+    }
+
     // MARK: - Seeded: paste, mine, undo never gains anything
 
     private struct SplitMix64 {

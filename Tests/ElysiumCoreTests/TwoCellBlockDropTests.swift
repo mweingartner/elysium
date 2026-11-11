@@ -162,6 +162,93 @@ final class TwoCellBlockDropTests: XCTestCase {
         XCTAssertEqual(droppedCount(world, "red_bed"), 2)
     }
 
+    /// A bed's head lies one cell from its foot in the direction it faces. For each facing,
+    /// breaking either half finds the other, removes it and drops one bed.
+    func testABedOfEveryFacingBreaksAsOneFromEitherHalf() {
+        let headOffset = [(0, -1), (0, 1), (-1, 0), (1, 0)]   // facing 0...3: north, south, west, east
+        for facing in 0..<4 {
+            for breakHead in [false, true] {
+                let (world, player) = makeFixture()
+                let foot = (6, 64, 6)
+                let head = (6 + headOffset[facing].0, 64, 6 + headOffset[facing].1)
+                world.setBlock(foot.0, foot.1, foot.2, Int(cell(B.red_bed, facing)))
+                world.setBlock(head.0, head.1, head.2, Int(cell(B.red_bed, 4 | facing)))
+                let footPartner = twoCellPartnerPosition(of: Int(cell(B.red_bed, facing)), foot.0, foot.1, foot.2)
+                XCTAssertEqual(footPartner.map { [$0.x, $0.y, $0.z] }, [head.0, head.1, head.2], "facing \(facing)")
+                let target = breakHead ? head : foot
+                breakByHand(world, player, target.0, target.1, target.2)
+                let which = "facing \(facing), \(breakHead ? "head" : "foot")"
+                XCTAssertEqual(droppedCount(world, "red_bed"), 1, which)
+                XCTAssertEqual(world.getBlock(foot.0, foot.1, foot.2), 0, which)
+                XCTAssertEqual(world.getBlock(head.0, head.1, head.2), 0, which)
+            }
+        }
+    }
+
+    /// The cell where a partner would be holds the same block, but the same half: two feet end
+    /// to end, two door bottoms stacked, two sunflower bases stacked. Neither is the other's
+    /// partner, so breaking one leaves the other standing, and each pays out as itself.
+    func testTheSameHalfOfTheSameBlockIsNeverTakenForThePartner() {
+        let (world, player) = makeFixture()
+        world.setBlock(6, 64, 6, Int(cell(B.red_bed, 0)))             // foot facing north
+        world.setBlock(6, 64, 5, Int(cell(B.red_bed, 0)))             // another foot where its head would be
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.red_bed, 0)), 6, 64, 6))
+        breakByHand(world, player, 6, 64, 6)
+        XCTAssertEqual(world.getBlock(6, 64, 5), Int(cell(B.red_bed, 0)), "the other foot stays")
+        XCTAssertEqual(droppedCount(world, "red_bed"), 1)
+
+        // Stacked halves lose their support when the lower one goes, so these are asked of the
+        // partner rule itself rather than of what stands after a break.
+        world.setBlock(10, 64, 6, Int(cell(B.oak_door, 1)), SET_NO_NEIGHBORS)
+        world.setBlock(10, 65, 6, Int(cell(B.oak_door, 1)), SET_NO_NEIGHBORS)   // a second lower half
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.oak_door, 1)), 10, 64, 6))
+        world.setBlock(10, 66, 6, Int(cell(B.oak_door, 8)), SET_NO_NEIGHBORS)
+        world.setBlock(10, 67, 6, Int(cell(B.oak_door, 8)), SET_NO_NEIGHBORS)   // two upper halves
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.oak_door, 8)), 10, 67, 6))
+        XCTAssertEqual(twoCellPartnerCell(in: world, of: Int(cell(B.oak_door, 8)), 10, 66, 6), Int(cell(B.oak_door, 1)),
+                       "a lower half under an upper half is its partner")
+
+        world.setBlock(3, 64, 3, Int(cell(B.sunflower, 0)), SET_NO_NEIGHBORS)
+        world.setBlock(3, 65, 3, Int(cell(B.sunflower, 0)), SET_NO_NEIGHBORS)   // a second base
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.sunflower, 0)), 3, 64, 3))
+        world.setBlock(3, 66, 3, Int(cell(B.sunflower, 1)), SET_NO_NEIGHBORS)
+        XCTAssertEqual(twoCellPartnerCell(in: world, of: Int(cell(B.sunflower, 0)), 3, 65, 3), Int(cell(B.sunflower, 1)))
+    }
+
+    /// The upper half of a different door, or the top of a different tall plant, over a lower
+    /// half is not its partner: breaking the lower half leaves it, and breaking it alone gives
+    /// nothing.
+    func testADifferentBlocksUpperHalfIsNotThePartner() {
+        let (world, player) = makeFixture()
+        world.setBlock(6, 63, 6, Int(cell(B.stone)))
+        world.setBlock(6, 64, 6, Int(cell(B.oak_door, 1)), SET_NO_NEIGHBORS)
+        world.setBlock(6, 65, 6, Int(cell(B.birch_door, 8)), SET_NO_NEIGHBORS)
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.oak_door, 1)), 6, 64, 6))
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.birch_door, 8)), 6, 65, 6))
+        breakByHand(world, player, 6, 65, 6)
+        XCTAssertEqual(droppedCount(world, "birch_door"), 0, "an upper half without its own lower half")
+
+        world.setBlock(9, 63, 6, Int(cell(B.grass_block)))
+        world.setBlock(9, 64, 6, Int(cell(B.sunflower, 0)), SET_NO_NEIGHBORS)
+        world.setBlock(9, 65, 6, Int(cell(B.lilac, 1)), SET_NO_NEIGHBORS)
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.sunflower, 0)), 9, 64, 6))
+        breakByHand(world, player, 9, 65, 6)
+        XCTAssertEqual(droppedCount(world, "lilac"), 0, "a lilac top over a sunflower is worth nothing")
+        XCTAssertEqual(droppedCount(world, "sunflower"), 0, "and it is not the sunflower's top either")
+        XCTAssertEqual(world.getBlockId(9, 64, 6), Int(B.sunflower), "the sunflower is not taken with it")
+    }
+
+    func testAPartnerIsOnlyLookedForAroundATwoCellBlock() {
+        let (world, _) = makeFixture()
+        XCTAssertNil(twoCellPartnerPosition(of: Int(cell(B.stone)), 1, 64, 1))
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.stone)), 1, 64, 1))
+        XCTAssertNil(twoCellPartnerCell(in: world, of: 0, 1, 64, 1))
+        let up = twoCellPartnerPosition(of: Int(cell(B.oak_door, 0)), 1, 64, 1)
+        XCTAssertEqual(up.map { [$0.x, $0.y, $0.z] }, [1, 65, 1])
+        let down = twoCellPartnerPosition(of: Int(cell(B.oak_door, 8)), 1, 64, 1)
+        XCTAssertEqual(down.map { [$0.x, $0.y, $0.z] }, [1, 63, 1])
+    }
+
     /// Power 1 drops every destroyed block (the chance is 1 / power), so the count is exact.
     func testAnExplosionThatDestroysBothHalvesOfABedDropsOneBed() {
         let (world, _) = makeFixture()

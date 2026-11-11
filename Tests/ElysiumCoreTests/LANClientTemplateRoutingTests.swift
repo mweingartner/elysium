@@ -499,6 +499,146 @@ final class LANClientTemplateRoutingTests: XCTestCase {
         XCTAssertNotNil(guest.game.player.inventory[0]?.data.contents)
     }
 
+    // MARK: - a survival guest pays: the client's part, deeper
+
+    /// Every request is preceded by a publish of what the guest holds now, even when nothing
+    /// changed since the last one, and names the last grant the guest applied.
+    func testAGuestPublishesJustBeforeEachRequestAndNamesTheLastGrantItApplied() throws {
+        let guest = makeGuest(mode: GameMode.survival)
+        var log: [String] = []
+        guest.game.lanInventoryPublishHandler = { snapshot, revision in
+            log.append("publish \(revision) planks \(snapshot.slots.filter { $0.itemID == iid("oak_planks") }.reduce(0) { $0 + $1.count })")
+        }
+        guest.game.lanTemplateIntentHandler = { intent in log.append("intent \(intent.action) applied \(intent.appliedGrantID)") }
+        guest.game.player.inventory[4] = stack("oak_planks", 2)
+        step(guest.game, ticks: 1)
+        guest.game.applyLANGrant(LANInventoryGrant(playerID: "", grantID: 7,
+                                                   items: [LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 1)],
+                                                   xp: 0, clearAll: false))
+        step(guest.game, ticks: 1)
+        XCTAssertEqual(log, ["publish 1 planks 2"], "a plain grant is not published back: the host already counted it")
+        log = []
+
+        try guest.game.beginTemplatePlacement(marker())
+        guest.game.mouseDown(0)
+        XCTAssertEqual(log, ["publish 3 planks 3", "intent placeTemplate applied 7"])
+        try deliver(.rejected(LANTemplateRefusal.outOfReach), to: guest)
+        log = []
+        XCTAssertTrue(guest.game.undoLastTemplatePlacement())
+        XCTAssertEqual(log, ["publish 4 planks 3", "intent undoPlacement applied 7"], "published although nothing changed")
+    }
+
+    /// After a take the guest publishes on its next tick, so the host's copy cannot stay behind
+    /// a publish that crossed the take. A grant that only adds is not published back.
+    func testAfterATakeTheGuestPublishesAgainOnItsNextTick() {
+        let guest = makeGuest(mode: GameMode.survival)
+        var published: [Int] = []
+        guest.game.lanInventoryPublishHandler = { snapshot, _ in
+            published.append(snapshot.slots.filter { $0.itemID == iid("oak_planks") }.reduce(0) { $0 + $1.count })
+        }
+        guest.game.player.inventory[2] = stack("oak_planks", 9)
+        step(guest.game, ticks: 1)
+        XCTAssertEqual(published, [9])
+        guest.game.applyLANGrant(LANInventoryGrant(playerID: "", grantID: 1, items: [], xp: 0, clearAll: false,
+                                                   take: [LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 4)]))
+        XCTAssertEqual(guest.game.player.countItem(iid("oak_planks")), 5)
+        XCTAssertEqual(guest.game.lanLastAppliedGrantID, 1)
+        step(guest.game, ticks: 1)
+        XCTAssertEqual(published, [9, 5])
+        step(guest.game, ticks: 3)
+        XCTAssertEqual(published, [9, 5], "once")
+        // A take the guest already applied is not applied twice, and is not published again.
+        guest.game.applyLANGrant(LANInventoryGrant(playerID: "", grantID: 1, items: [], xp: 0, clearAll: false,
+                                                   take: [LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 4)]))
+        step(guest.game, ticks: 1)
+        XCTAssertEqual(guest.game.player.countItem(iid("oak_planks")), 5)
+        XCTAssertEqual(published, [9, 5])
+    }
+
+    /// The client's own check counts what the host's take can remove: a renamed stack is no
+    /// payment there either. A guest in creative is not checked at all.
+    func testTheClientCountsOnlyWhatATakeCanRemove() throws {
+        let renamed = makeGuest(mode: GameMode.survival)
+        renamed.game.player.inventory[0] = ItemStack(iid("oak_planks"), 5, label: "Keep")
+        try renamed.game.beginTemplatePlacement(marker())
+        renamed.game.mouseDown(0)
+        XCTAssertTrue(sentIntents.isEmpty)
+        XCTAssertEqual(renamed.screen.chat.last, "§cMissing 1 Oak Planks - nothing was placed.")
+
+        let creative = makeGuest(mode: GameMode.creative)
+        try creative.game.beginTemplatePlacement(marker())
+        creative.game.mouseDown(0)
+        XCTAssertEqual(sentIntents.count, 1, "creative carries nothing and still asks: the host decides")
+    }
+
+    /// FINDING (low): a grant that only adds (a refund, a pickup) sets the client's last
+    /// published inventory to what it holds after the grant, on the assumption that the host's
+    /// copy already counts it. A publish that crossed the grant, such as the one every request
+    /// now sends first, has replaced the copy with the inventory before the grant, and nothing
+    /// publishes again. Here the guest asks to undo once more while its refund is on its way:
+    /// the host's copy stays one plank short until something else changes the inventory. A
+    /// disconnect or a death in that time loses the plank. It is a loss only, a picked-up item
+    /// has always had the same window, and the decision record lists it as accepted. Expected to
+    /// fail until the host keeps every grant a published snapshot does not include yet, as it
+    /// already does for a payment (`Peer.pendingTake`). Publishing back after every grant is not
+    /// the fix: a publish that crosses a second grant would drop a host-crafted quality item
+    /// from the copy, and the host refuses a later publish that brings one back.
+    func testARefundThatCrossesTheNextRequestsPublishIsMissingFromTheHostsCopy() throws {
+        let guest = makeGuest(mode: GameMode.survival)
+        let hostWorld = World(dim: .overworld, seed: 42)
+        _ = groundChunk(in: hostWorld)
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "guest", displayName: "Alex")
+        session.updatePlayerState(makeLANPlayerState(guest.game.player, playerID: "guest", displayName: "Alex"))
+        guest.game.lanInventoryPublishHandler = { [unowned game = guest.game] snapshot, revision in
+            _ = session.applyInventoryUpdate(LANInventoryUpdate(
+                playerID: "guest", revision: revision, snapshot: snapshot,
+                appliedGrantID: game.lanLastAppliedGrantID), from: "guest")
+        }
+        func carried() -> Int { guest.game.player.countItem(iid("oak_planks")) }
+        func hostCopy() -> Int {
+            (session.peerInventorySnapshotsByPlayerID()["guest"]?.slots ?? [])
+                .filter { $0.itemID == iid("oak_planks") }.reduce(0) { $0 + $1.count }
+        }
+        func deliverGrants(_ grants: [LANInventoryGrant]) throws {
+            for grant in grants {
+                guard case .inventoryGrant(let received) = try overTheWire(.inventoryGrant(grant)) else {
+                    return XCTFail("a grant must survive the frame codec")
+                }
+                guest.game.applyLANGrant(received)
+            }
+        }
+        guest.game.player.inventory[7] = stack("oak_planks", 5)
+        guest.game.player.inventory[8] = stack("dirt", 3)
+        try guest.game.beginTemplatePlacement(marker())
+        guest.game.mouseDown(0)
+        let admitted = try sendLastIntent(to: session, world: hostWorld)
+        XCTAssertEqual(admitted, .accepted(action: .placeTemplate, name: "Marker"))
+        try deliverGrants(session.drainGrants(for: "guest"))
+        try deliver(admitted, to: guest)
+        try runHostJob(session, world: hostWorld, to: guest)
+        step(guest.game, ticks: 1)
+        XCTAssertEqual(hostCopy(), 4)
+
+        XCTAssertTrue(guest.game.undoLastTemplatePlacement())
+        let undoing = try sendLastIntent(to: session, world: hostWorld)
+        XCTAssertEqual(undoing, .accepted(action: .undoPlacement, name: "Marker"))
+        try deliver(undoing, to: guest)
+        try runHostJob(session, world: hostWorld, to: guest)
+        let refund = session.drainGrants(for: "guest")          // still on its way
+        XCTAssertEqual(hostCopy(), 5, "the host counted the refund into its copy")
+
+        XCTAssertTrue(guest.game.undoLastTemplatePlacement())
+        XCTAssertEqual(try sendLastIntent(to: session, world: hostWorld), .rejected(LANTemplateRefusal.nothingToUndo))
+        XCTAssertEqual(hostCopy(), 4, "the request's publish did not hold the refund yet")
+        try deliverGrants(refund)
+        step(guest.game, ticks: 5)
+        XCTAssertEqual(carried(), 5)
+        XCTExpectFailure("T2: an additive grant that crossed a publish is never published back") {
+            XCTAssertEqual(hostCopy(), carried())
+        }
+    }
+
     // MARK: - rotation, end to end
 
     /// Five different blocks, no two alike, in a box whose anchor is not at its origin: any

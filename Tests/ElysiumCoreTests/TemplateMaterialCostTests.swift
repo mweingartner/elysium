@@ -304,6 +304,138 @@ final class TemplateMaterialCostTests: XCTestCase {
         }
     }
 
+    /// Each named reset, over all sixteen metadata values. A case whose name stops matching a
+    /// registered block would reset nothing, so every name is looked up first.
+    func testEveryNamedResetLeavesTheBlockAsPlantedAndKeepsTheOtherBits() throws {
+        let resets: [(name: String, placed: (Int) -> Int)] = [
+            ("wheat", { $0 & ~7 }), ("carrots", { $0 & ~7 }), ("potatoes", { $0 & ~7 }),
+            ("beetroots", { $0 & ~3 }), ("nether_wart", { $0 & ~3 }), ("sweet_berry_bush", { $0 & ~3 }),
+            ("sniffer_egg", { $0 & ~3 }), ("torchflower_crop", { $0 & ~1 }),
+            ("melon_stem", { _ in 0 }), ("pumpkin_stem", { _ in 0 }), ("pitcher_crop", { _ in 0 }),
+            ("composter", { _ in 0 }), ("cauldron", { _ in 0 }), ("cake", { _ in 0 }),
+            ("chorus_flower", { _ in 0 }), ("kelp", { _ in 0 }),
+            ("cocoa", { $0 & 3 }), ("turtle_egg", { $0 & 3 }),
+            ("cave_vines", { $0 & ~8 }), ("cave_vines_plant", { $0 & ~8 }), ("mangrove_propagule", { $0 & ~8 }),
+            ("respawn_anchor", { $0 & ~7 }),
+            ("piston", { $0 & 7 }), ("sticky_piston", { $0 & 7 }),
+        ]
+        for (name, placed) in resets {
+            XCTAssertNotNil(bidOpt(name), "\(name) is not a registered block, so its reset is dead")
+            guard bidOpt(name) != nil else { continue }
+            for meta in 0..<16 {
+                XCTAssertEqual(survivalMeta(name, meta), placed(meta), "\(name) meta \(meta)")
+            }
+            XCTAssertTrue((0..<16).contains { survivalMeta(name, $0) != $0 }, "\(name) has a reset that does something")
+        }
+        var saplings = 0
+        for id in 1..<blockDefs.count where blockDefs[id].name.hasSuffix("_sapling") {
+            for meta in 0..<16 {
+                XCTAssertEqual(survivalMeta(blockDefs[id].name, meta), meta & ~8, "\(blockDefs[id].name) meta \(meta)")
+            }
+            saplings += 1
+        }
+        XCTAssertGreaterThanOrEqual(saplings, 6, "every wood's sapling is checked")
+
+        // Every other block keeps its metadata: a reset nobody named is a change of rule.
+        let named = Set(resets.map(\.name))
+        for id in 1..<blockDefs.count where !named.contains(blockDefs[id].name) && !blockDefs[id].name.hasSuffix("_sapling") {
+            for meta in 0..<16 {
+                XCTAssertEqual(survivalMeta(blockDefs[id].name, meta), meta, "\(blockDefs[id].name) meta \(meta)")
+            }
+        }
+    }
+
+    func testALayerOfSnowCostsOneSnowItemForEachLayer() {
+        let snow = templateCellCharge(cellValue("snow", 0))
+        guard case .item(let itemID, _) = snow else { return XCTFail("\(snow)") }
+        for layers in 1...8 {
+            XCTAssertEqual(charge("snow", layers - 1), .item(itemID: itemID, count: layers), "\(layers) layers")
+            XCTAssertEqual(charge("snow", (layers - 1) | 8), .item(itemID: itemID, count: layers),
+                           "the high bit is not a layer")
+        }
+        XCTAssertEqual(charge("oak_slab", 3), item("oak_slab"), "a slab's third shape is one slab")
+        XCTAssertEqual(charge("oak_slab", 2 | 4), item("oak_slab", 2), "a waterlogged double slab is still two")
+    }
+
+    // MARK: - What stands in one cell
+
+    func testStandingMaterialsAreWhatTheCellWouldHaveBeenCharged() {
+        let world = World(dim: .overworld, seed: 0x57A1)
+        let info = dimInfo(.overworld)
+        world.setChunk(Chunk(cx: 0, cz: 0, minY: info.minY, height: info.height))
+        world.setBlock(1, 70, 1, cellValue("flower_pot"), SET_SILENT)
+        let pot = BlockEntityData(type: "lectern", x: 1, y: 70, z: 1)
+        pot.plant = "poppy"
+        world.setBlockEntity(pot)
+        world.setBlock(2, 70, 1, cellValue("flower_pot"), SET_SILENT)
+        world.setBlock(3, 70, 1, cellValue("oak_door", 8), SET_SILENT)
+        world.setBlock(4, 70, 1, cellValue("water"), SET_SILENT)
+        world.setBlock(5, 70, 1, cellValue("candle", 3), SET_SILENT)
+        world.setBlock(6, 70, 1, cellValue("redstone_torch_off"), SET_SILENT)
+
+        XCTAssertEqual(templateStandingMaterials(in: world, 1, 70, 1),
+                       [TemplateMaterialLine(itemID: iid("flower_pot"), count: 1),
+                        TemplateMaterialLine(itemID: iid("poppy"), count: 1)])
+        XCTAssertEqual(templateStandingMaterials(in: world, 2, 70, 1),
+                       [TemplateMaterialLine(itemID: iid("flower_pot"), count: 1)], "an empty pot")
+        XCTAssertEqual(templateStandingMaterials(in: world, 3, 70, 1), [], "a door's upper half was free")
+        XCTAssertEqual(templateStandingMaterials(in: world, 4, 70, 1), [], "nobody paid for water")
+        XCTAssertEqual(templateStandingMaterials(in: world, 5, 70, 1), [TemplateMaterialLine(itemID: iid("candle"), count: 4)])
+        XCTAssertEqual(templateStandingMaterials(in: world, 6, 70, 1),
+                       [TemplateMaterialLine(itemID: iid("redstone_torch"), count: 1)])
+        XCTAssertEqual(templateStandingMaterials(in: world, 7, 70, 1), [], "air")
+        XCTAssertEqual(templateStandingMaterials(in: world, 40, 70, 1), [], "a chunk that is not loaded")
+    }
+
+    // MARK: - Seeded: what the browser quotes is what the click charges
+
+    /// The browser quotes the template as saved; the click charges it as rotated. For seeded
+    /// objects of real blocks and every rotation, the bill is the same, so the quote never
+    /// promises a price the click does not keep. The bill is also the same however often it is
+    /// worked out, and preparing an already prepared template changes nothing.
+    func testTheBillIsTheSameForEveryRotationAndPreparingTwiceChangesNothingForSeededObjects() throws {
+        var state: UInt64 = 0xB111_0F00
+        func next(_ bound: Int) -> Int {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return Int((z ^ (z >> 31)) % UInt64(max(1, bound)))
+        }
+        let buyable = (1..<blockDefs.count).filter { id in
+            if case .item = templateCellCharge(Int(cell(UInt16(id), 0))) { return true }
+            return false
+        }
+        var compared = 0
+        for round in 0..<200 {
+            var blocks: [(Int, Int, Int, Int)] = []
+            var potted: [BlockEntityData] = []
+            for dx in 0..<4 { for dy in 0..<2 { for dz in 0..<3 where next(2) == 0 {
+                let id = buyable[next(buyable.count)]
+                blocks.append((dx, dy, dz, Int(cell(UInt16(id), next(16)))))
+                if id == Int(B.flower_pot) {
+                    let pot = BlockEntityData(type: "lectern", x: dx, y: dy, z: dz)
+                    pot.plant = ["poppy", "dandelion", "diamond", "oak_sapling"][next(4)]
+                    potted.append(pot)
+                }
+            } } }
+            if blocks.isEmpty { continue }
+            let object = template(blocks, blockEntities: potted)
+            let survival = templateForSurvivalPaste(object)
+            XCTAssertEqual(templateForSurvivalPaste(survival).blocks, survival.blocks, "round \(round)")
+            let base: TemplateMaterialBill
+            do { base = try templateMaterialBill(survival) } catch { continue }
+            XCTAssertEqual(try templateMaterialBill(survival), base, "round \(round)")
+            for rotation in 1..<4 {
+                let rotated = try rotatedObjectTemplate(object, rotationSteps: rotation)
+                XCTAssertEqual(try templateMaterialBill(templateForSurvivalPaste(rotated)), base,
+                               "round \(round) rotation \(rotation)")
+            }
+            compared += 1
+        }
+        XCTAssertGreaterThan(compared, 100, "most seeded objects must be buyable, or this checks nothing")
+    }
+
     // MARK: - No profit, for every block and every metadata value
 
     /// Breaking a pasted cell gives, of every item, no more than breaking what the paid items

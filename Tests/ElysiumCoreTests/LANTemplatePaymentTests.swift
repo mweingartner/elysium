@@ -648,4 +648,713 @@ final class LANTemplatePaymentTests: XCTestCase {
             XCTAssertEqual(hostCopy(session)["oak_planks"] ?? 0, held(), "round \(round): the host's copy is true again")
         }
     }
+
+    // MARK: - Deeper: who pays, through admission
+
+    /// The grant alone does not make a paste free: a guest the host lets use creative, but
+    /// playing in survival, pays like any other.
+    func testAGuestWithTheCreativeGrantButInSurvivalPays() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 4)])
+        session.setPermissions(LANPeerPermissions(canUseCreative: true), for: "guest")
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 3)), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 1])
+        XCTAssertEqual(takeCount(session.drainGrants(for: "guest"), "oak_planks"), 3)
+    }
+
+    /// A guest that pasted for free in granted creative pays as soon as the grant is withdrawn,
+    /// even when it goes on claiming creative.
+    func testWithdrawingTheCreativeGrantMakesTheNextPastePay() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 4)])
+        session.setPermissions(LANPeerPermissions(canUseCreative: true), for: "guest")
+        session.updatePlayerState(playerState(gameMode: GameMode.creative))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 2)), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        XCTAssertEqual(finish(session, in: world), [.placed(name: "Row", blocks: 2, blockEntities: 0, cleared: 0, filled: 0)])
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 4], "a free paste takes nothing")
+        XCTAssertEqual(session.drainGrants(for: "guest").count, 0)
+
+        session.setPermissions(LANPeerPermissions(), for: "guest")
+        session.updatePlayerState(playerState(gameMode: GameMode.creative))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 2), z: 8), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 2])
+        XCTAssertEqual(finish(session, in: world).last,
+                       .placed(name: "Row", blocks: 2, blockEntities: 0, cleared: 0, filled: 0, payment: "Used 2 materials."))
+    }
+
+    /// The other side of the same rule: survival cells and plain dirt are what a paying guest
+    /// gets. A guest in granted creative keeps what the template holds and its ground is filled
+    /// like the land around it, for free.
+    func testOnlyAPayingGuestsGroundIsFilledWithDirt() throws {
+        let world = loadedWorld()
+        world.setBlock(4, 62, 4, Int(cell(B.stone)), SET_SILENT)
+        world.setBlock(4, 63, 4, 0, SET_SILENT)
+        world.setBlock(3, 63, 4, Int(cell(B.sand)), SET_SILENT)
+        let session = hostSession()
+        session.setPermissions(LANPeerPermissions(canUseCreative: true), for: "guest")
+        session.updatePlayerState(playerState(gameMode: GameMode.creative))
+        let object = ObjectTemplate(name: "Stateful", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 1, sizeY: 1, sizeZ: 1,
+                                    blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: cell(B.composter, 8))])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(object), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Stateful"))
+        XCTAssertEqual(session.drainGrants(for: "guest").count, 0)
+        XCTAssertEqual(finish(session, in: world), [.placed(name: "Stateful", blocks: 1, blockEntities: 0, cleared: 0, filled: 1)])
+        XCTAssertEqual(world.getBlock(4, 64, 4), Int(cell(B.composter, 8)))
+        XCTAssertEqual(world.getBlockId(4, 63, 4), Int(B.sand), "free ground matches the land beside it")
+    }
+
+    // MARK: - Deeper: the payment gate
+
+    /// The gate holds back a paying paste only. An undo charges nothing and a free paste takes
+    /// nothing from the copy, so neither waits for a payment the guest has yet to apply.
+    func testThePaymentGateHoldsBackOnlyAPayingPaste() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 10)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 3)), from: "guest", world: world)
+        let payment = try XCTUnwrap(session.drainGrants(for: "guest").first)
+        XCTAssertGreaterThan(payment.grantID, 0)
+        _ = finish(session, in: world)
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(appliedGrantID: 0), from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
+        XCTAssertEqual(finish(session, in: world).last, .undone(name: "Row", restored: 3, refund: "Returned 3 materials."))
+        _ = session.drainGrants(for: "guest")
+
+        session.setPermissions(LANPeerPermissions(canUseCreative: true), for: "guest")
+        session.updatePlayerState(playerState(gameMode: GameMode.creative))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 3), z: 8, appliedGrantID: 0),
+                                                   from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+    }
+
+    /// The gate names the grant that carried the last payment, and moves with every payment.
+    /// A pickup or a refund is a grant too, but it costs the guest nothing, so a guest that has
+    /// applied the payment and not those may paste again.
+    func testThePaymentGateFollowsEachPaymentAndNoOtherGrant() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 20)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 2), z: 2), from: "guest", world: world)
+        let first = try XCTUnwrap(session.drainGrants(for: "guest").last)
+        _ = finish(session, in: world)
+        let pickup = try XCTUnwrap(session.enqueueGrant(
+            items: [LANInventorySlotSnapshot(slot: 0, itemID: iid("torch"), count: 1)], xp: 0, clearAll: false, to: "guest"))
+        XCTAssertGreaterThan(pickup.grantID, first.grantID)
+
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 2), z: 5, appliedGrantID: first.grantID - 1),
+                                                   from: "guest", world: world),
+                       .rejected(LANTemplateRefusal.paymentPending))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 2), z: 5, appliedGrantID: first.grantID),
+                                                   from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        let grants = session.drainGrants(for: "guest")
+        XCTAssertEqual(grants.map(\.grantID), [pickup.grantID, pickup.grantID + 1])
+        let second = try XCTUnwrap(grants.last)
+        XCTAssertEqual(takeCount([second], "oak_planks"), 2)
+        _ = finish(session, in: world)
+
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 2), z: 8, appliedGrantID: pickup.grantID),
+                                                   from: "guest", world: world),
+                       .rejected(LANTemplateRefusal.paymentPending), "the second payment moved the gate")
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 2), z: 8, appliedGrantID: second.grantID),
+                                                   from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+    }
+
+    /// A paste the host refuses after reading the template, out of reach or onto bedrock,
+    /// is refused before anything is charged, and leaves nothing for the gate to wait on.
+    func testAPasteTheHostCannotPlaceChargesNothing() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 10)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 3), x: 200), from: "guest", world: world),
+                       .rejected(LANTemplateRefusal.outOfReach))
+        world.setBlock(5, 64, 4, Int(cell(B.bedrock)), SET_SILENT)
+        guard case .rejected(let reason) = session.applyTemplateIntent(try placeIntent(row("oak_planks", 3)),
+                                                                       from: "guest", world: world) else {
+            return XCTFail("a box with bedrock in it cannot be prepared")
+        }
+        XCTAssertFalse(reason.hasPrefix("Missing"), reason)
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 10])
+        XCTAssertEqual(session.drainGrants(for: "guest").count, 0)
+        XCTAssertFalse(session.hasActiveTemplateJob(playerID: "guest"))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 3), z: 8, appliedGrantID: 0),
+                                                   from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"), "nothing is owed")
+    }
+
+    // MARK: - Deeper: what an undo pays back
+
+    /// What stands can be worth more than what was paid: two slabs pasted, made double by
+    /// someone else. The undo pays back the two that were paid, not the four that stand.
+    func testUndoNeverPaysBackMoreThanTheReceiptHolds() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_slab", 2)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_slab", 2)), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        _ = session.drainGrants(for: "guest")
+        _ = finish(session, in: world)
+        for x in 4...5 { world.setBlock(x, 64, 4, Int(cell(B.oak_slab, 2))) }
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(), from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
+        XCTAssertEqual(finish(session, in: world).last, .undone(name: "Row", restored: 2, refund: "Returned 2 materials."))
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "oak_slab"), 2)
+        XCTAssertEqual(hostCopy(session), ["oak_slab": 2])
+    }
+
+    /// What a job could not write is paid back at completion and comes off the receipt, so an
+    /// undo cannot pay for it a second time even when what stands is worth more than was placed.
+    func testBlocksTheJobCouldNotWriteComeOffTheReceiptTheUndoPaysAgainst() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_slab", 6)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_slab", 6), x: 13), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        _ = session.drainGrants(for: "guest")
+        world.removeChunk(1, 0)
+        guard case .placed(_, let blocks, _, _, _, let payment)? = finish(session, in: world).last else { return XCTFail() }
+        XCTAssertEqual(payment, "Used 3 materials.")
+        XCTAssertEqual(blocks, 3, "the result counts the blocks the job wrote, so the guest reads 3 blocks, used 3")
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "oak_slab"), 3)
+        for x in 13...15 { world.setBlock(x, 64, 4, Int(cell(B.oak_slab, 2))) }   // six slabs stand on three cells
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(), from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
+        XCTAssertEqual(finish(session, in: world).last, .undone(name: "Row", restored: 3, refund: "Returned 3 materials."))
+        XCTAssertEqual(hostCopy(session), ["oak_slab": 6], "never more than the guest started with")
+    }
+
+    /// Ground the job did not have to fill, because someone filled it first, is paid back.
+    func testGroundSomeoneElseFilledFirstIsPaidBack() throws {
+        let world = loadedWorld()
+        world.setBlock(4, 62, 4, Int(cell(B.stone)), SET_SILENT)
+        world.setBlock(4, 63, 4, 0, SET_SILENT)
+        let session = hostSession(carrying: [("oak_planks", 2), ("dirt", 1)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 2)), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        XCTAssertEqual(takeCount(session.drainGrants(for: "guest"), "dirt"), 1)
+        world.setBlock(4, 63, 4, Int(cell(B.dirt)))
+        XCTAssertEqual(finish(session, in: world).last,
+                       .placed(name: "Row", blocks: 2, blockEntities: 0, cleared: 0, filled: 0, payment: "Used 2 materials."))
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "dirt"), 1)
+        XCTAssertEqual(hostCopy(session), ["dirt": 1])
+        // Its undo does not pay for the dirt someone else put there.
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(), from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
+        XCTAssertEqual(finish(session, in: world).last?.refundText, "Returned 2 materials.")
+        XCTAssertEqual(hostCopy(session), ["dirt": 1, "oak_planks": 2])
+    }
+
+    /// A guest that died while its paste ran is not given what the job could not write: it
+    /// lies at the object.
+    func testWhatAJobCouldNotWriteForADeadGuestLiesAtTheObject() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 6)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6), x: 13), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        _ = session.drainGrants(for: "guest")
+        world.removeChunk(1, 0)
+        session.updatePlayerState(playerState(dead: true))
+        guard case .placed(_, _, _, _, _, let payment)? = finish(session, in: world).last else { return XCTFail() }
+        XCTAssertEqual(payment, "Used 3 materials.")
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "oak_planks"), 0)
+        XCTAssertEqual(dropped(world, "oak_planks"), 3)
+        for item in world.entities.compactMap({ $0 as? ItemEntity }) {
+            XCTAssertEqual(item.x, 13.5, accuracy: 0.01, "at the object's origin, not where the guest fell")
+        }
+    }
+
+    /// The room check at admission is only a check: the guest may fill its inventory while the
+    /// undo runs. What still fits is granted; the rest lies beside the guest.
+    func testARefundThatNoLongerFitsIsPartlyGrantedAndTheRestLiesBesideTheGuest() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 5)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 5)), from: "guest", world: world)
+        _ = session.drainGrants(for: "guest")
+        _ = finish(session, in: world)
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(), from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
+        carry(session, (0..<35).map { _ in ("cobblestone", 64) } + [("oak_planks", 62)])
+        XCTAssertEqual(finish(session, in: world).last,
+                       .undone(name: "Row", restored: 5,
+                               refund: "Returned 2 materials. 3 materials had no room and lie on the ground."))
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "oak_planks"), 2)
+        XCTAssertEqual(dropped(world, "oak_planks"), 3)
+        for item in world.entities.compactMap({ $0 as? ItemEntity }) {
+            XCTAssertEqual(item.x, 2.5, accuracy: 0.01, "beside the guest")
+            XCTAssertEqual(item.z, 1.5, accuracy: 0.01)
+        }
+        XCTAssertEqual(hostCopy(session)["oak_planks"], 64)
+    }
+
+    /// A paste paid for in survival is paid back by its undo even when the guest has since been
+    /// granted creative: the receipt travels with the paste, not with the mode.
+    func testAPaidPasteUndoneInGrantedCreativeStillPaysBack() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 3)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 3)), from: "guest", world: world)
+        _ = session.drainGrants(for: "guest")
+        _ = finish(session, in: world)
+        session.setPermissions(LANPeerPermissions(canUseCreative: true), for: "guest")
+        session.updatePlayerState(playerState(gameMode: GameMode.creative))
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(), from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
+        XCTAssertEqual(finish(session, in: world).last, .undone(name: "Row", restored: 3, refund: "Returned 3 materials."))
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "oak_planks"), 3)
+    }
+
+    // MARK: - Deeper: leaving and the host restarting
+
+    /// A guest that leaves mid-undo loses the refund for what was already restored (accepted)
+    /// and nothing is dropped for it. When it comes back, the restore names every grant the host
+    /// has issued, so the client's next paste passes the gate, and is charged from the copy the
+    /// payment left.
+    func testAGuestThatLeavesMidUndoRejoinsAbleToPaste() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 6)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 3)), from: "guest", world: world)
+        let payment = try XCTUnwrap(session.drainGrants(for: "guest").first)
+        _ = finish(session, in: world)
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(), from: "guest", world: world),
+                       .accepted(action: .undoPlacement, name: "Row"))
+        session.stepTemplateJobs(in: world, budgetPerPeer: 1)
+        session.disconnectPeer(playerID: "guest", tick: 10)
+        XCTAssertFalse(session.hasActiveTemplateJob(playerID: "guest"))
+        XCTAssertTrue(session.drainTemplateIntentResponses().isEmpty)
+        XCTAssertEqual(dropped(world, "oak_planks"), 0)
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "oak_planks"), 0)
+
+        session.acceptPeer(playerID: "guest", displayName: "Alex")
+        let restore = try XCTUnwrap(session.peerRestoreState(playerID: "guest"))
+        XCTAssertGreaterThanOrEqual(restore.grantID, payment.grantID)
+        XCTAssertEqual(restore.inventory.slots.filter { $0.itemID == iid("oak_planks") }.reduce(0) { $0 + $1.count }, 3)
+        XCTAssertEqual(session.applyTemplateIntent(undoIntent(), from: "guest", world: world),
+                       .rejected(LANTemplateRefusal.nothingToUndo))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 3), z: 8, appliedGrantID: restore.grantID),
+                                                   from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        XCTAssertEqual(hostCopy(session), [:])
+    }
+
+    /// A host that restarts starts its grant ids again, and the payment gate with them, so a
+    /// guest restored from the saved record can paste.
+    func testAHostRestartStartsThePaymentGateAgainWithTheGrantIDs() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 10)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 3)), from: "guest", world: world)
+        XCTAssertEqual(session.drainGrants(for: "guest").count, 1)
+        _ = finish(session, in: world)
+        let record = try XCTUnwrap(session.peerRecord(playerID: "guest"))
+
+        let restarted = LANMultiplayerHostSession()
+        restarted.seedPeerRecord(record)
+        restarted.acceptPeer(playerID: "guest", displayName: "Alex")
+        restarted.updatePlayerState(playerState())
+        let restore = try XCTUnwrap(restarted.peerRestoreState(playerID: "guest"))
+        XCTAssertEqual(restore.grantID, 0)
+        XCTAssertEqual(hostCopy(restarted), ["oak_planks": 7])
+        XCTAssertEqual(restarted.applyTemplateIntent(try placeIntent(row("oak_planks", 3), z: 8, appliedGrantID: restore.grantID),
+                                                     from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        XCTAssertEqual(hostCopy(restarted), ["oak_planks": 4])
+    }
+
+    // MARK: - Fuzz: the new wire fields
+
+    /// Seeded grants with take lists of any shape, and intents with any applied grant id, go
+    /// through the real frame codec unchanged once constructed, and construction bounds them.
+    func testFuzzedTakeListsAndAppliedGrantIDsSurviveTheFrameCodec() throws {
+        var random = SplitMix64(state: 0x5EED_0001)
+        let payload = try lanGuestTemplatePayload(for: row("oak_planks", 2))
+        for round in 0..<300 {
+            let take = (0..<random.int(90)).map { _ in
+                LANInventorySlotSnapshot(slot: random.int(48) - 4, itemID: random.int(itemDefs.count + 40) - 20,
+                                         count: random.int(400) - 100)
+            }
+            let grantID = Int(bitPattern: UInt(random.next()))
+            let grant = LANInventoryGrant(playerID: "guest", grantID: grantID, items: [], xp: 0,
+                                          clearAll: random.int(4) == 0, take: take)
+            XCTAssertEqual(grant.take.count, min(take.count, LAN_MULTIPLAYER_MAX_GRANT_ITEMS), "round \(round)")
+            XCTAssertEqual(grant.grantID, max(0, grantID), "round \(round)")
+            XCTAssertTrue(grant.take.allSatisfy { $0.count >= 0 && $0.count <= 127 && $0.itemID >= 0 }, "round \(round)")
+            let grantFrame = try LANMultiplayerFrameCodec.encode(.inventoryGrant(grant), sequence: UInt32(round))
+            guard case .inventoryGrant(let decodedGrant) = try LANMultiplayerFrameCodec.decode(grantFrame).message else {
+                XCTFail("round \(round): a grant must decode as a grant"); continue
+            }
+            XCTAssertEqual(decodedGrant, grant, "round \(round)")
+
+            let applied = Int(bitPattern: UInt(random.next()))
+            let intent = random.int(2) == 0
+                ? LANTemplateIntent(action: .placeTemplate, templateName: "Row", x: random.int(64), y: 64, z: random.int(64),
+                                    rotation: random.int(4), templateData: payload, appliedGrantID: applied)
+                : LANTemplateIntent(action: .undoPlacement, templateName: "", x: 0, y: 0, z: 0, rotation: 0,
+                                    appliedGrantID: applied)
+            XCTAssertEqual(intent.appliedGrantID, max(0, applied), "round \(round)")
+            let intentFrame = try LANMultiplayerFrameCodec.encode(.templateIntent(playerID: "guest", intent: intent),
+                                                                   sequence: UInt32(round))
+            guard case .templateIntent(_, let decodedIntent) = try LANMultiplayerFrameCodec.decode(intentFrame).message else {
+                XCTFail("round \(round): an intent must decode as an intent"); continue
+            }
+            XCTAssertEqual(decodedIntent, intent, "round \(round)")
+        }
+    }
+
+    /// Hand-written frames the codec must refuse, or read safely.
+    func testMalformedTakeAndAppliedGrantIDFieldsAreRefusedOrClamped() throws {
+        let decoder = JSONDecoder()
+        XCTAssertThrowsError(try decoder.decode(LANInventoryGrant.self, from: Data(
+            #"{"playerID":"guest","grantID":3,"items":[],"xp":0,"clearAll":false,"take":"planks"}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(LANInventoryGrant.self, from: Data(
+            #"{"playerID":"guest","grantID":3,"items":[],"xp":0,"clearAll":false,"take":[{"slot":0,"count":4}]}"#.utf8)))
+        let negative = try decoder.decode(LANInventoryGrant.self, from: Data(
+            #"{"playerID":"guest","grantID":3,"items":[],"xp":0,"clearAll":false,"take":[{"slot":-3,"itemID":-9,"count":-4}]}"#.utf8))
+        XCTAssertEqual(negative.take.map(\.count), [0])
+        XCTAssertThrowsError(try decoder.decode(LANTemplateIntent.self, from: Data(
+            #"{"action":"undoPlacement","templateName":"","x":0,"y":0,"z":0,"rotation":0,"appliedGrantID":"7"}"#.utf8)))
+        XCTAssertEqual(try decoder.decode(LANTemplateIntent.self, from: Data(
+            #"{"action":"undoPlacement","templateName":"","x":0,"y":0,"z":0,"rotation":0,"appliedGrantID":-5}"#.utf8)).appliedGrantID, 0)
+        // A take of nothing, or of no real item, leaves a guest's inventory as it was.
+        var inventory: [ItemStack?] = [stack("oak_planks", 5), nil, stack("glass", 3)]
+        lanApplyTemplateTake(negative.take, to: &inventory)
+        lanApplyTemplateTake([LANInventorySlotSnapshot(slot: 0, itemID: itemDefs.count + 5, count: 64)], to: &inventory)
+        XCTAssertEqual(inventory.map { $0?.count }, [5, nil, 3])
+    }
+
+    // MARK: - Property: a take and a charge agree
+
+    private func plainCounts(_ inventory: [ItemStack?]) -> [Int: Int] {
+        TemplateMaterialSlots(copying: inventory).plainCounts()
+    }
+
+    private func layout(_ inventory: [ItemStack?]) -> [String] {
+        inventory.map { stack in
+            guard let stack else { return "-" }
+            return "\(stack.id)x\(stack.count)/\(stack.damage)/\(stack.label ?? "")/\(stack.ench.count)/\(stack.data.isEmpty)"
+        }
+    }
+
+    /// Seeded inventories of plain and marked stacks, and seeded takes. A take removes exactly
+    /// what was asked of each plain item, or all of it; never a marked stack. Splitting an entry
+    /// in two, or reordering the entries, changes nothing (metamorphic).
+    func testATakeRemovesExactlyWhatWasAskedOfPlainStacksInAnyOrder() {
+        var random = SplitMix64(state: 0x7A4E_0002)
+        let kinds = ["oak_planks", "glass", "dirt", "cobblestone", "torch", "oak_slab", "ender_pearl"].map { iid($0) }
+        for round in 0..<400 {
+            var inventory: [ItemStack?] = (0..<36).map { _ in
+                guard random.int(3) > 0 else { return nil }
+                let id = kinds[random.int(kinds.count)]
+                let count = 1 + random.int(max(1, itemDefs[id].maxStack))
+                switch random.int(5) {
+                case 0: return ItemStack(id, count, label: "Named")
+                case 1: return ItemStack(id, count, damage: 1 + random.int(5))
+                default: return ItemStack(id, count)
+                }
+            }
+            let take = (0..<random.int(8)).map { _ in
+                LANInventorySlotSnapshot(slot: 0, itemID: kinds[random.int(kinds.count)], count: random.int(130))
+            }
+            let before = inventory.map(copyStack)
+            var split = inventory.map(copyStack)
+            var reordered = inventory.map(copyStack)
+            lanApplyTemplateTake(take, to: &inventory)
+            lanApplyTemplateTake(take.flatMap { entry -> [LANInventorySlotSnapshot] in
+                let half = entry.count / 2
+                return [LANInventorySlotSnapshot(slot: 0, itemID: entry.itemID, count: half),
+                        LANInventorySlotSnapshot(slot: 0, itemID: entry.itemID, count: entry.count - half)]
+            }, to: &split)
+            lanApplyTemplateTake(take.reversed(), to: &reordered)
+            XCTAssertEqual(layout(split), layout(inventory), "round \(round)")
+            XCTAssertEqual(layout(reordered), layout(inventory), "round \(round)")
+
+            let had = plainCounts(before), has = plainCounts(inventory)
+            for id in kinds {
+                let asked = take.filter { $0.itemID == id }.reduce(0) { $0 + $1.count }
+                XCTAssertEqual((had[id] ?? 0) - (has[id] ?? 0), min(had[id] ?? 0, asked), "round \(round) item \(id)")
+            }
+            for index in before.indices where before[index].map({ !isPlainTemplateMaterial($0) }) == true {
+                XCTAssertEqual(layout([inventory[index]]), layout([before[index]]), "round \(round): a marked stack was touched")
+            }
+        }
+    }
+
+    /// Seeded copies and bills. What the host takes from its copy is what the guest's take
+    /// removes from the same inventory, slot for slot; the take is never cut short by the grant's
+    /// size cap; nothing else in the copy changes; and paying back the whole bill restores
+    /// every item's count (round trip). A bill the copy cannot pay names exactly the shortfall.
+    func testWhatTheHostTakesFromItsCopyIsWhatTheGuestsTakeRemoves() throws {
+        var random = SplitMix64(state: 0xC0FF_EE03)
+        let kinds = ["oak_planks", "glass", "dirt", "torch", "oak_slab", "ender_pearl", "saddle"].map { iid($0) }
+        for round in 0..<300 {
+            let stacks: [ItemStack?] = (0..<36).map { _ in
+                guard random.int(4) > 0 else { return nil }
+                let id = kinds[random.int(kinds.count)]
+                let count = 1 + random.int(max(1, itemDefs[id].maxStack))
+                return random.int(6) == 0 ? ItemStack(id, count, label: "Named") : ItemStack(id, count)
+            }
+            let copy = LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: random.int(9),
+                                                  slots: makeLANInventorySlotSnapshots(stacks),
+                                                  xp: random.int(500), xpLevel: random.int(30), xpProgress: 0.25)
+            let guest = try XCTUnwrap(makeInventory(from: copy))
+            var counts: [Int: Int] = [:]
+            for _ in 0..<(1 + random.int(4)) {
+                counts[kinds[random.int(kinds.count)], default: 0] += 1 + random.int(160)
+            }
+            let bill = TemplateMaterialBill(counts)
+            let plain = plainCounts(guest)
+            switch lanPayTemplateMaterials(bill, from: copy, playerID: "guest") {
+            case .failure(let error):
+                let short = bill.lines.compactMap { line -> TemplateMaterialLine? in
+                    let missing = line.count - (plain[line.itemID] ?? 0)
+                    return missing > 0 ? TemplateMaterialLine(itemID: line.itemID, count: missing) : nil
+                }
+                XCTAssertFalse(short.isEmpty, "round \(round): refused a bill the copy could pay")
+                XCTAssertEqual(error, .missing(short), "round \(round)")
+            case .success(let payment):
+                XCTAssertTrue(bill.lines.allSatisfy { $0.count <= (plain[$0.itemID] ?? 0) }, "round \(round)")
+                XCTAssertEqual(payment.receipt.total, bill.total, "round \(round)")
+                XCTAssertLessThanOrEqual(payment.take.count, LAN_MULTIPLAYER_MAX_GRANT_ITEMS, "round \(round)")
+                let grant = LANInventoryGrant(playerID: "guest", grantID: 1, items: [], xp: 0, clearAll: false, take: payment.take)
+                XCTAssertEqual(grant.take.reduce(0) { $0 + $1.count }, bill.total, "round \(round): the take was cut short")
+                var taken = guest.map(copyStack)
+                lanApplyTemplateTake(grant.take, to: &taken)
+                XCTAssertEqual(makeLANInventorySlotSnapshots(taken), payment.inventory.slots, "round \(round)")
+                XCTAssertEqual(payment.inventory.selectedHotbarSlot, copy.selectedHotbarSlot)
+                XCTAssertEqual(payment.inventory.xp, copy.xp)
+                XCTAssertEqual(payment.inventory.xpLevel, copy.xpLevel)
+                XCTAssertEqual(payment.inventory.xpProgress, copy.xpProgress)
+                // The guest may have moved its stacks since it published: the counts still agree.
+                var moved = guest.map(copyStack)
+                for index in stride(from: moved.count - 1, to: 0, by: -1) { moved.swapAt(index, random.int(index + 1)) }
+                lanApplyTemplateTake(grant.take, to: &moved)
+                XCTAssertEqual(plainCounts(moved), plainCounts(taken), "round \(round)")
+
+                var receipt = payment.receipt
+                let refund = lanRefundTemplateMaterials(counts, against: &receipt, into: payment.inventory, playerID: "guest")
+                XCTAssertEqual(refund.returned, bill.total, "round \(round)")
+                XCTAssertTrue(refund.leftover.isEmpty, "round \(round)")
+                XCTAssertEqual(receipt.total, 0)
+                XCTAssertEqual(plainCounts(try XCTUnwrap(makeInventory(from: refund.inventory))), plain, "round \(round)")
+                XCTAssertEqual(lanTemplateRefundShortfall(counts, receipt: payment.receipt, inventory: payment.inventory,
+                                                          playerID: "guest"), 0, "round \(round)")
+                // The guest, given the refund's items, holds what the host's copy holds.
+                var given = TemplateMaterialSlots(copying: taken)
+                for item in refund.items { XCTAssertEqual(given.put(itemID: item.itemID, count: item.count), item.count) }
+                XCTAssertEqual(given.plainCounts(), plain, "round \(round)")
+            }
+        }
+    }
+
+    // MARK: - A publish that crosses the take, end to end
+
+    /// The guest owns its inventory and publishes it whenever it changes. A publish sent after
+    /// the paste was asked for and before the take arrived (the guest moved a stack, picked
+    /// something up, or asked again after the answer timed out) still shows the paid planks. The
+    /// host takes the payment out of it again, so a death in that window drops only what the
+    /// guest still owns, and a disconnect restores the guest from a copy that is already
+    /// charged (the take, counted in the restore's grant id, is never applied). Either way the
+    /// planks held, on the ground and standing are no more than the guest had.
+    func testADeathOrARejoinWhileAPublishCrossesTheTakeLeavesTheGuestNoRicher() throws {
+        for leaves in [false, true] {
+            let world = loadedWorld()
+            let session = hostSession(carrying: [("oak_planks", 10)])
+            XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 4)), from: "guest", world: world),
+                           .accepted(action: .placeTemplate, name: "Row"))
+            let take = try XCTUnwrap(session.drainGrants(for: "guest").first)
+            _ = finish(session, in: world)
+            // The guest moved its planks to another slot before the take arrived and published that.
+            XCTAssertTrue(session.applyInventoryUpdate(LANInventoryUpdate(
+                playerID: "guest", revision: 5,
+                snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: [
+                    LANInventorySlotSnapshot(slot: 3, itemID: iid("oak_planks"), count: 10)])), from: "guest"))
+            var guest: [ItemStack?] = Array(repeating: nil, count: 36)
+            guest[3] = stack("oak_planks", 10)
+            var onTheGround = 0
+            if leaves {
+                session.disconnectPeer(playerID: "guest", tick: 1)
+                session.acceptPeer(playerID: "guest", displayName: "Alex")
+                let restore = try XCTUnwrap(session.peerRestoreState(playerID: "guest"))
+                XCTAssertGreaterThanOrEqual(restore.grantID, take.grantID, "the take is counted as applied")
+                guest = try XCTUnwrap(makeInventory(from: restore.inventory))
+            } else {
+                session.updatePlayerState(playerState(dead: true))
+                let drop = try XCTUnwrap(session.consumeDeathDrops(for: "guest"))
+                onTheGround = drop.inventory.slots.filter { $0.itemID == iid("oak_planks") }.reduce(0) { $0 + $1.count }
+                lanApplyTemplateTake(take.take, to: &guest)
+                guest = guest.map { _ in nil }                      // the clear the transport sends
+            }
+            let held = guest.compactMap { $0 }.filter { $0.id == iid("oak_planks") }.reduce(0) { $0 + $1.count }
+            let standing = (4..<8).filter { world.getBlockId($0, 64, 4) == Int(B.oak_planks) }.count
+            XCTAssertEqual(standing, 4)
+            XCTAssertEqual(held + onTheGround + standing, 10, leaves ? "disconnect" : "death")
+        }
+    }
+
+    // MARK: - Seeded: death, leaving, unloading and jobs in flight
+
+    /// One message from the host to the guest, in the order the transport sends them.
+    private enum HostToGuest {
+        case grant(LANInventoryGrant)
+        /// The accepted or refused event for the guest's request; it follows that request's grants.
+        case answer
+    }
+
+    /// The seeded rounds above with more of a real game in them: jobs run for several ticks
+    /// while everything else goes on, the far chunk unloads and comes back, the guest dies and
+    /// respawns (the host drops its copy and clears the guest), and leaves and rejoins (the host
+    /// restores it). The guest behaves like the shipped client: one request at a time until the
+    /// host answers, a publish when its inventory changed, always one just before it asks, and
+    /// another after a take. The design accepts some losses; nothing may ever leave the guest
+    /// with more planks, held, standing or on the ground, than it started with. The guest dies
+    /// and leaves at any moment, also while a publish has crossed a take that is still on its way.
+    func testNoInterleavingOfDeathRejoinOrUnloadPutsAGuestAhead() throws {
+        var random = SplitMix64(state: 0x0DD5_EED5)
+        let planks = iid("oak_planks")
+        for round in 0..<150 {
+            let world = loadedWorld()
+            let session = hostSession()
+            var inventory: [ItemStack?] = Array(repeating: nil, count: 36)
+            let start = 20 + random.int(100)
+            inventory[random.int(18)] = ItemStack(planks, min(64, start))
+            if start > 64 { inventory[18 + random.int(18)] = ItemStack(planks, start - 64) }
+            var revision = 0, appliedGrantID = 0, alive = true, awaiting = false
+            var lastPublished: [LANInventorySlotSnapshot]?
+            var wire: [HostToGuest] = []
+            var far: Chunk?
+            var trail: [String] = []
+
+            func grantsOnTheWire() -> [LANInventoryGrant] {
+                wire.compactMap { if case .grant(let grant) = $0 { return grant } else { return nil } }
+            }
+            func slots() -> [LANInventorySlotSnapshot] { makeLANInventorySlotSnapshots(inventory) }
+            func publish(force: Bool) {
+                guard alive, force || slots() != lastPublished else { return }
+                lastPublished = slots()
+                revision += 1
+                _ = session.applyInventoryUpdate(LANInventoryUpdate(
+                    playerID: "guest", revision: revision,
+                    snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: lastPublished!),
+                    appliedGrantID: appliedGrantID), from: "guest")
+            }
+            func apply(_ grant: LANInventoryGrant, to stacks: inout [ItemStack?]) {
+                if grant.clearAll { stacks = Array(repeating: nil, count: stacks.count) }
+                lanApplyTemplateTake(grant.take, to: &stacks)
+                var row = TemplateMaterialSlots(copying: stacks)
+                for item in grant.items { _ = row.put(itemID: item.itemID, count: item.count) }
+                for index in row.touchedSlots { stacks[index] = row.stacks[index] }
+            }
+            func deliverOne() {
+                guard !wire.isEmpty else { return }
+                switch wire.removeFirst() {
+                case .answer:
+                    awaiting = false
+                case .grant(let grant):
+                    guard grant.grantID > appliedGrantID else { return }
+                    appliedGrantID = grant.grantID
+                    apply(grant, to: &inventory)
+                    lastPublished = grant.take.isEmpty ? slots() : nil
+                }
+            }
+            func collect() { wire.append(contentsOf: session.drainGrants(for: "guest").map(HostToGuest.grant)) }
+            // The request is built after the publish, as the client does: it names that publish.
+            func ask(_ makeIntent: () throws -> LANTemplateIntent) rethrows {
+                publish(force: true)
+                _ = session.applyTemplateIntent(try makeIntent(), from: "guest", world: world)
+                collect()
+                wire.append(.answer)
+                awaiting = true
+            }
+            func heldOnceTheWireArrives() -> Int {
+                var stacks = inventory.map(copyStack)
+                var applied = appliedGrantID
+                for grant in grantsOnTheWire() where grant.grantID > applied { applied = grant.grantID; apply(grant, to: &stacks) }
+                return stacks.compactMap { $0 }.filter { $0.id == planks }.reduce(0) { $0 + $1.count }
+            }
+            func standing() -> Int {
+                var count = (0..<CHUNK_W * 2).filter { world.getBlockId($0, 64, 4) == Int(B.oak_planks) }.count
+                if let far { count += (0..<CHUNK_W).filter { Int(far.get($0, 64, 4)) >> 4 == Int(B.oak_planks) }.count }
+                return count
+            }
+            func runJobs(_ budget: Int) {
+                session.stepTemplateJobs(in: world, budgetPerPeer: budget)
+                _ = session.drainTemplateIntentResponses()
+                collect()
+            }
+
+            publish(force: false)
+            for step in 0..<60 {
+                let roll = random.int(12)
+                trail.append(String(roll))
+                switch roll {
+                case 0:
+                    publish(force: false)
+                case 1:
+                    inventory.swapAt(random.int(36), random.int(36))
+                case 2, 3:
+                    deliverOne()
+                case 4 where alive && !awaiting:
+                    let count = 1 + random.int(12)
+                    // The client refuses what it can see it cannot pay.
+                    guard inventory.compactMap({ $0 }).filter({ $0.id == planks }).reduce(0, { $0 + $1.count }) >= count else { break }
+                    let x = random.int(13)
+                    try ask { try self.placeIntent(self.row("oak_planks", count), x: x, appliedGrantID: appliedGrantID,
+                                                   inventoryRevision: revision) }
+                case 5 where alive && !awaiting:
+                    ask { self.undoIntent(appliedGrantID: appliedGrantID, inventoryRevision: revision) }
+                case 6:
+                    runJobs(1 + random.int(4))
+                case 7:
+                    if let chunk = far { world.setChunk(chunk); far = nil } else { far = world.getChunk(1, 0); world.removeChunk(1, 0) }
+                case 8:
+                    if alive {
+                        alive = false
+                        session.updatePlayerState(playerState(dead: true))
+                        if let drop = session.consumeDeathDrops(for: "guest") {
+                            for slot in drop.inventory.slots {
+                                _ = spawnItem(world, drop.x, drop.y, drop.z, ItemStack(slot.itemID, slot.count))
+                            }
+                            _ = session.enqueueGrant(items: [], xp: 0, clearAll: true, to: "guest")   // as the transport does
+                        }
+                        collect()
+                    } else {
+                        // The guest sees its death after the clear that came with it, and only then respawns.
+                        while !wire.isEmpty { deliverOne() }
+                        alive = true
+                        session.updatePlayerState(playerState())
+                    }
+                case 9:
+                    session.disconnectPeer(playerID: "guest", tick: step)
+                    wire.removeAll()
+                    awaiting = false
+                    session.acceptPeer(playerID: "guest", displayName: "Alex")
+                    let restore = try XCTUnwrap(session.peerRestoreState(playerID: "guest"))
+                    var restored = try XCTUnwrap(makeInventory(from: restore.inventory))
+                    restored += Array(repeating: nil, count: max(0, 36 - restored.count))
+                    inventory = restored
+                    appliedGrantID = restore.grantID
+                    revision = restore.revision
+                    lastPublished = slots()
+                    alive = !restore.playerState.dead
+                    collect()
+                case 10:
+                    while session.hasActiveTemplateJob(playerID: "guest") { runJobs(2_048) }
+                default:
+                    break
+                }
+                XCTAssertLessThanOrEqual(heldOnceTheWireArrives() + standing() + dropped(world, "oak_planks"), start,
+                                         "seed 0x0DD5EED5 round \(round) step \(step) trail \(trail.joined(separator: ","))")
+            }
+            if let chunk = far { world.setChunk(chunk); far = nil }
+            while session.hasActiveTemplateJob(playerID: "guest") { runJobs(2_048) }
+            while !wire.isEmpty { deliverOne() }
+            if !alive { alive = true; session.updatePlayerState(playerState()) }
+            XCTAssertLessThanOrEqual(heldOnceTheWireArrives() + standing() + dropped(world, "oak_planks"), start, "round \(round)")
+            publish(force: true)
+            XCTAssertEqual(hostCopy(session)["oak_planks"] ?? 0, heldOnceTheWireArrives(), "round \(round)")
+        }
+    }
+}
+
+private extension LANTemplateIntentResult {
+    var refundText: String? {
+        if case .undone(_, _, let refund) = self { return refund }
+        return nil
+    }
 }

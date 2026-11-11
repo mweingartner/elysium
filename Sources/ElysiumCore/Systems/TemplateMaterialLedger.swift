@@ -223,20 +223,27 @@ func addTemplateStandingMaterials(in world: World, restoring cell: TemplatePlace
     }
 }
 
+/// What a finished paste paid for and did not use, read from what the job recorded.
+func templateUnwrittenMaterials(of job: ObjectTemplatePlacementJob, result: TemplatePlacementResult) -> [Int: Int] {
+    templateUnwrittenMaterials(unplacedBlocks: job.unplacedBlocks,
+                               unplacedBlockEntities: job.unplacedBlockEntities,
+                               unfilledSupportCells: job.plannedSupportCellCount - result.supportBlocksFilled)
+}
+
 /// What a paste paid for the blocks it could not write, the plants of the pots among them, and
 /// the ground it did not have to fill.
-func templateUnwrittenMaterials(of job: ObjectTemplatePlacementJob, result: TemplatePlacementResult) -> [Int: Int] {
+func templateUnwrittenMaterials(unplacedBlocks: [TemplateBlock], unplacedBlockEntities: [BlockEntityData] = [],
+                                unfilledSupportCells: Int) -> [Int: Int] {
     var counts: [Int: Int] = [:]
-    for block in job.unplacedBlocks {
+    for block in unplacedBlocks {
         if case .item(let itemID, let count) = templateCellCharge(Int(block.cell)) {
             counts[itemID, default: 0] += count
         }
     }
-    for blockEntity in job.unplacedBlockEntities {
+    for blockEntity in unplacedBlockEntities {
         if let plant = blockEntity.plant, let itemID = iidOpt(plant) { counts[itemID, default: 0] += 1 }
     }
-    let unfilled = job.plannedSupportCellCount - result.supportBlocksFilled
-    if unfilled > 0 { counts[iid("dirt"), default: 0] += unfilled }
+    if unfilledSupportCells > 0 { counts[iid("dirt"), default: 0] += unfilledSupportCells }
     return counts
 }
 

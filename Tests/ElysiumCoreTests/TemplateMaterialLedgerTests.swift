@@ -334,6 +334,161 @@ final class TemplateMaterialLedgerTests: XCTestCase {
         }
     }
 
+    // MARK: - What may pay, slot by slot
+
+    /// Every way a stack can stop being plain, one at a time. A paste never takes from such a
+    /// stack and a refund never tops one up, even when it is the first slot of the row: the
+    /// availability check in `payTemplateMaterials` would hide a take that ignored the rule, so
+    /// this goes straight at `take` and `put`.
+    func testTakeAndPutPassOverEveryKindOfStackThatIsNotPlain() {
+        var filled = StackData()
+        filled.contents = [stack("diamond", 1)]
+        var potion = StackData()
+        potion.potion = "healing"
+        let planks = iid("oak_planks")
+        let kept: [(String, ItemStack)] = [
+            ("renamed", ItemStack(planks, 5, label: "Keep")),
+            ("worn", ItemStack(planks, 5, damage: 1)),
+            ("enchanted", ItemStack(planks, 5, ench: [EnchInstance("unbreaking", 1)])),
+            ("with contents", ItemStack(planks, 5, data: filled)),
+            ("with a potion", ItemStack(planks, 5, data: potion)),
+        ]
+        for (why, special) in kept {
+            var slots = TemplateMaterialSlots(copying: [special, stack("oak_planks", 3)])
+            XCTAssertEqual(slots.take(itemID: planks, count: 5), 3, "\(why): only the plain stack pays")
+            XCTAssertEqual(slots.stacks[0], special, "\(why) stack is left exactly as it was")
+            XCTAssertNil(slots.stacks[1])
+            XCTAssertEqual(slots.touchedSlots, [1], why)
+
+            var refund = TemplateMaterialSlots(copying: [special.copy(), nil])
+            XCTAssertEqual(refund.put(itemID: planks, count: 4), 4, why)
+            XCTAssertEqual(refund.stacks[0], special, "\(why) stack is not topped up")
+            XCTAssertEqual(refund.stacks[1], stack("oak_planks", 4))
+            XCTAssertEqual(refund.touchedSlots, [1], why)
+        }
+        XCTAssertTrue(isPlainTemplateMaterial(ItemStack(planks, 5, label: "")),
+                      "an empty name is no name")
+    }
+
+    /// A take or a put leaves a stack of plain items: the remainder of a partly taken stack and
+    /// a topped-up stack carry nothing but the item and the count.
+    func testWhatATakeOrAPutLeavesBehindIsAFreshPlainStack() {
+        let original = stack("stone", 10)
+        var slots = TemplateMaterialSlots(copying: [original])
+        XCTAssertEqual(slots.take(itemID: iid("stone"), count: 4), 4)
+        XCTAssertFalse(slots.stacks[0] === original, "the row never changes the caller's stack")
+        XCTAssertEqual(original.count, 10)
+        XCTAssertEqual(slots.put(itemID: iid("stone"), count: 1), 1)
+        XCTAssertEqual(slots.stacks[0], stack("stone", 7))
+    }
+
+    // MARK: - The bill
+
+    func testABillKeepsOnlyRealCountsAndAddingNothingChangesNothing() {
+        let bill = TemplateMaterialBill([iid("stone"): 3, iid("glass"): 0, iid("torch"): -2])
+        XCTAssertEqual(bill.lines, [TemplateMaterialLine(itemID: iid("stone"), count: 3)])
+        XCTAssertEqual(bill.count(of: iid("torch")), 0)
+        XCTAssertEqual(bill.adding(itemID: iid("torch"), count: -5), bill)
+        XCTAssertTrue(TemplateMaterialBill().isEmpty)
+        XCTAssertEqual(TemplateMaterialBill().total, 0)
+    }
+
+    // MARK: - What a paste could not write
+
+    /// Settling a finished job pays back what it could not write: each unplaced block at the
+    /// price it was charged (a double slab is two, a door's upper half is free, air and a block
+    /// nobody can buy cost nothing), and one dirt for each cell of ground it did not fill.
+    func testUnwrittenMaterialsAreTheChargeOfEachUnplacedBlockAndTheUnfilledGround() {
+        func block(_ name: String, _ meta: Int = 0) -> TemplateBlock {
+            TemplateBlock(dx: 0, dy: 0, dz: 0, cell: cell(bid(name), meta))
+        }
+        let unwritten = templateUnwrittenMaterials(
+            unplacedBlocks: [block("oak_planks"), block("oak_planks"), block("oak_slab", 2),
+                             block("oak_door", 0), block("oak_door", 8), block("water"),
+                             TemplateBlock(dx: 0, dy: 0, dz: 0, cell: 0)],
+            unfilledSupportCells: 3)
+        XCTAssertEqual(unwritten, [iid("oak_planks"): 2, iid("oak_slab"): 2, iid("oak_door"): 1, iid("dirt"): 3])
+        XCTAssertEqual(templateUnwrittenMaterials(unplacedBlocks: [], unfilledSupportCells: 0), [:])
+        XCTAssertEqual(templateUnwrittenMaterials(unplacedBlocks: [], unfilledSupportCells: -2), [:],
+                       "a job that filled more than it planned gives back nothing")
+    }
+
+    // MARK: - Refund edges
+
+    func testARefundOfAnUnknownItemOrOfNothingReturnsNothing() {
+        var stores = TemplateMaterialStores(inventory: TemplateMaterialSlots(copying: [nil, nil]))
+        var receipt = TemplateMaterialReceipt(lines: [
+            TemplateMaterialReceiptLine(itemID: iid("stone"), fromInventory: 4, fromStorage: 0)])
+        let refund = refundTemplateMaterials([iid("stone"): 0, iid("glass"): 9], against: &receipt, into: &stores)
+        XCTAssertEqual(refund, TemplateMaterialRefund())
+        XCTAssertEqual(receipt.paid(iid("stone")), 4, "asking for nothing takes nothing off the receipt")
+        XCTAssertEqual(stores.inventory.touchedSlots, [])
+    }
+
+    func testLeftoverStacksCountOneSlotForEachItemThatDoesNotStack() {
+        let disc = iid("music_disc_wander")
+        let refund = TemplateMaterialRefund(leftover: [
+            TemplateMaterialLine(itemID: iid("stone"), count: 65),
+            TemplateMaterialLine(itemID: disc, count: 3),
+            TemplateMaterialLine(itemID: -1, count: 1),
+        ])
+        XCTAssertEqual(refund.leftoverStacks, 2 + 3 + 1)
+    }
+
+    func testTheMaterialListCopesWithAnUnknownItemAndALimitBelowOne() {
+        XCTAssertEqual(templateMaterialListText([TemplateMaterialLine(itemID: -3, count: 2)]), "2 items")
+        let lines = [TemplateMaterialLine(itemID: iid("stone"), count: 1),
+                     TemplateMaterialLine(itemID: iid("glass"), count: 2)]
+        XCTAssertEqual(templateMaterialListText(lines, limit: 0), "2 Glass and 1 more kind", "the largest count leads")
+        XCTAssertEqual(templateMaterialListText([]), "")
+    }
+
+    // MARK: - Seeded: the receipt is a ceiling that only goes down
+
+    /// For seeded receipts and seeded sequences of give-backs: the total given back for an item
+    /// never exceeds what was paid for it, the inventory's share comes back before any of the
+    /// storage share, and what the receipt still holds is exactly what was paid less what was
+    /// given back. A second give-back of the same items can never repeat the first.
+    func testGivingBackNeverExceedsThePaymentAndReturnsTheInventoryShareFirstForSeededReceipts() {
+        let names = ["stone", "oak_planks", "glass", "oak_door", "torch", "dirt"]
+        var random = SplitMix64(state: 0x0BAD_5EED)
+        for round in 0..<500 {
+            var paid: [Int: (inventory: Int, storage: Int)] = [:]
+            for name in names where random.int(3) != 0 {
+                paid[iid(name)] = (random.int(70), random.int(70))
+            }
+            var receipt = TemplateMaterialReceipt(lines: paid.keys.sorted().map {
+                TemplateMaterialReceiptLine(itemID: $0, fromInventory: paid[$0]!.inventory, fromStorage: paid[$0]!.storage)
+            })
+            XCTAssertEqual(receipt.lines.map(\.itemID), receipt.lines.map(\.itemID).sorted(), "round \(round)")
+            XCTAssertFalse(receipt.lines.contains { $0.paid <= 0 }, "round \(round)")
+            var given: [Int: (inventory: Int, storage: Int)] = [:]
+            for _ in 0..<(1 + random.int(8)) {
+                let itemID = iid(names[random.int(names.count)])
+                let asked = random.int(60) - 5
+                let before = receipt.paid(itemID)
+                let share = receipt.giveBack(itemID: itemID, count: asked)
+                XCTAssertGreaterThanOrEqual(share.toInventory, 0, "round \(round)")
+                XCTAssertGreaterThanOrEqual(share.toStorage, 0, "round \(round)")
+                XCTAssertEqual(share.toInventory + share.toStorage, min(max(0, asked), before), "round \(round)")
+                let sofar = given[itemID] ?? (0, 0)
+                if share.toStorage > 0 {
+                    XCTAssertEqual(sofar.inventory + share.toInventory, paid[itemID]?.inventory ?? 0,
+                                   "round \(round): storage is given back only once the inventory share is used up")
+                }
+                given[itemID] = (sofar.inventory + share.toInventory, sofar.storage + share.toStorage)
+                XCTAssertEqual(receipt.paid(itemID), before - share.toInventory - share.toStorage, "round \(round)")
+            }
+            for (itemID, back) in given {
+                XCTAssertLessThanOrEqual(back.inventory, paid[itemID]?.inventory ?? 0, "round \(round)")
+                XCTAssertLessThanOrEqual(back.storage, paid[itemID]?.storage ?? 0, "round \(round)")
+            }
+            let totalPaid = paid.values.reduce(0) { $0 + $1.inventory + $1.storage }
+            let totalGiven = given.values.reduce(0) { $0 + $1.inventory + $1.storage }
+            XCTAssertEqual(receipt.total, totalPaid - totalGiven, "round \(round)")
+        }
+    }
+
     // MARK: - Texts
 
     func testTheUsedAndReturnedTextsSayHowManyAndWhere() {

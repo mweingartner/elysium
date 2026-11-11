@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import XCTest
 @testable import Elysium
 @testable import ElysiumCore
@@ -142,6 +143,47 @@ final class TemplateMaterialsPanelTests: XCTestCase {
         panel.update(name: "C", template: nil, game: game)
         XCTAssertFalse(panel.showsList)
         XCTAssertEqual(panel.accessibilityDescriptors(frame: frame).count, 0)
+    }
+
+    /// The browser itself, not only the panel: Place is enabled for an object the player can
+    /// place and disabled for one survival cannot place, and the arrow keys move between them.
+    /// Enter still goes through the arm check, which refuses the object and says why.
+    @MainActor
+    func testTheBrowsersPlaceButtonFollowsWhatSurvivalCanPlace() throws {
+        let game = try makeGame()
+        XCTAssertTrue(try game.db.putTemplate(object("house", [("oak_planks", 2)])))
+        XCTAssertTrue(try game.db.putTemplate(object("pond", [("oak_planks", 1), ("water", 1)])))
+        let ui = UIManager(cv: UICanvas(device: try XCTUnwrap(MTLCreateSystemDefaultDevice())))
+        ui.resize(480, 270, 1)
+        let screen = TemplateBrowserScreen(mode: .place)
+        ui.open(screen, game)
+        func draw() {
+            ui.beginFrame()
+            screen.draw(ui, game, 0)
+            ui.endFrame()
+        }
+        let place = try XCTUnwrap(screen.buttons.first { $0.label == "Place" })
+        let materials = try XCTUnwrap(screen.buttons.first { $0.label == "Materials" })
+
+        draw()
+        XCTAssertEqual(screen.textAccessibilityDescriptors(ui, game).first { $0.id == "templates.cost" }?.label,
+                       "Costs 2 materials. Still missing 2 Oak Planks.")
+        XCTAssertTrue(place.enabled, "missing materials do not disable Place")
+        XCTAssertTrue(materials.visible)
+
+        XCTAssertTrue(screen.onKey(ui, game, "ArrowDown"))
+        draw()
+        XCTAssertEqual(screen.textAccessibilityDescriptors(ui, game).first { $0.id == "templates.cost" }?.label,
+                       "Survival can't place Water. Switch to Creative to place this object.")
+        XCTAssertFalse(place.enabled, "survival cannot place water")
+        XCTAssertFalse(materials.visible)
+        XCTAssertNil(game.templatePlacementTarget())
+        XCTAssertTrue(screen.onKey(ui, game, "Enter"))
+        XCTAssertNil(game.templatePlacementTarget(), "Enter is refused by the arm check")
+
+        XCTAssertTrue(screen.onKey(ui, game, "ArrowUp"))
+        draw()
+        XCTAssertTrue(place.enabled)
     }
 
     @MainActor
