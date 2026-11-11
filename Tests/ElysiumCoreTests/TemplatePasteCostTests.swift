@@ -846,6 +846,179 @@ final class TemplatePasteCostTests: XCTestCase {
         XCTAssertLessThan(refused, 30, "most rounds must really paste, or the scenario checks nothing")
     }
 
+    // MARK: - Deeper: beds in every turn, and the bill against what stands
+
+    /// Arms `template` turned `steps` quarter turns, and lays stone under its whole footprint
+    /// (which a turn moves) so no ground has to be filled. `template` must be square in x and z.
+    @discardableResult
+    private func armTurned(_ fixture: Fixture, _ template: ObjectTemplate, steps: Int) throws -> (x: Int, y: Int, z: Int) {
+        try fixture.game.beginTemplatePlacement(template)
+        for _ in 0..<steps { XCTAssertTrue(fixture.game.rotateTemplatePlacement(by: 1)) }
+        let target = try XCTUnwrap(fixture.game.templatePlacementTarget())
+        let side = max(template.sizeX, template.sizeZ)
+        for dx in 0..<side { for dz in 0..<side {
+            fixture.world.setBlock(target.originX + dx, target.originY - 1, target.originZ + dz, Int(cell(B.stone)), SET_SILENT)
+        } }
+        return (target.originX, target.originY, target.originZ)
+    }
+
+    private func use(_ fixture: Fixture, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+        let hit = RaycastHit(x: x, y: y, z: z, face: 1, cell: fixture.world.getBlock(x, y, z), t: 1,
+                             px: Double(x) + 0.5, py: Double(y) + 1, pz: Double(z) + 0.5)
+        return useBlock(InteractCtx(world: fixture.world, player: fixture.player), hit)
+    }
+
+    /// One bed of each facing, pasted in each of the four turns, in survival and in creative:
+    /// it stands as one whole bed, both halves facing the same way with the head in front of the
+    /// foot, and sleeping in either half sets the spawn point. In survival it costs one bed, and
+    /// breaking either half gives that one bed back and removes both halves.
+    func testABedOfEveryFacingPastedInEveryTurnIsOneWholeBedThatWorks() throws {
+        let headOffset = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+        for mode in [GameMode.survival, GameMode.creative] {
+            let fixture = try makeFixture(mode: mode)
+            var round = 0
+            for facing in 0..<4 {
+                let foot = (-min(0, headOffset[facing].0), 0, -min(0, headOffset[facing].1))
+                let head = (foot.0 + headOffset[facing].0, 0, foot.2 + headOffset[facing].1)
+                let bedroom = ObjectTemplate(name: "Bed \(facing)", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 2, sizeY: 1, sizeZ: 2,
+                                             blocks: [TemplateBlock(dx: foot.0, dy: 0, dz: foot.2, cell: cell(B.red_bed, facing)),
+                                                      TemplateBlock(dx: head.0, dy: 0, dz: head.2, cell: cell(B.red_bed, 4 | facing))])
+                for steps in 0..<4 {
+                    let which = "\(mode == GameMode.survival ? "survival" : "creative") facing \(facing) turned \(steps)"
+                    for entity in fixture.world.entities where entity is ItemEntity { fixture.world.removeEntity(entity) }
+                    for index in fixture.player.inventory.indices { fixture.player.inventory[index] = nil }
+                    if mode == GameMode.survival { give(fixture, "red_bed", 1, slot: round % 9) }
+                    round += 1
+                    let origin = try armTurned(fixture, bedroom, steps: steps)
+                    _ = try fixture.game.commitTemplatePlacement()
+                    finishJob(fixture)
+
+                    var halves: [(x: Int, z: Int, cell: Int)] = []
+                    for dx in 0..<2 { for dz in 0..<2 {
+                        let value = fixture.world.getBlock(origin.x + dx, origin.y, origin.z + dz)
+                        if value >> 4 == Int(B.red_bed) { halves.append((origin.x + dx, origin.z + dz, value)) }
+                    } }
+                    XCTAssertEqual(halves.count, 2, which)
+                    guard let footCell = halves.first(where: { twoCellHalf(of: $0.cell) == .primary }),
+                          let headCell = halves.first(where: { twoCellHalf(of: $0.cell) == .secondary }) else {
+                        XCTFail("\(which): a foot and a head must stand"); continue
+                    }
+                    let turnedFacing = footCell.cell & 3
+                    XCTAssertEqual(headCell.cell & 3, turnedFacing, which)
+                    XCTAssertEqual([headCell.x - footCell.x, headCell.z - footCell.z],
+                                   [headOffset[turnedFacing].0, headOffset[turnedFacing].1], "\(which): the head is in front")
+                    if mode == GameMode.survival { XCTAssertEqual(carried(fixture, "red_bed"), 0, "\(which): one bed paid") }
+
+                    for target in [headCell, footCell] {
+                        fixture.player.spawnPoint = nil
+                        XCTAssertTrue(use(fixture, target.x, origin.y, target.z), which)
+                        XCTAssertEqual(fixture.player.spawnPoint.map { [$0.0, $0.1, $0.2] }, [target.x, origin.y, target.z], which)
+                    }
+                    let broken = steps % 2 == 0 ? headCell : footCell
+                    finishBreaking(InteractCtx(world: fixture.world, player: fixture.player), broken.x, origin.y, broken.z)
+                    XCTAssertEqual(fixture.world.getBlock(footCell.x, origin.y, footCell.z), 0, which)
+                    XCTAssertEqual(fixture.world.getBlock(headCell.x, origin.y, headCell.z), 0, which)
+                    if mode == GameMode.survival { XCTAssertEqual(dropped(fixture, "red_bed"), 1, "\(which): one bed back") }
+                }
+            }
+        }
+    }
+
+    /// Seeded objects of beds (pairs, and loose halves of either kind), doors (whole, and loose
+    /// tops), pistons and sticky pistons (extended or not, with and without heads) and planks,
+    /// pasted in survival in every turn. What the player lost is, item for item, what stands in
+    /// the object's cells afterwards (`templateStandingMaterials`) and what the receipt says was
+    /// paid. No piston head and no extended piston stands, every bed or door half that stands
+    /// has its own other half, and undo gives back exactly what was lost.
+    func testASurvivalPastesBillIsWhatStandsAfterwardsForSeededObjectsInEveryTurn() throws {
+        let fixture = try makeFixture()
+        var random = SplitMix64(state: 0xB111_57A4)
+        let headOffset = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+        let side = 4
+        var pasted = 0
+        for round in 0..<32 {
+            for entity in fixture.world.entities where entity is ItemEntity { fixture.world.removeEntity(entity) }
+            for index in fixture.player.inventory.indices { fixture.player.inventory[index] = nil }
+            var at: [TemplatePos: UInt16] = [:]
+            func free(_ x: Int, _ z: Int) -> Bool {
+                (0..<side).contains(x) && (0..<side).contains(z) && at[TemplatePos(x: x, y: 0, z: z)] == nil
+            }
+            at[TemplatePos(x: random.int(side), y: 0, z: random.int(side))] = cell(B.oak_planks)
+            var beds = 0
+            for _ in 0..<(3 + random.int(6)) {
+                let x = random.int(side), z = random.int(side)
+                guard free(x, z) else { continue }
+                switch random.int(6) {
+                case 0 where beds < 4:
+                    let facing = random.int(4)
+                    let hx = x + headOffset[facing].0, hz = z + headOffset[facing].1
+                    switch random.int(3) {
+                    case 0:                                         // a lone head
+                        at[TemplatePos(x: x, y: 0, z: z)] = cell(B.red_bed, 4 | facing)
+                    case 1 where free(hx, hz):                      // a whole bed
+                        at[TemplatePos(x: x, y: 0, z: z)] = cell(B.red_bed, facing)
+                        at[TemplatePos(x: hx, y: 0, z: hz)] = cell(B.red_bed, 4 | facing)
+                        beds += 1
+                    default:                                        // a foot alone
+                        at[TemplatePos(x: x, y: 0, z: z)] = cell(B.red_bed, facing)
+                        beds += 1
+                    }
+                case 1:
+                    if random.int(2) == 0 { at[TemplatePos(x: x, y: 0, z: z)] = cell(B.oak_door, random.int(8)) }
+                    at[TemplatePos(x: x, y: 1, z: z)] = cell(B.oak_door, 8 | random.int(8))
+                case 2:
+                    at[TemplatePos(x: x, y: 0, z: z)] = cell(B.piston, 2 + random.int(4) | (random.int(2) << 3))
+                case 3:
+                    at[TemplatePos(x: x, y: 0, z: z)] = cell(B.sticky_piston, 2 + random.int(4) | (random.int(2) << 3))
+                case 4:
+                    at[TemplatePos(x: x, y: 0, z: z)] = cell(B.piston_head, 2 + random.int(4) | (random.int(2) << 3))
+                default:
+                    at[TemplatePos(x: x, y: 0, z: z)] = cell(B.oak_planks)
+                }
+            }
+            let template = ObjectTemplate(name: "Seeded \(round)", anchorX: 0, anchorY: 0, anchorZ: 0,
+                                          sizeX: side, sizeY: 2, sizeZ: side,
+                                          blocks: at.keys.sorted().map { TemplateBlock(dx: $0.x, dy: $0.y, dz: $0.z, cell: at[$0]!) })
+            // Plenty of everything; a bed does not stack, so each takes a slot.
+            for (slot, name) in ["oak_planks", "oak_door", "piston", "sticky_piston"].enumerated() { give(fixture, name, 64, slot: slot) }
+            for slot in 4..<8 { give(fixture, "red_bed", 1, slot: slot) }
+            let before = wealth(fixture, chest: (0, -60, 0))
+            let steps = round % 4
+            let origin = try armTurned(fixture, template, steps: steps)
+            let which = "seed 0xB11157A4 round \(round) turned \(steps)"
+            _ = try fixture.game.commitTemplatePlacement()
+            finishJob(fixture)
+            pasted += 1
+
+            let after = wealth(fixture, chest: (0, -60, 0))
+            var lost: [Int: Int] = [:]
+            for itemID in Set(before.keys).union(after.keys) where (before[itemID] ?? 0) != (after[itemID] ?? 0) {
+                lost[itemID] = (before[itemID] ?? 0) - (after[itemID] ?? 0)
+            }
+            var standing: [Int: Int] = [:]
+            for dx in 0..<side { for dy in 0..<2 { for dz in 0..<side {
+                let x = origin.x + dx, y = origin.y + dy, z = origin.z + dz
+                for line in templateStandingMaterials(in: fixture.world, x, y, z) { standing[line.itemID, default: 0] += line.count }
+                let value = fixture.world.getBlock(x, y, z)
+                XCTAssertNotEqual(value >> 4, Int(B.piston_head), "\(which): a piston head stands")
+                if value >> 4 == Int(B.piston) || value >> 4 == Int(B.sticky_piston) {
+                    XCTAssertEqual(value & 8, 0, "\(which): an extended piston stands")
+                }
+                if twoCellHalf(of: value) == .secondary {
+                    XCTAssertNotNil(twoCellPartnerCell(in: fixture.world, of: value, x, y, z), "\(which): a loose second half stands")
+                }
+            } } }
+            XCTAssertEqual(lost, standing, "\(which): the bill is what stands")
+            let receipt = try XCTUnwrap(fixture.game.lastTemplatePlacementUndo?.materials, which)
+            for (itemID, count) in standing { XCTAssertEqual(receipt.paid(itemID), count, "\(which): \(itemDefs[itemID].name)") }
+            XCTAssertEqual(receipt.total, standing.values.reduce(0, +), which)
+
+            XCTAssertTrue(fixture.game.undoLastTemplatePlacement(), which)
+            XCTAssertEqual(wealth(fixture, chest: (0, -60, 0)), before, "\(which): undo gives back what was lost")
+        }
+        XCTAssertEqual(pasted, 32)
+    }
+
     // MARK: - The quote the browser and the chat show
 
     func testTheQuoteListsMissingMaterialsFirstAndSaysWhatIsMissing() throws {

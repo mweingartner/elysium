@@ -1350,9 +1350,389 @@ final class LANTemplatePaymentTests: XCTestCase {
             XCTAssertEqual(hostCopy(session)["oak_planks"] ?? 0, heldOnceTheWireArrives(), "round \(round)")
         }
     }
+
+    // MARK: - Deeper: a publish behind, at or ahead of the payment
+
+    /// The guest started with ten planks and three glass, pasted six planks (the take, grant G)
+    /// whose far half could not be written (the refund, grant G + 1), and placed two planks by
+    /// hand before it had applied anything. It publishes having applied G - 1, G or G + 1. The
+    /// host stores what that publish will be once the take is in it: never the paid planks
+    /// again, never the take twice. Once the guest has applied both grants and says so, the
+    /// host's copy is what it holds, whichever publish came before.
+    func testAPublishBehindAtOrAheadOfThePaymentIsStoredAsTheGuestWillHoldIt() throws {
+        for offset in [-1, 0, 1] {
+            let world = loadedWorld()
+            let session = hostSession(carrying: [("oak_planks", 10), ("glass", 3)])
+            XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6), x: 13), from: "guest", world: world),
+                           .accepted(action: .placeTemplate, name: "Row"))
+            let take = try XCTUnwrap(session.drainGrants(for: "guest").first)
+            world.removeChunk(1, 0)
+            _ = finish(session, in: world)
+            let refund = try XCTUnwrap(session.drainGrants(for: "guest").first)
+            XCTAssertEqual(refund.grantID, take.grantID + 1)
+            XCTAssertEqual(itemCount([refund], "oak_planks"), 3)
+
+            var guest: [ItemStack?] = Array(repeating: nil, count: 36)
+            guest[0] = stack("oak_planks", 8)                           // ten, less two placed by hand
+            guest[5] = stack("glass", 3)
+            func apply(_ grant: LANInventoryGrant) {
+                lanApplyTemplateTake(grant.take, to: &guest)
+                var slots = TemplateMaterialSlots(copying: guest)
+                for item in grant.items { _ = slots.put(itemID: item.itemID, count: item.count) }
+                for index in slots.touchedSlots { guest[index] = slots.stacks[index] }
+            }
+            if offset >= 0 { apply(take) }
+            if offset >= 1 { apply(refund) }
+            XCTAssertTrue(session.applyInventoryUpdate(LANInventoryUpdate(
+                playerID: "guest", revision: 1,
+                snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: makeLANInventorySlotSnapshots(guest)),
+                appliedGrantID: take.grantID + offset), from: "guest"))
+            let which = "applied G\(offset >= 0 ? "+" : "")\(offset)"
+            // Behind and at the take: two planks (eight less the six); the refund is still on its
+            // way and missing for a moment. Ahead: five, the refund included.
+            XCTAssertEqual(hostCopy(session), ["oak_planks": offset >= 1 ? 5 : 2, "glass": 3], which)
+
+            if offset < 0 { apply(take) }
+            if offset < 1 { apply(refund) }
+            XCTAssertTrue(session.applyInventoryUpdate(LANInventoryUpdate(
+                playerID: "guest", revision: 2,
+                snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0, slots: makeLANInventorySlotSnapshots(guest)),
+                appliedGrantID: refund.grantID), from: "guest"))
+            XCTAssertEqual(hostCopy(session), ["oak_planks": 5, "glass": 3], "\(which): the take counted once")
+            XCTAssertEqual(guest.compactMap { $0 }.filter { $0.id == iid("oak_planks") }.reduce(0) { $0 + $1.count }, 5, which)
+        }
+    }
+
+    /// The guest applied the payment and published that, but the publish was lost (the host
+    /// refuses guest messages while it catches up), and its next paste names it. The host holds
+    /// the payment as unacknowledged and an old copy: it waits, charges nothing, and when the
+    /// publish arrives, charges the next paste once, from the right copy.
+    func testAPasteThatFollowsALostPublishAfterAPaymentWaitsAndIsChargedOnce() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 10)])
+        _ = session.applyTemplateIntent(try placeIntent(row("oak_planks", 6)), from: "guest", world: world)
+        let take = try XCTUnwrap(session.drainGrants(for: "guest").first)
+        _ = finish(session, in: world)
+        // Lost on the way: publish revision 1, four planks, payment applied.
+        let ask = try placeIntent(row("oak_planks", 4), z: 8, appliedGrantID: take.grantID, inventoryRevision: 1)
+        XCTAssertEqual(session.applyTemplateIntent(ask, from: "guest", world: world), .rejected(LANTemplateRefusal.inventoryNotHeard))
+        XCTAssertTrue(session.drainGrants(for: "guest").isEmpty, "nothing is charged")
+        XCTAssertEqual(world.getBlock(4, 64, 8), 0)
+        XCTAssertEqual(hostCopy(session), ["oak_planks": 4])
+        // A publish arrives (the guest's next): four planks, payment applied.
+        XCTAssertTrue(publish(session, [("oak_planks", 4)], revision: 2, applied: take.grantID))
+        let again = try placeIntent(row("oak_planks", 4), z: 8, appliedGrantID: take.grantID, inventoryRevision: 2)
+        XCTAssertEqual(session.applyTemplateIntent(again, from: "guest", world: world), .accepted(action: .placeTemplate, name: "Row"))
+        let second = try XCTUnwrap(session.drainGrants(for: "guest").first)
+        XCTAssertEqual(takeCount([second], "oak_planks"), 4)
+        XCTAssertEqual(hostCopy(session), [:])
+        // The publish the host had refused is gone for good; a stale one before the second take
+        // still shows four planks and is stored without them.
+        XCTAssertTrue(publish(session, [("oak_planks", 4)], revision: 3, applied: take.grantID))
+        XCTAssertEqual(hostCopy(session), [:], "the second payment is taken out of a publish that predates it")
+    }
+
+    /// d73afa9: the result a guest hears counts only the blocks the job wrote, so a paste of six
+    /// whose last three fell in an unloaded chunk reports three, as it reports three materials.
+    func testAPasteThatCouldNotWriteEveryBlockReportsOnlyTheBlocksItWrote() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 6)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6), x: 13), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        world.removeChunk(1, 0)
+        XCTAssertEqual(finish(session, in: world).last,
+                       .placed(name: "Row", blocks: 3, blockEntities: 0, cleared: 0, filled: 0, payment: "Used 3 materials."))
+        // A free paste is counted the same way.
+        let freeWorld = loadedWorld()
+        let free = hostSession()
+        free.setPermissions(LANPeerPermissions(canUseCreative: true), for: "guest")
+        free.updatePlayerState(playerState(gameMode: GameMode.creative))
+        _ = free.applyTemplateIntent(try placeIntent(row("oak_planks", 6), x: 13), from: "guest", world: freeWorld)
+        freeWorld.removeChunk(1, 0)
+        XCTAssertEqual(finish(free, in: freeWorld).last, .placed(name: "Row", blocks: 3, blockEntities: 0, cleared: 0, filled: 0))
+    }
+
+    /// The pot the job could not place for a guest that has died: the pot and its plant lie at
+    /// the object, granted to nobody.
+    func testAPotThePasteCouldNotPlaceForADeadGuestLiesAtTheObjectWithItsPlant() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("flower_pot", 1), ("poppy", 1), ("oak_planks", 1)])
+        let pot = BlockEntityData(type: "lectern", x: 3, y: 0, z: 0)
+        pot.plant = "poppy"
+        let object = ObjectTemplate(name: "Pot", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 4, sizeY: 1, sizeZ: 1,
+                                    blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: cell(B.oak_planks, 0)),
+                                             TemplateBlock(dx: 3, dy: 0, dz: 0, cell: cell(B.flower_pot, 0))],
+                                    blockEntities: [pot])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(object, x: 14), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Pot"))
+        _ = session.drainGrants(for: "guest")
+        world.removeChunk(1, 0)                             // the pot at x 17 is never written
+        session.updatePlayerState(playerState(dead: true))
+        _ = session.consumeDeathDrops(for: "guest")
+        _ = finish(session, in: world)
+        XCTAssertEqual(itemCount(session.drainGrants(for: "guest"), "poppy"), 0, "nothing is granted to a dead guest")
+        XCTAssertEqual(dropped(world, "flower_pot"), 1)
+        XCTAssertEqual(dropped(world, "poppy"), 1, "the plant lies beside its pot")
+    }
+
+    // MARK: - Property: the host takes a pending payment out as the guest will
+
+    /// Seeded published inventories of plain and marked stacks and seeded pending takes. The
+    /// host's `lanInventory(_:without:)` is, slot for slot, what the guest's own take leaves of
+    /// the same inventory; it keeps the selected slot and experience; it touches no marked stack;
+    /// with nothing pending it is the publish itself; and taking out the same take from what it
+    /// already took from removes only what is left (it is the guest's function, not a second
+    /// subtraction of counts).
+    func testTheHostTakesAPendingPaymentOutOfAPublishExactlyAsTheGuestWillForSeededInventories() throws {
+        var random = SplitMix64(state: 0x9E4D_17A6)
+        let kinds = ["oak_planks", "glass", "dirt", "torch", "red_bed", "ender_pearl"].map { iid($0) }
+        for round in 0..<300 {
+            let stacks: [ItemStack?] = (0..<36).map { _ in
+                guard random.int(3) > 0 else { return nil }
+                let id = kinds[random.int(kinds.count)]
+                let count = 1 + random.int(max(1, itemDefs[id].maxStack))
+                switch random.int(6) {
+                case 0: return ItemStack(id, count, label: "Named")
+                case 1: return ItemStack(id, count, damage: 1 + random.int(3))
+                default: return ItemStack(id, count)
+                }
+            }
+            let published = LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: random.int(9),
+                                                       slots: makeLANInventorySlotSnapshots(stacks),
+                                                       xp: random.int(900), xpLevel: random.int(30), xpProgress: 0.5)
+            let take = (0..<random.int(6)).map { _ in
+                LANInventorySlotSnapshot(slot: 0, itemID: kinds[random.int(kinds.count)], count: 1 + random.int(100))
+            }
+            let pending = LANTemplatePendingTake(grantID: 1 + random.int(50), take: take)
+            let which = "seed 0x9E4D17A6 round \(round)"
+            XCTAssertEqual(lanInventory(published, without: nil), published, which)
+
+            let stored = lanInventory(published, without: pending)
+            var guest = try XCTUnwrap(makeInventory(from: published))
+            lanApplyTemplateTake(take, to: &guest)
+            XCTAssertEqual(stored.slots, makeLANInventorySlotSnapshots(guest), "\(which): the guest's own take")
+            XCTAssertEqual(stored.selectedHotbarSlot, published.selectedHotbarSlot, which)
+            XCTAssertEqual([stored.xp, stored.xpLevel], [published.xp, published.xpLevel], which)
+            XCTAssertEqual(stored.xpProgress, published.xpProgress, which)
+            for slot in published.slots where slot.label != nil || slot.damage > 0 {
+                XCTAssertTrue(stored.slots.contains(slot), "\(which): a marked stack was touched")
+            }
+            var twice = guest
+            lanApplyTemplateTake(take, to: &twice)
+            XCTAssertEqual(lanInventory(stored, without: pending).slots, makeLANInventorySlotSnapshots(twice), which)
+        }
+    }
+
+    // MARK: - Seeded: an honest guest is never held back and pays each paste once
+
+    /// The guest behaves like the shipped client (a publish just before each request, and after
+    /// each take), while the host's grants arrive late, publishes are lost on the way, jobs run
+    /// for several steps, and the guest dies, respawns, leaves and rejoins. Whenever everything
+    /// the host sent has arrived and no job is running, a request is never refused as waiting
+    /// for a payment or for an inventory, and an accepted paste takes exactly its bill. At the
+    /// end, once everything has arrived, the host's copy is what the guest holds (nothing was
+    /// charged twice) and the guest can paste what it can pay for.
+    func testAnHonestGuestIsNeverHeldBackOnceEverythingArrivedAndPaysEachPasteOnce() throws {
+        var random = SplitMix64(state: 0x11FE_0A55)
+        let planks = iid("oak_planks")
+        var settledAsks = 0
+        for round in 0..<80 {
+            let world = loadedWorld()
+            let session = hostSession()
+            var inventory: [ItemStack?] = Array(repeating: nil, count: 36)
+            let start = 30 + random.int(34)
+            inventory[random.int(36)] = ItemStack(planks, start)
+            var revision = 0, appliedGrantID = 0, alive = true
+            var wire: [LANInventoryGrant] = []
+            var trail: [String] = []
+
+            func held() -> Int { inventory.compactMap { $0 }.filter { $0.id == planks }.reduce(0) { $0 + $1.count } }
+            func publish(lost: Bool = false) {
+                guard alive else { return }
+                revision += 1
+                guard !lost else { return }
+                _ = session.applyInventoryUpdate(LANInventoryUpdate(
+                    playerID: "guest", revision: revision,
+                    snapshot: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0,
+                                                         slots: makeLANInventorySlotSnapshots(inventory)),
+                    appliedGrantID: appliedGrantID), from: "guest")
+            }
+            func deliverOne() {
+                guard !wire.isEmpty else { return }
+                let grant = wire.removeFirst()
+                guard grant.grantID > appliedGrantID else { return }
+                appliedGrantID = grant.grantID
+                if grant.clearAll { inventory = Array(repeating: nil, count: 36) }
+                lanApplyTemplateTake(grant.take, to: &inventory)
+                var slots = TemplateMaterialSlots(copying: inventory)
+                for item in grant.items { _ = slots.put(itemID: item.itemID, count: item.count) }
+                for index in slots.touchedSlots { inventory[index] = slots.stacks[index] }
+                if !grant.take.isEmpty { publish() }        // the client publishes after a take
+            }
+            func collect() { wire.append(contentsOf: session.drainGrants(for: "guest")) }
+            func settled() -> Bool { wire.isEmpty && !session.hasActiveTemplateJob(playerID: "guest") }
+            func checkNotHeldBack(_ result: LANTemplateIntentResult, wasSettled: Bool, _ what: String) {
+                guard wasSettled else { return }
+                settledAsks += 1
+                XCTAssertNotEqual(result, .rejected(LANTemplateRefusal.paymentPending),
+                                  "seed 0x11FE0A55 round \(round) \(what) trail \(trail.joined(separator: ","))")
+                XCTAssertNotEqual(result, .rejected(LANTemplateRefusal.inventoryNotHeard),
+                                  "seed 0x11FE0A55 round \(round) \(what) trail \(trail.joined(separator: ","))")
+            }
+
+            publish()
+            for _ in 0..<50 {
+                let roll = random.int(10)
+                trail.append(String(roll))
+                switch roll {
+                case 0:
+                    publish(lost: random.int(3) == 0)
+                case 1:
+                    inventory.swapAt(random.int(36), random.int(36))
+                case 2, 3:
+                    deliverOne()
+                case 4 where alive:
+                    let wasSettled = settled()
+                    let lost = !wasSettled && random.int(3) == 0
+                    publish(lost: lost)
+                    let count = 1 + random.int(6)
+                    let result = session.applyTemplateIntent(
+                        try placeIntent(row("oak_planks", count), x: random.int(10), z: 2 + random.int(7),
+                                        appliedGrantID: appliedGrantID, inventoryRevision: revision),
+                        from: "guest", world: world)
+                    let grants = session.drainGrants(for: "guest")
+                    if case .accepted = result {
+                        XCTAssertEqual(takeCount(grants, "oak_planks"), count, "round \(round): a paste takes its bill, once")
+                    } else {
+                        XCTAssertTrue(grants.isEmpty, "round \(round): a refused paste takes nothing")
+                    }
+                    wire.append(contentsOf: grants)
+                    checkNotHeldBack(result, wasSettled: wasSettled && held() >= count, "paste of \(count)")
+                case 5 where alive:
+                    let wasSettled = settled()
+                    publish(lost: !wasSettled && random.int(3) == 0)
+                    let result = session.applyTemplateIntent(undoIntent(appliedGrantID: appliedGrantID, inventoryRevision: revision),
+                                                             from: "guest", world: world)
+                    collect()
+                    checkNotHeldBack(result, wasSettled: wasSettled, "undo")
+                case 6:
+                    session.stepTemplateJobs(in: world, budgetPerPeer: 1 + random.int(4))
+                    _ = session.drainTemplateIntentResponses()
+                    collect()
+                case 7:
+                    if alive {
+                        alive = false
+                        session.updatePlayerState(playerState(dead: true))
+                        if let drop = session.consumeDeathDrops(for: "guest") {
+                            for slot in drop.inventory.slots {
+                                _ = spawnItem(world, drop.x, drop.y, drop.z, ItemStack(slot.itemID, slot.count))
+                            }
+                            _ = session.enqueueGrant(items: [], xp: 0, clearAll: true, to: "guest")
+                        }
+                        collect()
+                    } else {
+                        while !wire.isEmpty { deliverOne() }
+                        alive = true
+                        session.updatePlayerState(playerState())
+                    }
+                case 8:
+                    session.disconnectPeer(playerID: "guest", tick: 1)
+                    wire.removeAll()
+                    session.acceptPeer(playerID: "guest", displayName: "Alex")
+                    let restore = try XCTUnwrap(session.peerRestoreState(playerID: "guest"))
+                    var restored = try XCTUnwrap(makeInventory(from: restore.inventory))
+                    restored += Array(repeating: nil, count: max(0, 36 - restored.count))
+                    inventory = restored
+                    appliedGrantID = restore.grantID
+                    revision = restore.revision
+                    alive = !restore.playerState.dead
+                    collect()
+                default:
+                    while session.hasActiveTemplateJob(playerID: "guest") {
+                        session.stepTemplateJobs(in: world, budgetPerPeer: 2_048)
+                        _ = session.drainTemplateIntentResponses()
+                        collect()
+                    }
+                }
+            }
+            // Everything arrives.
+            while session.hasActiveTemplateJob(playerID: "guest") {
+                session.stepTemplateJobs(in: world, budgetPerPeer: 2_048)
+                _ = session.drainTemplateIntentResponses()
+                collect()
+            }
+            while !wire.isEmpty { deliverOne() }
+            if !alive { alive = true; session.updatePlayerState(playerState()) }
+            publish()
+            let which = "seed 0x11FE0A55 round \(round) trail \(trail.joined(separator: ","))"
+            XCTAssertEqual(hostCopy(session)["oak_planks"] ?? 0, held(), "\(which): nothing charged twice, nothing missing")
+            guard held() >= 1 else { continue }
+            let before = held()
+            publish()
+            XCTAssertEqual(session.applyTemplateIntent(
+                try placeIntent(row("oak_planks", 1), x: 10, z: 10, appliedGrantID: appliedGrantID, inventoryRevision: revision),
+                from: "guest", world: world).isAccepted, true, "\(which): the guest can paste what it can pay for")
+            let grants = session.drainGrants(for: "guest")
+            XCTAssertEqual(takeCount(grants, "oak_planks"), 1, which)
+            wire.append(contentsOf: grants)
+            while !wire.isEmpty { deliverOne() }
+            XCTAssertEqual(held(), before - 1, which)
+            XCTAssertEqual(hostCopy(session)["oak_planks"] ?? 0, held(), which)
+        }
+        XCTAssertGreaterThan(settledAsks, 80, "enough requests must be made with nothing in flight, or liveness is untested")
+    }
+
+    // MARK: - A container edit that crosses the take
+
+    /// The guest pasted six of its ten planks; before the take arrived, it put its three glass
+    /// into a chest. The edit carries the inventory as the guest saw it, still holding the paid
+    /// planks, as a publish in that window does. A publish has the unacknowledged payment taken
+    /// out of it (`lanInventory(_:without:)`); a container edit is checked and stored as it came,
+    /// so its totals cannot match the host's charged copy and an honest edit is refused.
+    ///
+    /// Nothing is gained that way: the copy stays charged and the chest is unchanged. It is a
+    /// refusal an honest guest should not get, in a window of about one round trip, and the
+    /// decision record lists it as accepted. Kept as an expected failure until a container edit
+    /// names the last grant the guest applied, as a publish does.
+    func testAContainerEditMadeBeforeThePaymentArrivedIsCheckedAgainstWhatTheGuestWillHold() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("oak_planks", 10), ("glass", 3)])
+        world.setBlock(2, 64, 1, Int(cell(B.chest)), SET_SILENT)
+        let chest = makeContainerBE(2, 64, 1, 27)
+        world.setBlockEntity(chest)
+        let beforeChest = try XCTUnwrap(makeLANBlockEntitySnapshot(chest, dimension: Dim.overworld.rawValue))
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(row("oak_planks", 6)), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Row"))
+        XCTAssertEqual(takeCount(session.drainGrants(for: "guest"), "oak_planks"), 6)
+
+        let edit = LANContainerEditIntent(
+            blockEntity: LANBlockEntitySnapshot(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, type: "container",
+                                                slotCount: 27, slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("glass"), count: 3)]),
+            inventory: LANPlayerInventorySnapshot(playerID: "guest", selectedHotbarSlot: 0,
+                                                  slots: [LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 10)]),
+            revision: 1, editSeq: 1, blockEntityRevision: lanBlockEntityRevision([beforeChest]))
+        let result = session.applyContainerEditIntent(edit, from: "guest", to: world)
+        XCTExpectFailure("a container edit in the payment window is refused until the edit names the last grant applied") {
+            guard case .applied = result else {
+                return XCTFail("an honest container edit made before the take arrived is refused: \(result)")
+            }
+        }
+        if case .applied = result {
+            XCTAssertEqual(hostCopy(session), ["oak_planks": 4], "the paid planks never come back into the host's copy")
+            XCTAssertEqual(world.getBlockEntity(2, 64, 1)?.items?[0]?.count, 3)
+        } else {
+            XCTAssertEqual(hostCopy(session), ["oak_planks": 4, "glass": 3], "refused: the copy stays charged")
+            XCTAssertEqual(world.getBlockEntity(2, 64, 1)?.items?[0]?.count ?? 0, 0, "and the chest is unchanged")
+        }
+    }
 }
 
 private extension LANTemplateIntentResult {
+    var isAccepted: Bool {
+        if case .accepted = self { return true }
+        return false
+    }
+
     var refundText: String? {
         if case .undone(_, _, let refund) = self { return refund }
         return nil

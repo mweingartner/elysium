@@ -694,6 +694,252 @@ final class TemplateMaterialCostTests: XCTestCase {
         XCTAssertEqual(bill.count(of: iid("furnace")), 1)
     }
 
+    // MARK: - Deeper: turning beds, pistons, plant halves
+
+    /// A bed's head lies one cell from its foot in the direction it faces. For every bed colour,
+    /// every facing and every number of quarter turns, the turned template still has the head
+    /// in front of the foot, both halves face the same way, and that way is the old facing turned
+    /// as the positions were: north, east, south, west, north. The geometry is the oracle, not
+    /// the turning table.
+    func testEveryBedOfEveryFacingTurnsWithItsTemplateAndKeepsItsHeadInFront() throws {
+        let headOffset = [(0, -1), (0, 1), (-1, 0), (1, 0)]       // facing 0...3: north, south, west, east
+        let clockwise = [0: 3, 3: 1, 1: 2, 2: 0]                    // north to east to south to west
+        var beds = 0
+        for id in 1..<blockDefs.count where blockDefs[id].shape == .bed {
+            for facing in 0..<4 {
+                let foot = (1 - min(0, headOffset[facing].0), 0, 1 - min(0, headOffset[facing].1))
+                let head = (foot.0 + headOffset[facing].0, 0, foot.2 + headOffset[facing].1)
+                let object = template([(foot.0, foot.1, foot.2, Int(cell(UInt16(id), facing))),
+                                       (head.0, head.1, head.2, Int(cell(UInt16(id), 4 | facing)))])
+                var expected = facing
+                for steps in 0..<4 {
+                    let turned = rotatedValidatedObjectTemplate(object, rotationSteps: steps)
+                    let which = "\(blockDefs[id].name) facing \(facing) turned \(steps)"
+                    let turnedFoot = try XCTUnwrap(turned.blocks.first { twoCellHalf(of: Int($0.cell)) == .primary }, which)
+                    let turnedHead = try XCTUnwrap(turned.blocks.first { twoCellHalf(of: Int($0.cell)) == .secondary }, which)
+                    XCTAssertEqual(Int(turnedFoot.cell) & 3, expected, which)
+                    XCTAssertEqual(Int(turnedHead.cell) & 3, expected, which)
+                    XCTAssertEqual(Int(turnedFoot.cell) >> 4, id, which)
+                    XCTAssertEqual([turnedHead.dx - turnedFoot.dx, turnedHead.dy - turnedFoot.dy, turnedHead.dz - turnedFoot.dz],
+                                   [headOffset[expected].0, 0, headOffset[expected].1], "\(which): the head is in front of the foot")
+                    XCTAssertEqual(templateForSurvivalPaste(turned).blocks.count, 2, which)
+                    expected = clockwise[expected]!
+                }
+            }
+            beds += 1
+        }
+        XCTAssertGreaterThanOrEqual(beds, 16)
+    }
+
+    /// Turning changes a bed's two facing bits and nothing else, and no other block at all, for
+    /// every block, every metadata value and any number of quarter turns, negative or past a
+    /// full turn. Turning n times is turning once n times (metamorphic).
+    func testTurningChangesOnlyTheFacingOfABed() {
+        for id in 1..<blockDefs.count {
+            for meta in 0..<16 {
+                let value = cell(UInt16(id), meta)
+                var once = value
+                for steps in 0...9 {
+                    let turned = rotatedTemplateCell(value, rotationSteps: steps)
+                    let which = "\(blockDefs[id].name) metadata \(meta) turned \(steps)"
+                    if blockDefs[id].shape == .bed {
+                        XCTAssertEqual(turned & ~3, value & ~3, which)
+                        XCTAssertEqual(turned == value, steps % 4 == 0, "\(which): a bed's facing turns with each quarter turn")
+                    } else {
+                        XCTAssertEqual(turned, value, which)
+                    }
+                    XCTAssertEqual(turned, once, "\(which): n turns are n single turns")
+                    XCTAssertEqual(rotatedTemplateCell(value, rotationSteps: steps - 8), turned, "\(which): two full turns back")
+                    once = rotatedTemplateCell(once, rotationSteps: 1)
+                }
+            }
+        }
+        XCTAssertEqual(rotatedTemplateCell(0, rotationSteps: 1), 0, "air")
+        XCTAssertEqual(rotatedTemplateCell(cell(UInt16(blockDefs.count + 2), 3), rotationSteps: 1),
+                       cell(UInt16(blockDefs.count + 2), 3), "a block id nobody registered")
+    }
+
+    /// Two beds that touch end to end, foot to head and head to head, are two beds in every
+    /// turn: each head still finds its own foot (not the other bed's), nothing is left out, and
+    /// they cost two beds.
+    func testTwoBedsTouchingEndToEndStayTwoBedsInEveryTurn() throws {
+        let layouts: [(String, [(Int, Int, Int, Int)])] = [
+            ("foot to head", [(1, 0, 3, cellValue("red_bed", 0)), (1, 0, 2, cellValue("red_bed", 4)),
+                              (1, 0, 1, cellValue("red_bed", 0)), (1, 0, 0, cellValue("red_bed", 4))]),
+            ("head to head", [(1, 0, 0, cellValue("red_bed", 1)), (1, 0, 1, cellValue("red_bed", 4 | 1)),
+                              (1, 0, 3, cellValue("red_bed", 0)), (1, 0, 2, cellValue("red_bed", 4))]),
+            ("side by side, opposite ways", [(0, 0, 0, cellValue("red_bed", 1)), (0, 0, 1, cellValue("red_bed", 4 | 1)),
+                                             (1, 0, 1, cellValue("blue_bed", 0)), (1, 0, 0, cellValue("blue_bed", 4))]),
+        ]
+        for (name, blocks) in layouts {
+            let object = ObjectTemplate(name: name, anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 2, sizeY: 1, sizeZ: 4,
+                                        blocks: blocks.map { TemplateBlock(dx: $0.0, dy: $0.1, dz: $0.2, cell: UInt16($0.3)) })
+            for steps in 0..<4 {
+                let turned = templateForSurvivalPaste(rotatedValidatedObjectTemplate(object, rotationSteps: steps))
+                XCTAssertEqual(turned.blocks.count, 4, "\(name) turned \(steps)")
+                var at: [TemplatePos: Int] = [:]
+                for block in turned.blocks { at[templatePos(block)] = Int(block.cell) }
+                // Where each original foot went: its head must be found exactly there.
+                for pair in stride(from: 0, to: 4, by: 2) {
+                    let foot = blocks[pair]
+                    let p = rotatedTemplateCoordinate(x: foot.0, y: foot.1, z: foot.2, sizeX: 2, sizeZ: 4, rotationSteps: steps)
+                    let head = blocks[pair + 1]
+                    let h = rotatedTemplateCoordinate(x: head.0, y: head.1, z: head.2, sizeX: 2, sizeZ: 4, rotationSteps: steps)
+                    let headCell = try XCTUnwrap(at[TemplatePos(x: h.x, y: h.y, z: h.z)])
+                    let partner = twoCellPartnerPosition(of: headCell, h.x, h.y, h.z)
+                    XCTAssertEqual(partner.map { [$0.x, $0.y, $0.z] }, [p.x, p.y, p.z], "\(name) turned \(steps) pair \(pair / 2)")
+                }
+                let bill = try templateMaterialBill(turned)
+                XCTAssertEqual(bill.total, 2, "\(name) turned \(steps)")
+            }
+        }
+    }
+
+    /// An extended piston or sticky piston of every facing, real or not, is pasted retracted
+    /// with its facing kept, and its head never comes along, sticky or not, beside its piston or
+    /// not. The bill is one piston.
+    func testAnExtendedPistonOfEveryFacingIsPastedRetractedWithoutItsHead() throws {
+        for piston in ["piston", "sticky_piston"] {
+            for facing in 0..<8 {
+                let sticky = piston == "sticky_piston" ? 8 : 0
+                let object = template([(1, 1, 1, cellValue(piston, facing | 8)),
+                                       (1 + min(1, max(-1, DIR_X[min(facing, 5)])), 1 + DIR_Y[min(facing, 5)],
+                                        1 + DIR_Z[min(facing, 5)], cellValue("piston_head", facing | sticky)),
+                                       (4, 0, 0, cellValue("piston_head", facing))])
+                let survival = templateForSurvivalPaste(object)
+                let which = "\(piston) facing \(facing)"
+                XCTAssertEqual(survival.blocks.map { Int($0.cell) }, [cellValue(piston, facing)], which)
+                let bill = try templateMaterialBill(survival)
+                XCTAssertEqual(bill.total, 1, which)
+                XCTAssertEqual(bill.count(of: iid(piston)), 1, which)
+            }
+        }
+    }
+
+    /// The plant halves follow the door's rule: a top comes along only with its own base under
+    /// it. A small dripleaf top alone or over a dripleaf base of other bits, a lilac top over a
+    /// sunflower, a tall seagrass top over seagrass of its own.
+    func testATallPlantOrSmallDripleafTopComesAlongOnlyWithItsOwnBase() {
+        let object = template([
+            (0, 0, 0, cellValue("small_dripleaf", 0)), (0, 1, 0, cellValue("small_dripleaf", 1 | 4)),   // whole, other bits
+            (1, 1, 0, cellValue("small_dripleaf", 1)),                                                  // a top alone
+            (2, 0, 0, cellValue("sunflower", 0)), (2, 1, 0, cellValue("lilac", 1)),                     // another plant's top
+            (3, 0, 0, cellValue("tall_seagrass", 0)), (3, 1, 0, cellValue("tall_seagrass", 1)),         // whole
+            (4, 0, 0, cellValue("small_dripleaf", 1)), (4, 1, 0, cellValue("small_dripleaf", 1)),       // two tops stacked
+        ])
+        XCTAssertEqual(cells(of: templateForSurvivalPaste(object)), [
+            "0,0,0": cellValue("small_dripleaf", 0), "0,1,0": cellValue("small_dripleaf", 1 | 4),
+            "2,0,0": cellValue("sunflower", 0),
+            "3,0,0": cellValue("tall_seagrass", 0), "3,1,0": cellValue("tall_seagrass", 1),
+        ])
+    }
+
+    // MARK: - Seeded: what a survival paste leaves out
+
+    /// Seeded objects of every two-cell block at every metadata value, as pairs and as loose
+    /// halves, of pistons at every metadata value with and without heads, and of planks, with
+    /// block entities on some cells. For every object:
+    /// - no first half and no other block is ever left out, only second halves and heads;
+    /// - every second half that stays has its own first half beside it in the result;
+    /// - no piston head stays and every piston is retracted;
+    /// - a block entity stays only on a block that stays;
+    /// - preparing twice changes nothing;
+    /// - turning then preparing (the single-player order) places what preparing then turning
+    ///   (the LAN host's order) places, cell for cell, in every turn (metamorphic).
+    func testWhatASurvivalPasteLeavesOutHoldsForSeededObjectsInEveryTurn() throws {
+        var state: UInt64 = 0x7C0_BED5
+        func next(_ bound: Int) -> Int {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return Int((z ^ (z >> 31)) % UInt64(max(1, bound)))
+        }
+        let twoCell = (1..<blockDefs.count).filter { twoCellHalf(of: Int(cell(UInt16($0), 0))) != nil }
+        let pistons = [Int(B.piston), Int(B.sticky_piston)]
+        let (sizeX, sizeY, sizeZ) = (5, 3, 4)
+        func sorted(_ blocks: [TemplateBlock]) -> [[Int]] {
+            blocks.map { [$0.dx, $0.dy, $0.dz, Int($0.cell)] }.sorted { $0.lexicographicallyPrecedes($1) }
+        }
+        var pairsKept = 0, halvesDropped = 0
+        for round in 0..<400 {
+            var at: [TemplatePos: Int] = [:]
+            for _ in 0..<(2 + next(10)) {
+                let p = TemplatePos(x: next(sizeX), y: next(sizeY), z: next(sizeZ))
+                switch next(5) {
+                case 0, 1:
+                    // A first half, and most of the time its own second half where it belongs.
+                    let id = twoCell[next(twoCell.count)]
+                    let meta = next(16)
+                    let primary = Int(cell(UInt16(id), meta)) & ~(blockDefs[id].shape == .door ? 8
+                        : blockDefs[id].shape == .bed ? 4 : 1)
+                    at[p] = primary
+                    if next(4) > 0, let q = twoCellPartnerPosition(of: primary, p.x, p.y, p.z),
+                       (0..<sizeX).contains(q.x), (0..<sizeY).contains(q.y), (0..<sizeZ).contains(q.z) {
+                        let half = blockDefs[id].shape == .door ? 8 : blockDefs[id].shape == .bed ? 4 : 1
+                        // The second half keeps a bed's facing; its other bits are anything.
+                        let bits = blockDefs[id].shape == .bed ? (primary & 3) | (next(2) << 3) : next(16)
+                        at[TemplatePos(x: q.x, y: q.y, z: q.z)] = Int(cell(UInt16(id), bits | half))
+                    }
+                case 2:
+                    at[p] = Int(cell(UInt16(twoCell[next(twoCell.count)]), next(16)))   // any half, any bits
+                case 3:
+                    at[p] = Int(cell(UInt16(pistons[next(2)]), next(16)))
+                    if next(2) == 0 {
+                        let step = dirStep(next(8))
+                        at[TemplatePos(x: p.x + step.x, y: p.y + step.y, z: p.z + step.z)] = Int(cell(B.piston_head, next(16)))
+                    }
+                default:
+                    at[p] = cellValue("oak_planks")
+                }
+            }
+            let positions = at.keys.filter {
+                (0..<sizeX).contains($0.x) && (0..<sizeY).contains($0.y) && (0..<sizeZ).contains($0.z)
+            }.sorted()
+            let blocks = positions.map { TemplateBlock(dx: $0.x, dy: $0.y, dz: $0.z, cell: UInt16(at[$0]!)) }
+            let entities = positions.filter { _ in next(4) == 0 }.map { BlockEntityData(type: "container", x: $0.x, y: $0.y, z: $0.z) }
+            let object = ObjectTemplate(name: "Seeded", anchorX: 0, anchorY: 0, anchorZ: 0,
+                                        sizeX: sizeX, sizeY: sizeY, sizeZ: sizeZ, blocks: blocks, blockEntities: entities)
+            let survival = templateForSurvivalPaste(object)
+            let which = "seed 0x7C0BED5 round \(round)"
+
+            var kept: [TemplatePos: Int] = [:]
+            for block in survival.blocks { kept[templatePos(block)] = Int(block.cell) }
+            for block in object.blocks {
+                let id = Int(block.cell >> 4)
+                let leftOut = kept[templatePos(block)] == nil
+                if blockDefs[id].shape == .pistonHead {
+                    XCTAssertTrue(leftOut, "\(which): a piston head stayed")
+                } else if twoCellHalf(of: Int(block.cell)) == .secondary {
+                    if leftOut { halvesDropped += 1 }
+                } else {
+                    XCTAssertFalse(leftOut, "\(which): \(blockDefs[id].name) \(block.cell & 15) was left out")
+                }
+            }
+            for block in survival.blocks {
+                let value = Int(block.cell)
+                if twoCellHalf(of: value) == .secondary {
+                    XCTAssertNotNil(twoCellPartnerCell(of: value, block.dx, block.dy, block.dz) { kept[TemplatePos(x: $0, y: $1, z: $2)] ?? 0 },
+                                    "\(which): \(blockDefs[value >> 4].name) \(value & 15) stayed without its first half")
+                    pairsKept += 1
+                }
+                if pistons.contains(value >> 4) { XCTAssertEqual(value & 8, 0, "\(which): an extended piston") }
+            }
+            XCTAssertTrue(survival.blockEntities.allSatisfy { kept[templatePos($0)] != nil }, which)
+            XCTAssertEqual(templateForSurvivalPaste(survival).blocks, survival.blocks, "\(which): prepared twice")
+            for steps in 1..<4 {
+                let turnedFirst = templateForSurvivalPaste(rotatedValidatedObjectTemplate(object, rotationSteps: steps))
+                let preparedFirst = rotatedValidatedObjectTemplate(survival, rotationSteps: steps)
+                XCTAssertEqual(sorted(turnedFirst.blocks), sorted(preparedFirst.blocks), "\(which) turned \(steps)")
+                XCTAssertEqual(turnedFirst.blockEntities.map { [$0.x, $0.y, $0.z] }.sorted { $0.lexicographicallyPrecedes($1) },
+                               preparedFirst.blockEntities.map { [$0.x, $0.y, $0.z] }.sorted { $0.lexicographicallyPrecedes($1) },
+                               "\(which) turned \(steps): block entities")
+            }
+        }
+        XCTAssertGreaterThan(pairsKept, 200, "the generator must make real pairs, or this checks little")
+        XCTAssertGreaterThan(halvesDropped, 100, "and loose halves")
+    }
+
     /// Whatever a template says a block holds, the survival paste gives the block exactly the
     /// entity placing it by hand creates: no items, no disc, no loot table.
     func testEveryBlockOfASurvivalPasteGetsTheBlockEntityOfAHandPlacedOne() {

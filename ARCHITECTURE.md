@@ -1112,7 +1112,10 @@ In survival a paste costs the items that place its blocks; creative is free. `So
   disconnects while its paste is still being placed loses the materials for the part not yet
   placed, and one that disconnects during its undo loses the refund for what was already restored; a refund is lost if the guest fills its inventory in the round trip before the grant
   arrives; a refund that crosses an inventory publish on the wire is missing from the host's copy
-  until the guest's inventory next changes, as a picked-up item already can be; a guest that
+  until the guest's inventory next changes, as a picked-up item already can be; a container edit
+  sent in the round trip between a paste and its payment is refused, because unlike a publish it
+  does not name the last grant applied (the guest's client does not roll a refused edit back,
+  which is an older fault of every refused edit and is tracked on its own); a guest that
   places a block by hand in the round trip after its click can be one block
   short when the take arrives; and a guest's inventory stays its own, so a guest can still give
   itself items with a chat command, as it could before.

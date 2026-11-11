@@ -420,4 +420,161 @@ final class TwoCellBlockDropTests: XCTestCase {
         breakByHand(world, player, 6, 65, 6)
         XCTAssertEqual(droppedCount(world, "small_dripleaf"), 0)
     }
+
+    // MARK: Deeper: halves that disagree, and halves of other blocks
+
+    /// A door's upper half carries bits of its own (the hinge, in vanilla) that need not agree
+    /// with the lower half's facing and open bits. They are still one door: using either half
+    /// flips the open bit of the lower half and nothing else, for every pair of metadata values.
+    func testEveryDoorOpensFromEitherHalfWhateverItsUpperHalfCarries() {
+        let (world, player) = makeFixture()
+        world.setBlock(6, 63, 6, Int(cell(B.stone)))
+        for upperMeta in 8..<16 {
+            for lowerMeta in 0..<8 {
+                for useUpper in [false, true] {
+                    world.setBlock(6, 64, 6, Int(cell(B.oak_door, lowerMeta)), SET_NO_NEIGHBORS)
+                    world.setBlock(6, 65, 6, Int(cell(B.oak_door, upperMeta)), SET_NO_NEIGHBORS)
+                    let which = "lower \(lowerMeta), upper \(upperMeta), \(useUpper ? "upper" : "lower") used"
+                    XCTAssertTrue(use(world, player, 6, useUpper ? 65 : 64, 6), which)
+                    XCTAssertEqual(world.getBlock(6, 64, 6), Int(cell(B.oak_door, lowerMeta ^ 4)), which)
+                    XCTAssertEqual(world.getBlock(6, 65, 6), Int(cell(B.oak_door, upperMeta)), which)
+                    XCTAssertEqual(world.getBlock(6, 63, 6), Int(cell(B.stone)), which)
+                }
+            }
+        }
+    }
+
+    /// Opening writes the door's own id into the lower half. Before a half without its partner
+    /// was refused, a birch top over an oak bottom turned the oak door into a birch one.
+    func testADoorHalfOverAnotherDoorsHalfCannotBeOpenedAndNeitherDoorChanges() {
+        let (world, player) = makeFixture()
+        world.setBlock(6, 63, 6, Int(cell(B.stone)))
+        world.setBlock(6, 64, 6, Int(cell(B.oak_door, 1)), SET_NO_NEIGHBORS)
+        world.setBlock(6, 65, 6, Int(cell(B.birch_door, 8)), SET_NO_NEIGHBORS)
+        XCTAssertFalse(use(world, player, 6, 65, 6), "a birch top over an oak bottom")
+        XCTAssertFalse(use(world, player, 6, 64, 6), "an oak bottom under a birch top")
+        XCTAssertEqual(world.getBlock(6, 64, 6), Int(cell(B.oak_door, 1)), "the oak door stays oak and closed")
+        XCTAssertEqual(world.getBlock(6, 65, 6), Int(cell(B.birch_door, 8)))
+    }
+
+    /// Every door a hand can open, with a lone top of every metadata value over a block that is
+    /// not a door: the block under it is never written.
+    func testALoneTopOfEveryWoodenDoorLeavesTheBlockUnderItAlone() {
+        let (world, player) = makeFixture()
+        var doors = 0
+        for id in 1..<blockDefs.count where blockDefs[id].shape == .door && id != Int(B.iron_door) {
+            for upperMeta in 8..<16 {
+                world.setBlock(6, 64, 6, Int(cell(B.dirt)), SET_NO_NEIGHBORS)
+                world.setBlock(6, 65, 6, Int(cell(UInt16(id), upperMeta)), SET_NO_NEIGHBORS)
+                XCTAssertFalse(use(world, player, 6, 65, 6), "\(blockDefs[id].name) \(upperMeta)")
+                XCTAssertEqual(world.getBlock(6, 64, 6), Int(cell(B.dirt)), "\(blockDefs[id].name) \(upperMeta)")
+                XCTAssertEqual(world.getBlock(6, 65, 6), Int(cell(UInt16(id), upperMeta)))
+            }
+            doors += 1
+        }
+        XCTAssertGreaterThan(doors, 8, "every wood's door is checked")
+    }
+
+    /// A bed of every facing works from either half; a foot or a head of every facing alone does
+    /// not; and a head lying where its foot's head belongs but facing another way, or of another
+    /// colour, is not that bed's head, so neither half is a bed.
+    func testABedIsABedOnlyWithItsOwnOtherHalfInEveryFacing() {
+        let headOffset = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+        for facing in 0..<4 {
+            let foot = (6, 64, 6)
+            let head = (6 + headOffset[facing].0, 64, 6 + headOffset[facing].1)
+            for useHead in [false, true] {
+                let target = useHead ? head : foot
+                let which = "facing \(facing), \(useHead ? "head" : "foot")"
+
+                let (world, player) = makeFixture()
+                world.setBlock(foot.0, foot.1, foot.2, Int(cell(B.red_bed, facing)))
+                world.setBlock(head.0, head.1, head.2, Int(cell(B.red_bed, 4 | facing)))
+                XCTAssertTrue(use(world, player, target.0, target.1, target.2), "whole, \(which)")
+                XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, [target.0, target.1, target.2], which)
+
+                for half in ["alone", "turned", "recoloured"] {
+                    let (world, player) = makeFixture()
+                    let before = player.spawnPoint.map { [$0.0, $0.1, $0.2] }
+                    let otherHalf = useHead ? foot : head
+                    let ownCell = Int(cell(B.red_bed, (useHead ? 4 : 0) | facing))
+                    world.setBlock(target.0, target.1, target.2, ownCell)
+                    switch half {
+                    case "turned":
+                        world.setBlock(otherHalf.0, otherHalf.1, otherHalf.2,
+                                       Int(cell(B.red_bed, (useHead ? 0 : 4) | ((facing + 1) % 4))))
+                    case "recoloured":
+                        world.setBlock(otherHalf.0, otherHalf.1, otherHalf.2,
+                                       Int(cell(B.blue_bed, (useHead ? 0 : 4) | facing)))
+                    default:
+                        break
+                    }
+                    XCTAssertFalse(use(world, player, target.0, target.1, target.2), "\(half), \(which)")
+                    XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, before, "\(half), \(which)")
+                    XCTAssertEqual(world.getBlock(target.0, target.1, target.2), ownCell, "\(half), \(which)")
+                }
+            }
+        }
+    }
+
+    /// Two beds laid foot to head, and two laid head to head. Each half partners only its own
+    /// bed's other half, so breaking one bed leaves the other whole and working.
+    func testTwoBedsTouchingEndToEndAreTwoBeds() {
+        // Foot to head, both facing north: A's foot at z 9, head at z 8; B's foot at z 7, head at z 6.
+        // Head to head: C faces south (foot z 2, head z 3); D faces north (foot z 5, head z 4).
+        let layouts: [(name: String, cells: [((Int, Int, Int), Int)], broken: (Int, Int, Int),
+                       survivor: [(Int, Int, Int)])] = [
+            ("foot to head", [((6, 64, 9), 0), ((6, 64, 8), 4), ((6, 64, 7), 0), ((6, 64, 6), 4)],
+             (6, 64, 8), [(6, 64, 7), (6, 64, 6)]),
+            ("head to head", [((6, 64, 2), 1), ((6, 64, 3), 4 | 1), ((6, 64, 5), 0), ((6, 64, 4), 4)],
+             (6, 64, 3), [(6, 64, 5), (6, 64, 4)]),
+        ]
+        for layout in layouts {
+            let (world, player) = makeFixture()
+            for (at, meta) in layout.cells { world.setBlock(at.0, at.1, at.2, Int(cell(B.red_bed, meta))) }
+            // Each half's partner is the next cell of its own pair, never the neighbouring bed.
+            for pair in stride(from: 0, to: 4, by: 2) {
+                let a = layout.cells[pair], b = layout.cells[pair + 1]
+                XCTAssertEqual(twoCellPartnerCell(in: world, of: world.getBlock(a.0.0, a.0.1, a.0.2), a.0.0, a.0.1, a.0.2),
+                               Int(cell(B.red_bed, b.1)), "\(layout.name): pair \(pair / 2)")
+                XCTAssertEqual(twoCellPartnerCell(in: world, of: world.getBlock(b.0.0, b.0.1, b.0.2), b.0.0, b.0.1, b.0.2),
+                               Int(cell(B.red_bed, a.1)), "\(layout.name): pair \(pair / 2)")
+            }
+            breakByHand(world, player, layout.broken.0, layout.broken.1, layout.broken.2)
+            XCTAssertEqual(droppedCount(world, "red_bed"), 1, layout.name)
+            for at in layout.survivor {
+                XCTAssertEqual(world.getBlockId(at.0, at.1, at.2), Int(B.red_bed), "\(layout.name): the other bed stays")
+            }
+            let rest = layout.survivor[0]
+            XCTAssertTrue(use(world, player, rest.0, rest.1, rest.2), "\(layout.name): and is still a bed")
+        }
+    }
+
+    /// The partner rule for the plant halves: only the same block's other half above or below,
+    /// whatever other bits the halves carry. A small dripleaf under a sunflower top, or a lilac
+    /// top over a sunflower base, stands alone.
+    func testAPlantHalfPartnersOnlyItsOwnBlocksOtherHalfWhateverItsOtherBits() {
+        let (world, player) = makeFixture()
+        for plant in [B.small_dripleaf, B.sunflower, B.tall_seagrass] {
+            for baseMeta in stride(from: 0, to: 16, by: 2) {
+                for topMeta in stride(from: 1, to: 16, by: 2) {
+                    world.setBlock(3, 64, 3, Int(cell(plant, baseMeta)), SET_NO_NEIGHBORS)
+                    world.setBlock(3, 65, 3, Int(cell(plant, topMeta)), SET_NO_NEIGHBORS)
+                    let which = "\(blockDefs[Int(plant)].name) base \(baseMeta) top \(topMeta)"
+                    XCTAssertEqual(twoCellPartnerCell(in: world, of: Int(cell(plant, baseMeta)), 3, 64, 3),
+                                   Int(cell(plant, topMeta)), which)
+                    XCTAssertEqual(twoCellPartnerCell(in: world, of: Int(cell(plant, topMeta)), 3, 65, 3),
+                                   Int(cell(plant, baseMeta)), which)
+                }
+            }
+        }
+        world.setBlock(9, 63, 6, Int(cell(B.clay)))
+        world.setBlock(9, 64, 6, Int(cell(B.small_dripleaf, 0)), SET_NO_NEIGHBORS)
+        world.setBlock(9, 65, 6, Int(cell(B.sunflower, 1)), SET_NO_NEIGHBORS)
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.small_dripleaf, 0)), 9, 64, 6))
+        XCTAssertNil(twoCellPartnerCell(in: world, of: Int(cell(B.sunflower, 1)), 9, 65, 6))
+        breakByHand(world, player, 9, 65, 6)
+        XCTAssertEqual(droppedCount(world, "sunflower"), 0, "a sunflower top over a dripleaf is worth nothing")
+        XCTAssertEqual(world.getBlock(9, 64, 6), Int(cell(B.small_dripleaf, 0)), "and takes nothing with it")
+    }
 }
