@@ -5,6 +5,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.5.0 for the survival template cost
+  and the fixes below. The template intent, the inventory update and the inventory grant changed
+  shape, so older binaries are rejected during the exact-version handshake.
+
 - **In survival, placing an object template costs materials.** Until now a paste created its
   blocks from nothing in every game mode. In survival each block now costs the item that places
   it (a door one door, a double slab two slabs, a potted poppy a pot and a poppy), taken from your

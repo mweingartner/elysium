@@ -286,7 +286,8 @@ EXPECTED_STORAGE_OBJECT_SHA256='7dd3d8314e6bd3067b1e3779d6ae52d63d009cb952175f5a
 # 1.4.4: only ELYSIUM_VERSION changes; was e87d37bbf5cf4d763fbc020d39cc2b7da2caad4a4cb92da1c2205a0968efc461.
 # 1.4.5: only ELYSIUM_VERSION changes; was 5af166872a3cbcff3fd104df1fd676e04196eba9776794960426c9f14df0eea6.
 # 1.4.6: only ELYSIUM_VERSION changes; was 6c92e7d66ea3f889f5b708a4afb65a0ca53145de3099104a3609e768ab24e7b9.
-EXPECTED_SAVES_SOURCE_SHA256='267afa1690f7387c38184e8afeee40f296d2286f28429afa23988e7d762edc0a'
+# 1.5.0: only ELYSIUM_VERSION changes; was 267afa1690f7387c38184e8afeee40f296d2286f28429afa23988e7d762edc0a.
+EXPECTED_SAVES_SOURCE_SHA256='5efb59a68a9e3272f07d2f55cd74a206790418884b0976399e08c13446589f0a'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
 # 1.4.0: only the Saves.swift compiler-AST inventory entry moves (version literal); was
 # 377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb.
@@ -302,7 +303,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd
 # 3e53ff8a0b05c23c138f3e0be361719e6fb2bab683e97d78a543ee7185acf87e.
 # 1.4.6: only the Saves.swift compiler-AST entry moves (version literal); was
 # b54aca56ef277bab6db086db2e46dcc591726d227fe6ff27baaad61cea2a72a0.
-EXPECTED_CORE_CAPABILITY_SHA256='ca9c270932ba8854d9fc6ac652a5fe3ce616b30086cfb4cb3efb27f6e761be20'
+# 1.5.0: only the Saves.swift compiler-AST entry moves (version literal); was
+# ca9c270932ba8854d9fc6ac652a5fe3ce616b30086cfb4cb3efb27f6e761be20.
+EXPECTED_CORE_CAPABILITY_SHA256='a2ada9b26583ce9e779d7474ae28967838c8d178ee109e90615287fd31637e21'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
 # Swift 6.4.2 toolchain (unchanged source): was d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444.
@@ -390,7 +393,18 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='8bc5318f0aceb95d67d92db8771b8fa1e0690a1fcd795
 # placement, progress and undo texts come from the functions the host's messages to a guest use.
 # No checked-player caller changes: the getter/CAS counts and spans below are as before.
 # Was a3df1d3ae3f1039361b3b59205ec7a6cb16832dc1d916b4002b305ae14b58d6d. See docs/release-1.4.6-build.md.
-EXPECTED_GAME_CORE_SOURCE_SHA256='8c3a62b5c489da76703cb96638885b32c4d68f55a7b44cd1711f434cc2ed9ae5'
+# 1.5.0 (a survival paste costs materials): beginTemplatePlacement checks the cost when the
+# preview is armed, commitTemplatePlacement builds the job from the survival form of the template
+# and charges it before installing it, finishTemplatePlacementJob settles what the job could not
+# write and reports what was used, and undoLastTemplatePlacement asks for the refund before it
+# restores; the bodies live in GameCore+TemplateMaterials.swift. For a LAN guest, applyLANGrant
+# removes what a grant's take names and then lets the next tick publish, publishLANInventoryNow
+# publishes before a template request, and lanLocalInventoryRevision and lanLastAppliedGrantID are
+# readable outside the type (the request and the transport's publish carry them). A refusal's
+# action-bar text is the short form. No checked-player caller changes: the getter/CAS counts and
+# spans below are as before.
+# Was 8c3a62b5c489da76703cb96638885b32c4d68f55a7b44cd1711f434cc2ed9ae5. See docs/release-1.5.0-build.md.
+EXPECTED_GAME_CORE_SOURCE_SHA256='cd7c28d5708ae39d826c7ee6e87923c9fe3d2e15a74f148d70565d4aa7f30bdb'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -485,7 +499,21 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='8c3a62b5c489da76703cb96638885b32c4d68f55a7b44c
 # the GameCore capture above and the version literal. Player.swift, the storage and text-input
 # sources and objects are byte-identical. Was
 # 244f6a529f5d647d71ece10d845164c2f9e3d9f729e791420a3f685a541f354e. See docs/release-1.4.6-build.md.
-EXPECTED_CORE_OBJECT_SHA256='4ffe638b66f0758b34bec0d48ae3ef700345465c35f853a04a44d5e67fcf8e71'
+# 1.5.0 (a survival paste costs materials): the Core object moves for the price of a cell and the
+# survival form of a template (TemplateMaterials.swift, TemplateHandPlacement.swift), paying and
+# refunding (TemplateMaterialLedger.swift, GameCore+TemplateMaterials.swift), the two-cell rules
+# (TwoCellBlocks.swift, with the break, use, drop, rotation and door-support callers in
+# Interact.swift, Templates.swift, Redstone.swift, BlockRegistry.swift), the job's receipt,
+# unplaced lists, dirt fill and written-block count (Templates.swift, TemplateUndoLedger.swift),
+# the bounded facing (Dirs.swift, BlockEntities.swift, Redstone.swift), the crafting pool opened
+# to the module (Crafting.swift), the host's charge and refund for a guest
+# (LANHostTemplateJobs.swift moved out of LANReplication.swift, LANTemplatePayment.swift), the
+# take in a grant, the grant id in an inventory update and the inventory revision in a template
+# intent (LANMultiplayer.swift, LANTemplateTransfer.swift, LANGameplayOrchestration.swift), the
+# GameCore capture above and the version literal. Player.swift, the storage and text-input
+# sources and objects are byte-identical. Was
+# 4ffe638b66f0758b34bec0d48ae3ef700345465c35f853a04a44d5e67fcf8e71. See docs/release-1.5.0-build.md.
+EXPECTED_CORE_OBJECT_SHA256='89c980f228a61f51c6fec5f9d754cb0aaef333da2fa05719c6dfc8509f02e073'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -564,8 +592,14 @@ EXPECTED_CORE_OBJECT_SHA256='4ffe638b66f0758b34bec0d48ae3ef700345465c35f853a04a4
 # Core); elysmoke only relinks Core. Atrium still 19eb940. Were
 # 1741e80cb4adb92e75d932f56a078a0a8d659f5597b60a3bfbd458c48c66e290 (Elysium) and
 # 9c32bd123cee470e86cc8723973877dff4f244f39e080616efb8956a76841618 (elysmoke).
-EXPECTED_ELYSIUM_PRODUCT_SHA256='fa83db5f9b0ae7366a18ea6fb6c61670b9e2c3d29cf0ebdcabf31c32e1872d26'
-EXPECTED_SMOKE_PRODUCT_SHA256='d034d52fca345886ad2b0cbf613e92ece0a90c2bcd559d5ebbde87c88553923c'
+# 1.5.0: the Elysium product relinks the Core changes above and adds the materials panel of the
+# placement browser (TemplateMaterialsPanel.swift, ScreensM.swift) and the grant id on the
+# transport's inventory publish, with the payment grant sent ahead of the accepted event
+# (LANTransport.swift); elysmoke only relinks Core. Atrium still 19eb940. Were
+# fa83db5f9b0ae7366a18ea6fb6c61670b9e2c3d29cf0ebdcabf31c32e1872d26 (Elysium) and
+# d034d52fca345886ad2b0cbf613e92ece0a90c2bcd559d5ebbde87c88553923c (elysmoke).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='2497582c4b572f414da1ce017d26c47a254f999b6df324a2b9712658b7f5d737'
+EXPECTED_SMOKE_PRODUCT_SHA256='a106464b5597d6e24e59cdaf8526cebeb00e41bfcc7df98a3974f661ed3450d7'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
