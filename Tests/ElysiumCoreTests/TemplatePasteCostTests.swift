@@ -1058,4 +1058,365 @@ final class TemplatePasteCostTests: XCTestCase {
         XCTAssertEqual(creative.statusText, "Free in Creative")
         XCTAssertEqual(creative.sentence, "Free in Creative.")
     }
+
+    // MARK: - LAN host: what a guest is told about the containers
+
+    /// A LAN host sends a guest the block entities that were marked dirty with its next delta,
+    /// and otherwise only the eight nearest to a player, twice a second. A chest the host's own
+    /// paste pays from or refunds into is therefore marked dirty, or a guest in a storage room
+    /// keeps seeing it as it was and its next edit of that chest is refused as stale.
+
+    /// A host session with one guest, told about rewritten containers the way the transport
+    /// tells it (`LANMultiplayerManager.configureHostReplicationHooks`), and the guest's mirror
+    /// after it joined.
+    private func host(_ fixture: Fixture) -> (session: LANMultiplayerHostSession, guest: LANMultiplayerClientSession) {
+        let session = LANMultiplayerHostSession()
+        _ = session.acceptPeer(playerID: "guest", displayName: "Alex")
+        fixture.game.onWorldContainerItemsChanged = { world, x, y, z in
+            session.recordDirtyBlockEntity(LANBlockPosition(dimension: world.dim.rawValue, x: x, y: y, z: z))
+        }
+        let guest = LANMultiplayerClientSession()
+        send(makeLANBlockEntitySnapshots(in: fixture.world), from: session, to: guest, fullSnapshot: true)
+        return (session, guest)
+    }
+
+    private func send(_ snapshots: [LANBlockEntitySnapshot], from session: LANMultiplayerHostSession,
+                      to guest: LANMultiplayerClientSession, fullSnapshot: Bool = false) {
+        _ = guest.apply(session.makeBatch(
+            tick: 0, fullSnapshot: fullSnapshot, worldSummary: nil, worldState: nil, localPlayer: nil,
+            chunkSections: [], entitySnapshots: [], entitySnapshotsComplete: false, inventorySnapshots: [],
+            blockEntitySnapshots: snapshots))
+    }
+
+    /// The host's next delta: the block entities marked dirty since the last one, drained and
+    /// read from the world by the call the transport makes. Returns where they stand.
+    @discardableResult
+    private func sendDelta(_ fixture: Fixture, _ host: (session: LANMultiplayerHostSession, guest: LANMultiplayerClientSession),
+                           file: StaticString = #filePath, line: UInt = #line) -> [[Int]] {
+        let dirty = host.session.drainDirtyBlockEntitySnapshots(in: fixture.world)
+        XCTAssertEqual(dirty.snapshots.map { [$0.x, $0.y, $0.z] }, dirty.positions.map { [$0.x, $0.y, $0.z] },
+                       "every container that was written still stands", file: file, line: line)
+        send(dirty.snapshots, from: host.session, to: host.guest)
+        return dirty.positions.map { [$0.x, $0.y, $0.z] }
+    }
+
+    /// How many of an item the guest believes a container holds.
+    private func mirrored(_ guest: LANMultiplayerClientSession, at position: (Int, Int, Int), _ name: String) -> Int {
+        let key = LANBlockPosition(dimension: Dim.overworld.rawValue, x: position.0, y: position.1, z: position.2)
+        return (guest.blockEntities[key]?.slots ?? []).filter { $0.itemID == iid(name) }.reduce(0) { $0 + $1.count }
+    }
+
+    func testAGuestIsToldAtOnceAboutAChestTheHostsPastePaidFrom() throws {
+        let fixture = try makeFixture()
+        // A storage room: eight empty chests behind the host, nearer than the one with planks,
+        // so the twice-a-second fill of the eight nearest never reaches that one.
+        for x in 1...8 { placeChest(fixture, at: (x, 64, -2), []) }
+        let chestAt = (-10, 64, 10)
+        placeChest(fixture, at: chestAt, [("oak_planks", 64)])
+        let host = host(fixture)
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 64)
+
+        try arm(fixture, planks(6))
+        XCTAssertEqual(sendDelta(fixture, host), [], "arming the preview and its quote change no container")
+        _ = try fixture.game.commitTemplatePlacement()
+        XCTAssertEqual(stored(fixture, at: chestAt, "oak_planks"), 58)
+        XCTAssertEqual(sendDelta(fixture, host), [[-10, 64, 10]], "the click pays, and only that chest was written")
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 58)
+
+        finishJob(fixture)
+        XCTAssertEqual(sendDelta(fixture, host), [], "a paste that wrote all its blocks pays nothing back")
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 58)
+    }
+
+    func testAGuestIsToldAboutEveryContainerAPastePaidFromAndNoOther() throws {
+        let fixture = try makeFixture()
+        let near = (3, 64, -3), further = (-10, 64, 10), untouched = (6, 64, -3), outOfRange = (60, 64, 0)
+        placeChest(fixture, at: near, [("cobblestone", 9), ("oak_planks", 4)])
+        placeChest(fixture, at: further, [("oak_planks", 64)])
+        placeChest(fixture, at: untouched, [("cobblestone", 64)])
+        placeChest(fixture, at: outOfRange, [("oak_planks", 64)])
+        let host = host(fixture)
+
+        try paste(fixture, planks(10))
+        XCTAssertEqual(sendDelta(fixture, host), [[3, 64, -3], [-10, 64, 10]], "nearest first, each once")
+        XCTAssertEqual(mirrored(host.guest, at: near, "oak_planks"), 0)
+        XCTAssertEqual(mirrored(host.guest, at: near, "cobblestone"), 9)
+        XCTAssertEqual(mirrored(host.guest, at: further, "oak_planks"), 58)
+        XCTAssertEqual(mirrored(host.guest, at: outOfRange, "oak_planks"), 64)
+    }
+
+    func testAPasteThatTakesNothingFromAContainerTellsGuestsNothing() throws {
+        let fixture = try makeFixture()
+        let chestAt = (3, 64, -3)
+        placeChest(fixture, at: chestAt, [("oak_planks", 3)])
+        let host = host(fixture)
+
+        // Refused: the player cannot pay, so nothing is taken.
+        try arm(fixture, planks(6))
+        XCTAssertThrowsError(try fixture.game.commitTemplatePlacement())
+        XCTAssertEqual(sendDelta(fixture, host), [])
+
+        // Paid from the inventory alone, and paid back to it.
+        give(fixture, "oak_planks", 6, slot: 0)
+        _ = try fixture.game.commitTemplatePlacement()
+        finishJob(fixture)
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(carried(fixture, "oak_planks"), 6)
+        XCTAssertEqual(sendDelta(fixture, host), [])
+
+        // Creative: free.
+        fixture.player.setGameMode(GameMode.creative)
+        try paste(fixture, planks(6))
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(stored(fixture, at: chestAt, "oak_planks"), 3)
+        XCTAssertEqual(sendDelta(fixture, host), [])
+    }
+
+    /// The dirt for the ground is charged at the click and paid back when the job finishes for
+    /// every cell that needed no filling by then. Both writes reach the guest.
+    func testAGuestIsToldWhenAFinishedPastePaysBackIntoAChest() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 3, slot: 0)
+        let chestAt = (-6, 64, 6)
+        placeChest(fixture, at: chestAt, [("dirt", 64)])
+        let host = host(fixture)
+        let origin = try arm(fixture, planks(3))
+        fixture.world.setBlock(origin.x, origin.y - 1, origin.z, 0, SET_SILENT)
+        fixture.world.setBlock(origin.x + 1, origin.y - 1, origin.z, 0, SET_SILENT)
+        _ = try fixture.game.commitTemplatePlacement()
+        XCTAssertEqual(sendDelta(fixture, host), [[-6, 64, 6]])
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "dirt"), 62, "two cells of ground are paid at the click")
+
+        fixture.world.setBlock(origin.x + 1, origin.y - 1, origin.z, Int(cell(B.dirt)), SET_SILENT)
+        finishJob(fixture)
+        XCTAssertEqual(stored(fixture, at: chestAt, "dirt"), 63, "the cell that needed no filling is paid back")
+        XCTAssertEqual(sendDelta(fixture, host), [[-6, 64, 6]])
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "dirt"), 63)
+    }
+
+    func testAGuestIsToldWhenUndoReturnsMaterialsToAChest() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 4, slot: 7)
+        let chestAt = (-6, 64, 6)
+        placeChest(fixture, at: chestAt, [("oak_planks", 20)])
+        let host = host(fixture)
+        try paste(fixture, planks(10))
+        sendDelta(fixture, host)
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 14)
+
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(stored(fixture, at: chestAt, "oak_planks"), 20)
+        XCTAssertEqual(sendDelta(fixture, host), [[-6, 64, 6]])
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 20)
+    }
+
+    func testAnUndoWithNoRoomForItsRefundTellsGuestsNothing() throws {
+        let fixture = try makeFixture()
+        let chestAt = (-6, 64, 6)
+        placeChest(fixture, at: chestAt, [("oak_planks", 5)])
+        let host = host(fixture)
+        try paste(fixture, planks(5))
+        XCTAssertEqual(sendDelta(fixture, host), [[-6, 64, 6]])
+        // No room anywhere: the chest and the inventory are full of something else.
+        let chest = try XCTUnwrap(fixture.world.getBlockEntity(chestAt.0, chestAt.1, chestAt.2))
+        for slot in 0..<27 { chest.items?[slot] = stack("cobblestone", 64) }
+        for slot in fixture.player.inventory.indices { give(fixture, "cobblestone", 64, slot: slot) }
+
+        XCTAssertFalse(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(sendDelta(fixture, host), [], "an undo that changes nothing writes no container")
+    }
+
+    /// The crafting screen takes ingredients from the same pool and puts a cleared grid back
+    /// into it (`ScreensM.swift` makes these two calls on the host's world).
+    func testAGuestIsToldAboutAChestTheHostCraftedFromAndReturnedTo() throws {
+        let fixture = try makeFixture()
+        let chestAt = (3, 64, -3), untouched = (6, 64, -3)
+        placeChest(fixture, at: chestAt, [("oak_planks", 8)])
+        placeChest(fixture, at: untouched, [("cobblestone", 64)])
+        let host = host(fixture)
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let center = try XCTUnwrap(craftingContainerPoolCenter(for: fixture.player, isLANClientWorld: false))
+        let resources = craftingResourceStacks(playerInventory: fixture.player.inventory, craftGrid: grid,
+                                               world: fixture.world, centerX: center.x, centerY: center.y,
+                                               centerZ: center.z, radius: CRAFTING_CONTAINER_RADIUS)
+        let plan = try XCTUnwrap(craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+        XCTAssertEqual(sendDelta(fixture, host), [], "looking at what can be crafted changes no container")
+
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(
+            plan, grid: &grid, inventory: &fixture.player.inventory, world: fixture.world,
+            centerX: center.x, centerY: center.y, centerZ: center.z, radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(sendDelta(fixture, host), [[3, 64, -3]])
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 4)
+
+        // The player clears the grid with a full inventory: the planks go back to the chest.
+        for slot in fixture.player.inventory.indices { give(fixture, "stone", 64, slot: slot) }
+        for stack in grid.compactMap({ $0 }) {
+            XCTAssertTrue(giveStackToNearbyCraftingContainers(
+                stack, world: fixture.world, centerX: center.x, centerY: center.y, centerZ: center.z,
+                radius: CRAFTING_CONTAINER_RADIUS))
+        }
+        XCTAssertEqual(sendDelta(fixture, host), [[3, 64, -3]])
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 8)
+    }
+
+    func testAGuestsOwnGameTellsNoSessionAboutItsContainers() throws {
+        let fixture = try makeFixture()
+        var told = 0
+        fixture.game.onWorldContainerItemsChanged = { _, _, _, _ in told += 1 }
+        let hooks = fixture.world.hooks
+        hooks.onContainerItemsChanged(fixture.world, 1, 64, 1)
+        XCTAssertEqual(told, 1)
+
+        fixture.game.enterLANClientWorld(LANWorldSummary(
+            worldID: "host-world", worldName: "Host", seed: 1, gameMode: GameMode.survival, difficulty: 0,
+            dimension: Dim.overworld.rawValue, playerCount: 2))
+        XCTAssertTrue(fixture.game.isLANClientWorld)
+        hooks.onContainerItemsChanged(fixture.world, 1, 64, 1)
+        fixture.game.world.hooks.onContainerItemsChanged(fixture.game.world, 1, 64, 1)
+        XCTAssertEqual(told, 1, "a guest's world reports nothing: the host owns every container")
+    }
+
+    /// One delta carries at most `LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES`. A paste paid
+    /// from more chests than that reaches the guest over the next deltas: every chest once, none
+    /// lost, nearest first.
+    func testAPastePaidFromMoreChestsThanOneDeltaCarriesReachesTheGuestOverTheNextDeltas() throws {
+        let fixture = try makeFixture()
+        // Seventy chests behind the player, one plank each.
+        var chests: [(Int, Int, Int)] = []
+        for z in -8...(-2) { for x in -9...0 { chests.append((x, 64, z)) } }
+        XCTAssertGreaterThan(chests.count, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
+        for at in chests { placeChest(fixture, at: at, [("oak_planks", 1)]) }
+        let host = host(fixture)
+        let floor = object("Floor", (0..<chests.count).map { ($0 % 10, 0, $0 / 10, "oak_planks", 0) })
+        let origin = try arm(fixture, floor)
+        XCTAssertGreaterThan(origin.z, -2, "no chest stands in the floor's box")
+        XCTAssertEqual(sendDelta(fixture, host), [])
+
+        _ = try fixture.game.commitTemplatePlacement()
+        let first = sendDelta(fixture, host)
+        let second = sendDelta(fixture, host)
+        XCTAssertEqual(first.count, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
+        XCTAssertEqual(second.count, chests.count - LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
+        XCTAssertEqual(sendDelta(fixture, host), [], "nothing is sent twice")
+        let sent = first + second
+        XCTAssertEqual(Set(sent).count, sent.count)
+        XCTAssertEqual(Set(sent), Set(chests.map { [$0.0, $0.1, $0.2] }))
+        let distances = sent.map { $0[0] * $0[0] + ($0[1] - 64) * ($0[1] - 64) + $0[2] * $0[2] }
+        XCTAssertEqual(distances, distances.sorted(), "the nearest chests go first")
+        for at in chests {
+            XCTAssertEqual(stored(fixture, at: at, "oak_planks"), 0)
+            XCTAssertEqual(mirrored(host.guest, at: at, "oak_planks"), 0, "\(at)")
+        }
+        finishJob(fixture)
+        XCTAssertEqual(sendDelta(fixture, host), [])
+    }
+
+    /// Two writes to one chest before the next delta: it is sent once, with what it holds last.
+    func testAChestWrittenTwiceBeforeTheNextDeltaIsSentOnceWithWhatItHoldsLast() throws {
+        let fixture = try makeFixture()
+        let chestAt = (3, 64, -3)
+        placeChest(fixture, at: chestAt, [("oak_planks", 20)])
+        let host = host(fixture)
+        try arm(fixture, planks(10))
+        _ = try fixture.game.commitTemplatePlacement()                       // 20 -> 10
+        let center = try XCTUnwrap(craftingContainerPoolCenter(for: fixture.player, isLANClientWorld: false))
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let table = try XCTUnwrap(craftingPlans(for: [stack("oak_planks", 4)], gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(                // 10 -> 6
+            table, grid: &grid, inventory: &fixture.player.inventory, world: fixture.world,
+            centerX: center.x, centerY: center.y, centerZ: center.z, radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(stored(fixture, at: chestAt, "oak_planks"), 6)
+
+        XCTAssertEqual(sendDelta(fixture, host), [[3, 64, -3]])
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 6)
+        XCTAssertEqual(sendDelta(fixture, host), [])
+        finishJob(fixture)
+    }
+
+    /// An undo refund goes to the first room in pool order, which need not be the chest it was
+    /// paid from. The guest is told about the chest it went into, and not about the other.
+    func testAnUndoRefundThatGoesIntoAnotherChestTellsTheGuestAboutThatChest() throws {
+        let fixture = try makeFixture()
+        let source = (-10, 64, 10), nearer = (2, 64, -2)
+        placeChest(fixture, at: source, [("oak_planks", 6)])
+        placeChest(fixture, at: nearer, [])
+        let host = host(fixture)
+        try paste(fixture, planks(6))
+        XCTAssertEqual(sendDelta(fixture, host), [[-10, 64, 10]])
+        XCTAssertEqual(mirrored(host.guest, at: source, "oak_planks"), 0)
+
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(stored(fixture, at: nearer, "oak_planks"), 6, "the nearest free slot takes the refund")
+        XCTAssertEqual(stored(fixture, at: source, "oak_planks"), 0)
+        XCTAssertEqual(sendDelta(fixture, host), [[2, 64, -2]])
+        XCTAssertEqual(mirrored(host.guest, at: nearer, "oak_planks"), 6)
+        XCTAssertEqual(mirrored(host.guest, at: source, "oak_planks"), 0)
+    }
+
+    /// What was paid from the inventory goes back there, and into a chest when the inventory
+    /// has filled up since: that chest is written, so the guest is told.
+    func testARefundThatOverflowsAFullInventoryIntoAChestTellsTheGuest() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 5, slot: 0)
+        let chestAt = (2, 64, -2)
+        placeChest(fixture, at: chestAt, [])
+        let host = host(fixture)
+        try paste(fixture, planks(5))
+        XCTAssertEqual(sendDelta(fixture, host), [], "paid from the inventory alone")
+        for slot in fixture.player.inventory.indices { give(fixture, "cobblestone", 64, slot: slot) }
+
+        XCTAssertTrue(fixture.game.undoLastTemplatePlacement())
+        XCTAssertEqual(stored(fixture, at: chestAt, "oak_planks"), 5)
+        XCTAssertEqual(sendDelta(fixture, host), [[2, 64, -2]])
+        XCTAssertEqual(mirrored(host.guest, at: chestAt, "oak_planks"), 5)
+    }
+
+    /// The halves of a double chest are two block entities; a furnace's slots and a hopper pay
+    /// too. Every one the paste empties is sent once.
+    func testAGuestIsToldAboutBothHalvesOfADoubleChestAFurnaceAndAHopperAPastePaidFrom() throws {
+        let fixture = try makeFixture()
+        let left = (2, 64, -2), right = (3, 64, -2), furnaceAt = (-2, 64, -2), hopperAt = (0, 64, -3)
+        placeChest(fixture, at: left, [("oak_planks", 2)])
+        placeChest(fixture, at: right, [("oak_planks", 2)])
+        fixture.world.setBlock(furnaceAt.0, furnaceAt.1, furnaceAt.2, Int(cell(B.furnace, 2)), SET_SILENT)
+        let furnace = makeFurnaceBE(furnaceAt.0, furnaceAt.1, furnaceAt.2, "furnace")
+        furnace.items?[2] = stack("oak_planks", 2)
+        fixture.world.setBlockEntity(furnace)
+        fixture.world.setBlock(hopperAt.0, hopperAt.1, hopperAt.2, Int(cell(B.hopper)), SET_SILENT)
+        let hopper = makeHopperBE(hopperAt.0, hopperAt.1, hopperAt.2)
+        hopper.items?[3] = stack("oak_planks", 2)
+        fixture.world.setBlockEntity(hopper)
+        let host = host(fixture)
+        for at in [left, right, furnaceAt, hopperAt] { XCTAssertEqual(mirrored(host.guest, at: at, "oak_planks"), 2) }
+
+        try arm(fixture, planks(8))
+        _ = try fixture.game.commitTemplatePlacement()
+        let sent = sendDelta(fixture, host)
+        XCTAssertEqual(sent.count, 4)
+        XCTAssertEqual(Set(sent), [[2, 64, -2], [3, 64, -2], [-2, 64, -2], [0, 64, -3]])
+        for at in [left, right, furnaceAt, hopperAt] {
+            XCTAssertEqual(stored(fixture, at: at, "oak_planks"), 0, "\(at)")
+            XCTAssertEqual(mirrored(host.guest, at: at, "oak_planks"), 0, "\(at)")
+        }
+        finishJob(fixture)
+    }
+
+    /// The quote a preview shows, the check when it is armed, and a click the player cannot pay
+    /// for read the pool and write no container, however many there are.
+    func testQuotingAndARefusedClickTellGuestsNothingAboutAFullStorageRoom() throws {
+        let fixture = try makeFixture()
+        for x in -9...0 { placeChest(fixture, at: (x, 64, -3), [("oak_planks", 1), ("cobblestone", 64)]) }
+        let host = host(fixture)
+        let template = planks(12)
+        XCTAssertEqual(fixture.game.templateMaterialQuote(for: template).missing,
+                       [TemplateMaterialLine(itemID: iid("oak_planks"), count: 2)])
+        try arm(fixture, template)
+        XCTAssertThrowsError(try fixture.game.commitTemplatePlacement())
+        XCTAssertEqual(sendDelta(fixture, host), [])
+        for x in -9...0 { XCTAssertEqual(stored(fixture, at: (x, 64, -3), "oak_planks"), 1) }
+    }
 }

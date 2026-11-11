@@ -1583,19 +1583,37 @@ public final class LANMultiplayerHostSession {
         return out
     }
 
-    /// Marks a block entity position dirty for prioritized replication (container edits, ghost
-    /// break spills). Deduplicated; drained in first-marked order.
+    /// Marks a block entity position dirty for prioritized replication (a guest's container
+    /// edit, a ghost break spill, a container the host's own paste or crafting pool rewrote).
+    /// Deduplicated; drained in first-marked order.
     public func recordDirtyBlockEntity(_ position: LANBlockPosition) {
         guard dirtyBlockEntitySet.insert(position).inserted else { return }
         dirtyBlockEntityPositions.append(position)
     }
 
-    /// Drains the dirty block-entity position queue in the order positions were first marked.
-    public func drainDirtyBlockEntities() -> [LANBlockPosition] {
-        let out = dirtyBlockEntityPositions
-        dirtyBlockEntityPositions.removeAll()
-        dirtyBlockEntitySet.removeAll()
+    /// Drains the dirty block-entity position queue, oldest first. With a `limit`, takes that
+    /// many and leaves the rest queued: one batch carries a bounded number of block entities, and
+    /// a paste can pay from more containers than that. A requeued position goes to the back.
+    public func drainDirtyBlockEntities(limit: Int = .max) -> [LANBlockPosition] {
+        let out = Array(dirtyBlockEntityPositions.prefix(max(0, limit)))
+        dirtyBlockEntityPositions.removeFirst(out.count)
+        dirtyBlockEntitySet.subtract(out)
         return out
+    }
+
+    /// What one delta carries for dirty block entities: the oldest `limit` positions, drained,
+    /// and a snapshot of each that still stands in `world`. A position in another dimension,
+    /// or whose block entity is gone, is drained without a snapshot.
+    public func drainDirtyBlockEntitySnapshots(
+        in world: World, limit: Int = LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
+    ) -> (positions: [LANBlockPosition], snapshots: [LANBlockEntitySnapshot]) {
+        let positions = drainDirtyBlockEntities(limit: limit)
+        let snapshots = positions.compactMap { position -> LANBlockEntitySnapshot? in
+            guard position.dimension == world.dim.rawValue,
+                  let blockEntity = world.getBlockEntity(position.x, position.y, position.z) else { return nil }
+            return makeLANBlockEntitySnapshot(blockEntity, dimension: position.dimension)
+        }
+        return (positions, snapshots)
     }
 
     public func requeueDirtyBlockEntities(_ positions: [LANBlockPosition]) {

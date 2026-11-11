@@ -5086,6 +5086,155 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(session.drainDirtyBlockEntities().isEmpty)
     }
 
+    func testDrainingDirtyBlockEntitySnapshotsReadsWhatStillStandsAndDropsWhatDoesNot() throws {
+        let world = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        let overworld = Dim.overworld.rawValue
+        _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
+        let chest = makeContainerBE(2, 64, 1, 27)
+        chest.items![3] = ItemStack(iid("coal"), 5)
+        world.setBlockEntity(chest)
+        let standing = LANBlockPosition(dimension: overworld, x: 2, y: 64, z: 1)
+        let gone = LANBlockPosition(dimension: overworld, x: 3, y: 64, z: 1)
+        let unloaded = LANBlockPosition(dimension: overworld, x: 900, y: 64, z: 1)
+        let elsewhere = LANBlockPosition(dimension: Dim.nether.rawValue, x: 2, y: 64, z: 1)
+        [gone, elsewhere, standing, unloaded].forEach(session.recordDirtyBlockEntity)
+
+        let dirty = session.drainDirtyBlockEntitySnapshots(in: world)
+        XCTAssertEqual(dirty.positions, [gone, elsewhere, standing, unloaded], "all are drained, for a requeue")
+        XCTAssertEqual(dirty.snapshots, [try XCTUnwrap(makeLANBlockEntitySnapshot(chest, dimension: overworld))])
+        XCTAssertEqual(dirty.snapshots.first?.slots, [LANBlockEntitySlotSnapshot(slot: 3, itemID: iid("coal"), count: 5)])
+        XCTAssertTrue(session.drainDirtyBlockEntitySnapshots(in: world).positions.isEmpty)
+
+        // The default limit is one batch's worth; a smaller one leaves the rest queued.
+        let many = (0..<(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES + 6)).map {
+            LANBlockPosition(dimension: overworld, x: 2, y: $0, z: 1)
+        }
+        many.forEach(session.recordDirtyBlockEntity)
+        XCTAssertEqual(session.drainDirtyBlockEntitySnapshots(in: world).positions.count,
+                       LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
+        XCTAssertEqual(session.drainDirtyBlockEntitySnapshots(in: world, limit: 2).positions, Array(many.suffix(6).prefix(2)))
+        XCTAssertEqual(session.drainDirtyBlockEntitySnapshots(in: world).positions, Array(many.suffix(4)))
+    }
+
+    /// One batch carries at most `LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES`, and a host's
+    /// paste can pay from more containers than that: what one batch cannot carry stays queued.
+    func testDrainingDirtyBlockEntitiesWithALimitLeavesTheRestQueuedInOrder() {
+        let session = LANMultiplayerHostSession()
+        let positions = (0..<150).map { LANBlockPosition(dimension: 0, x: $0, y: 64, z: 1) }
+        positions.forEach(session.recordDirtyBlockEntity)
+        let limit = LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
+
+        XCTAssertEqual(session.drainDirtyBlockEntities(limit: limit), Array(positions[0..<limit]))
+        // A position already sent may be marked again; one still waiting is not queued twice.
+        session.recordDirtyBlockEntity(positions[0])
+        session.recordDirtyBlockEntity(positions[limit])
+        XCTAssertEqual(session.drainDirtyBlockEntities(limit: limit), Array(positions[limit..<(2 * limit)]))
+        XCTAssertEqual(session.drainDirtyBlockEntities(limit: 0), [])
+        XCTAssertEqual(session.drainDirtyBlockEntities(limit: -5), [])
+        XCTAssertEqual(session.drainDirtyBlockEntities(limit: limit), Array(positions[(2 * limit)...]) + [positions[0]])
+        XCTAssertEqual(session.drainDirtyBlockEntities(limit: limit), [])
+        XCTAssertEqual(session.drainDirtyBlockEntities(), [])
+    }
+
+    /// A batch the transport could not send is requeued (`broadcastHostReplicationBatch`). The
+    /// requeued positions go behind those still waiting, and one that was marked again while it
+    /// was in flight is not queued twice.
+    func testRequeuedDirtyBlockEntitiesGoBehindThoseStillWaitingAndAreNeverDoubled() {
+        let session = LANMultiplayerHostSession()
+        let positions = (0..<5).map { LANBlockPosition(dimension: 0, x: $0, y: 64, z: 1) }
+        positions.forEach(session.recordDirtyBlockEntity)
+
+        let inFlight = session.drainDirtyBlockEntities(limit: 2)
+        XCTAssertEqual(inFlight, [positions[0], positions[1]])
+        session.recordDirtyBlockEntity(positions[1])          // rewritten again while in flight
+        session.requeueDirtyBlockEntities(inFlight)           // and the send failed
+        XCTAssertEqual(session.drainDirtyBlockEntities(),
+                       [positions[2], positions[3], positions[4], positions[1], positions[0]])
+        XCTAssertEqual(session.drainDirtyBlockEntities(), [])
+    }
+
+    /// The dirty block-entity queue against a plain model: an ordered list without duplicates.
+    /// Seeded, so a failure names the seed and step that replays it.
+    func testTheDirtyBlockEntityQueueMatchesASeededModelUnderRecordDrainAndRequeue() {
+        struct SplitMix64 {
+            var state: UInt64
+            mutating func next() -> UInt64 {
+                state &+= 0x9E37_79B9_7F4A_7C15
+                var z = state
+                z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+                z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+                return z ^ (z >> 31)
+            }
+            mutating func int(_ bound: Int) -> Int { Int(next() % UInt64(max(1, bound))) }
+        }
+        // A small pool of positions, so records collide often; two dimensions share x, y, z.
+        let pool = (0..<40).map { LANBlockPosition(dimension: $0 % 2 == 0 ? 0 : -1, x: $0 / 2, y: 64, z: -3) }
+
+        for seed in UInt64(1)...UInt64(64) {
+            var rng = SplitMix64(state: seed)
+            let session = LANMultiplayerHostSession()
+            var model: [LANBlockPosition] = []
+            var inFlight: [[LANBlockPosition]] = []
+            var trace: [String] = []
+            for step in 0..<400 {
+                switch rng.int(10) {
+                case 0...4:
+                    let position = pool[rng.int(pool.count)]
+                    trace.append("record \(position.dimension)/\(position.x)")
+                    session.recordDirtyBlockEntity(position)
+                    if !model.contains(position) { model.append(position) }
+                case 5...7:
+                    let limits = [0, -1, 1, 3, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES, .max]
+                    let limit = limits[rng.int(limits.count)]
+                    trace.append("drain \(limit)")
+                    let drained = session.drainDirtyBlockEntities(limit: limit)
+                    let expected = Array(model.prefix(max(0, limit)))
+                    model.removeFirst(expected.count)
+                    guard drained == expected else {
+                        return XCTFail("seed \(seed) step \(step): drained \(drained), model \(expected); \(trace.suffix(12))")
+                    }
+                    XCTAssertEqual(Set(drained).count, drained.count, "seed \(seed) step \(step): a drain repeats a position")
+                    if !drained.isEmpty { inFlight.append(drained) }
+                default:
+                    guard !inFlight.isEmpty else { continue }
+                    let failed = inFlight.remove(at: rng.int(inFlight.count))
+                    trace.append("requeue \(failed.count)")
+                    session.requeueDirtyBlockEntities(failed)
+                    for position in failed where !model.contains(position) { model.append(position) }
+                }
+            }
+            // Whatever is left comes out once, in the model's order, and the queue is then empty.
+            let rest = session.drainDirtyBlockEntities()
+            XCTAssertEqual(rest, model, "seed \(seed): \(trace.suffix(12))")
+            XCTAssertEqual(session.drainDirtyBlockEntities(limit: .max), [], "seed \(seed)")
+        }
+    }
+
+    /// A storage room's worth of rewritten containers drains in batch-sized pieces without the
+    /// queue's bookkeeping growing worse than linear in what it holds.
+    func testDrainingAThousandsLongDirtyQueueInBatchSizedPiecesStaysCheap() {
+        let session = LANMultiplayerHostSession()
+        let positions = (0..<20_000).map { LANBlockPosition(dimension: 0, x: $0 % 200, y: 64, z: $0 / 200) }
+        let started = Date()
+        positions.forEach(session.recordDirtyBlockEntity)
+        positions.forEach(session.recordDirtyBlockEntity)      // every one marked twice
+        var drained: [LANBlockPosition] = []
+        var batches = 0
+        while true {
+            let batch = session.drainDirtyBlockEntities(limit: LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
+            if batch.isEmpty { break }
+            XCTAssertLessThanOrEqual(batch.count, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
+            drained.append(contentsOf: batch)
+            batches += 1
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertEqual(drained, positions, "each once, in the order first marked")
+        XCTAssertEqual(batches, (positions.count + LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES - 1)
+                       / LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
+        XCTAssertLessThan(elapsed, 5, "20 000 positions in 64-sized drains took \(elapsed) s")
+    }
+
     private func makeAcceptedHostSession(
         x: Double = 2.5,
         y: Double = 64,

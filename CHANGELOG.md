@@ -78,6 +78,13 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   host takes the materials when it accepts a placement and pays them back on undo, and a guest
   places for free only in creative mode the host has granted.
 
+- **LAN guests see what the host takes from a chest.** When the host crafted from the containers
+  around it, or paid for a survival object placement from them, was paid back when the placement
+  finished, or undid it, guests were not told that those containers had changed. The regular
+  update only refreshes the eight containers nearest to a player, twice a second, so in a storage
+  room a guest could keep seeing a chest as it was before, and moving an item in it was refused.
+  The host now sends every container it changes this way with its next update.
+
 - **A block with a broken facing no longer stops the game.** Levers, buttons, redstone torches,
   hoppers, dispensers, droppers, pistons and observers keep the face they point at in their data.
   A block that came from a template could name a face that does not exist, and clicking it or its

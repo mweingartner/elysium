@@ -512,6 +512,9 @@ public final class GameCore {
     public var expandedMapCenterX = 0.0
     public var expandedMapCenterZ = 0.0
     public var onWorldBlockChanged: ((World, Int, Int, Int, Int) -> Void)?
+    /// Host-side: the game rewrote the items of the container at x, y, z (a paste's payment or
+    /// refund, crafting from the container pool). See `WorldHooks.onContainerItemsChanged`.
+    public var onWorldContainerItemsChanged: ((World, Int, Int, Int) -> Void)?
     public var onTemplatePlacementCommitted: ((World, TemplatePlacementUndoSnapshot) -> Void)?
     public var lanChunkRequestHandler: ((World, Int, Int) -> Bool)?
     /// full-column (radius 0, all sections) request — used by the background completion pass,
@@ -2550,6 +2553,10 @@ public final class GameCore {
         hooks.onSectionDirty = { [weak self, weak w] cx, cz, sy in
             guard let self, let w else { return }
             self.dirtySections[w.dim]!.insert(SectionPos(cx: cx, sy: sy, cz: cz))
+        }
+        hooks.onContainerItemsChanged = { [weak self] world, x, y, z in
+            guard let self, !self.isLANClientWorld else { return }
+            self.onWorldContainerItemsChanged?(world, x, y, z)
         }
         hooks.onBlockChanged = { [weak self, weak w] x, y, z, oldCell, newCell, _ in
             guard let self, let w, !self.isLANClientWorld else { return }

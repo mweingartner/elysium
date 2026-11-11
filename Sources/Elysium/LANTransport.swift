@@ -366,6 +366,16 @@ final class LANMultiplayerManager {
         hostReplicationSession.seedPeerRecord(record)
     }
 
+    /// Test-only seam: the delta the host would publish now, built by the production path, so
+    /// a test can read what a guest is sent without a loopback socket.
+    func makeHostForegroundDeltaForTesting() -> LANReplicationBatch? {
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, let player = game.player else { return nil }
+        var drained: [LANBlockPosition] = []
+        return makeHostReplicationBatch(game: game, player: player, fullSnapshot: false,
+                                        content: .foregroundDelta, drainedDirtyBlockEntities: &drained)
+    }
+
 #if ELYSIUM_DEBUG_CONTROL
     @MainActor
     func debugControlStatus() -> LANDebugControlStatus {
@@ -568,6 +578,10 @@ final class LANMultiplayerManager {
             guard let self else { return }
             _ = self.hostReplicationSession.recordBlockChange(dimension: world.dim.rawValue, x: x, y: y, z: z, cell: cell)
         }
+        game.onWorldContainerItemsChanged = { [weak self] world, x, y, z in
+            self?.hostReplicationSession.recordDirtyBlockEntity(
+                LANBlockPosition(dimension: world.dim.rawValue, x: x, y: y, z: z))
+        }
         game.onTemplatePlacementCommitted = { [weak self] world, undo in
             self?.hostReplicationSession.recordDirtyChunkSections(from: undo, in: world)
         }
@@ -589,6 +603,7 @@ final class LANMultiplayerManager {
 
     private func configureClientReplicationHooks(for game: GameCore) {
         game.onWorldBlockChanged = nil
+        game.onWorldContainerItemsChanged = nil
         game.onTemplatePlacementCommitted = nil
         game.lanSettleTemplateJobsHandler = nil
         game.onRPGGameRuleTransition = nil
@@ -694,6 +709,7 @@ final class LANMultiplayerManager {
     private func clearReplicationHooks(for game: GameCore?) {
         game?.lanHostKeepsSimulationRunning = false
         game?.onWorldBlockChanged = nil
+        game?.onWorldContainerItemsChanged = nil
         game?.onTemplatePlacementCommitted = nil
         game?.lanChunkRequestHandler = nil
         game?.lanFullColumnRequestHandler = nil
@@ -2585,16 +2601,11 @@ final class LANMultiplayerManager {
         // D-G: dirty block entities (container edits, ghost break spills, active furnaces/hoppers)
         // are replicated FIRST, ahead of the normal distance-prioritized fill, so a guest's edit
         // or a spilling container is never starved out by a busy world.
-        let dirtyPositions = content.includeDirtyBlockEntities ? hostReplicationSession.drainDirtyBlockEntities() : []
-        drainedDirtyBlockEntities.append(contentsOf: dirtyPositions)
-        var dirtyBlockEntities: [LANBlockEntitySnapshot] = []
-        dirtyBlockEntities.reserveCapacity(dirtyPositions.count)
-        for position in dirtyPositions where position.dimension == game.world.dim.rawValue {
-            guard let be = game.world.getBlockEntity(position.x, position.y, position.z),
-                  let snapshot = makeLANBlockEntitySnapshot(be, dimension: position.dimension)
-            else { continue }
-            dirtyBlockEntities.append(snapshot)
-        }
+        // The session bounds the drain to what one batch carries and leaves the rest queued.
+        let dirty = content.includeDirtyBlockEntities
+            ? hostReplicationSession.drainDirtyBlockEntitySnapshots(in: game.world) : (positions: [], snapshots: [])
+        drainedDirtyBlockEntities.append(contentsOf: dirty.positions)
+        let dirtyBlockEntities = dirty.snapshots
         var chunks = chunkSectionsOverride ?? []
         if chunkSectionsOverride == nil, content.includeDirtyChunkSections {
             chunks.append(contentsOf: hostReplicationSession.drainDirtyChunkSectionSnapshots(in: game.world))
@@ -2613,8 +2624,7 @@ final class LANMultiplayerManager {
         for be in dirtyBlockEntities {
             dirtyPositionSet.insert(LANBlockPosition(dimension: be.dimension, x: be.x, y: be.y, z: be.z))
         }
-        let dirtyLimit = LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
-        var blockEntities = Array(dirtyBlockEntities.prefix(dirtyLimit))
+        var blockEntities = dirtyBlockEntities
         if content.includeBlockEntityFill {
             let fillCap = max(0, min(content.blockEntityFillCap, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES))
             if blockEntities.count < fillCap {

@@ -59,6 +59,11 @@ public struct WorldHooks {
     public var addParticles: (String, Double, Double, Double, Int, Double, Int) -> Void = { _, _, _, _, _, _, _ in }
     public var onVibration: ((Double, Double, Double, Int, EntityRef?) -> Void)?
     public var requestChunk: ((Int, Int) -> Void)?
+    /// The game itself rewrote the items of the container at x, y, z, not the container's own
+    /// screen: a paste paid or refunded materials, or crafting took from the container pool.
+    /// A LAN host sends that container to its guests with its next delta. The world comes with
+    /// the call, so the hook also holds on a world that was handed another world's hooks.
+    public var onContainerItemsChanged: (World, Int, Int, Int) -> Void = { _, _, _, _ in }
     /// event-bus (change 1b). The one funnel point every engine call site
     /// that isn't already a `World`/`GameCore` chokepoint (entity hurt/die/
     /// heal, target changes, neighbor updates, …) uses to reach the

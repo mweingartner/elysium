@@ -581,10 +581,14 @@ enum CraftingResourceOwner {
         }
     }
 
+    /// Call after every write to a slot: keeps the container for the next save and tells the
+    /// world, so a LAN host sends it to its guests. A chest boat or minecart is an entity with
+    /// no block entity, and LAN does not send what it holds, so there is nothing to tell.
     func markDirty(in world: World) {
         switch self {
         case .blockEntity(let be, _):
             world.setBlockEntity(be)
+            world.hooks.onContainerItemsChanged(world, be.x, be.y, be.z)
         case .boat, .minecart:
             break
         }

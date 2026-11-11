@@ -221,6 +221,192 @@ final class CraftingPlanTests: XCTestCase {
         XCTAssertEqual(matchCrafting(grid, 3, 3)?.out.id, iid("crafting_table"))
     }
 
+    /// A LAN host sends its guests the containers the pool wrote (`WorldHooks.onContainerItemsChanged`).
+    func testThePoolReportsEachContainerItTakesFromOrReturnsToAndNoOther() throws {
+        let world = makeWorld()
+        var reported: [[Int]] = []
+        world.hooks.onContainerItemsChanged = { hooked, x, y, z in
+            XCTAssertTrue(hooked === world)
+            reported.append([x, y, z])
+        }
+        world.setBlock(4, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(4, 64, 1, 27)
+        chest.items?[0] = stack("oak_planks", 3)
+        world.setBlockEntity(chest)
+        world.setBlock(6, 64, 1, Int(cell(B.chest)))
+        let other = makeContainerBE(6, 64, 1, 27)
+        other.items?[0] = stack("cobblestone", 64)
+        world.setBlockEntity(other)
+        world.setBlock(2, 64, 1, Int(cell(B.furnace)))
+        let furnace = makeFurnaceBE(2, 64, 1, "furnace")
+        furnace.items?[2] = stack("oak_planks", 1)
+        world.setBlockEntity(furnace)
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let resources = craftingResourceStacks(playerInventory: inventory, craftGrid: grid, world: world,
+                                               centerX: 1, centerY: 64, centerZ: 1, radius: CRAFTING_CONTAINER_RADIUS)
+        let table = try XCTUnwrap(craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+        XCTAssertEqual(reported, [], "reading the pool and placing blocks reports nothing")
+
+        // One plank from the furnace's output, the nearest, and three from the chest.
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(table, grid: &grid, inventory: &inventory, world: world,
+                                                               centerX: 1, centerY: 64, centerZ: 1,
+                                                               radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(Set(reported), [[2, 64, 1], [4, 64, 1]])
+        XCTAssertNil(furnace.items?[2])
+        XCTAssertNil(chest.items?[0])
+
+        // A cleared grid goes back to general storage only: the chest, never the furnace.
+        reported = []
+        XCTAssertTrue(giveStackToNearbyCraftingContainers(stack("oak_planks", 4), world: world,
+                                                           centerX: 1, centerY: 64, centerZ: 1,
+                                                           radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(Set(reported), [[4, 64, 1]])
+        XCTAssertEqual(chest.items?[0], stack("oak_planks", 4))
+
+        // From the inventory alone: no container is written.
+        reported = []
+        grid = [ItemStack?](repeating: nil, count: 9)
+        inventory[0] = stack("oak_planks", 4)
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(table, grid: &grid, inventory: &inventory, world: world,
+                                                               centerX: 1, centerY: 64, centerZ: 1,
+                                                               radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(reported, [])
+    }
+
+    /// Each half of a double chest is its own block entity, and a hopper and a furnace are pool
+    /// sources too: every one the pool takes from is reported. A return goes to general storage
+    /// only, so a hopper may receive it and the furnace never does.
+    func testThePoolReportsBothHalvesOfADoubleChestAHopperAndAFurnaceItTakesFrom() throws {
+        let world = makeWorld()
+        var reported: [[Int]] = []
+        world.hooks.onContainerItemsChanged = { _, x, y, z in reported.append([x, y, z]) }
+        var halves: [BlockEntityData] = []
+        for z in 1...2 {
+            world.setBlock(3, 64, z, Int(cell(B.chest)))
+            let half = makeContainerBE(3, 64, z, 27)
+            half.items?[0] = stack("oak_planks", 1)
+            world.setBlockEntity(half)
+            halves.append(half)
+        }
+        world.setBlock(1, 64, 3, Int(cell(B.hopper)))
+        let hopper = makeHopperBE(1, 64, 3)
+        hopper.items?[4] = stack("oak_planks", 1)
+        world.setBlockEntity(hopper)
+        world.setBlock(-1, 64, 1, Int(cell(B.furnace)))
+        let furnace = makeFurnaceBE(-1, 64, 1, "furnace")
+        furnace.items?[0] = stack("oak_planks", 1)
+        world.setBlockEntity(furnace)
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let table = try plan(named: "crafting_table", from: [stack("oak_planks", 4)])
+
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(table, grid: &grid, inventory: &inventory, world: world,
+                                                               centerX: 1, centerY: 64, centerZ: 1,
+                                                               radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(Set(reported), [[3, 64, 1], [3, 64, 2], [1, 64, 3], [-1, 64, 1]])
+        XCTAssertEqual(reported.count, 4, "one plank from each, so one write each")
+        XCTAssertTrue((halves.flatMap { $0.items ?? [] } + (hopper.items ?? []) + (furnace.items ?? [])).allSatisfy { $0 == nil })
+
+        // Back from the grid: the first empty general-storage slot in pool order is a chest half.
+        reported = []
+        XCTAssertTrue(giveStackToNearbyCraftingContainers(stack("oak_planks", 4), world: world,
+                                                           centerX: 1, centerY: 64, centerZ: 1,
+                                                           radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(reported, [[3, 64, 1]])
+
+        // With both halves full of something else, the hopper takes it; the furnace never does.
+        for half in halves { for slot in 0..<27 { half.items?[slot] = stack("cobblestone", 64) } }
+        reported = []
+        XCTAssertTrue(giveStackToNearbyCraftingContainers(stack("oak_planks", 3), world: world,
+                                                           centerX: 1, centerY: 64, centerZ: 1,
+                                                           radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(reported, [[1, 64, 3]])
+        XCTAssertEqual(hopper.items?[0], stack("oak_planks", 3))
+        XCTAssertTrue((furnace.items ?? []).allSatisfy { $0 == nil })
+    }
+
+    /// Only a write is reported. A pool call that takes or returns nothing reports nothing, and
+    /// a return that only partly fits reports the container it went into.
+    func testAPoolCallThatWritesNoContainerReportsNoneAndAPartialReturnReportsWhereItWent() throws {
+        let world = makeWorld()
+        var reported: [[Int]] = []
+        world.hooks.onContainerItemsChanged = { _, x, y, z in reported.append([x, y, z]) }
+        world.setBlock(4, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(4, 64, 1, 27)
+        chest.items?[0] = stack("oak_planks", 60)
+        for slot in 1..<27 { chest.items?[slot] = stack("cobblestone", 64) }
+        world.setBlockEntity(chest)
+        world.setBlock(2, 64, 1, Int(cell(B.furnace)))
+        let furnace = makeFurnaceBE(2, 64, 1, "furnace")
+        world.setBlockEntity(furnace)
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+        let table = try plan(named: "crafting_table", from: [stack("oak_planks", 4)])
+        let torch = try plan(named: "torch", from: [stack("coal", 1), stack("stick", 1)])
+
+        // A grid that already holds something is never filled.
+        var occupied = [ItemStack?](repeating: nil, count: 9)
+        occupied[0] = stack("dirt", 1)
+        XCTAssertFalse(populateCraftingGridFromNearbyContainers(table, grid: &occupied, inventory: &inventory, world: world,
+                                                                centerX: 1, centerY: 64, centerZ: 1,
+                                                                radius: CRAFTING_CONTAINER_RADIUS))
+        // An ingredient nowhere in reach: refused before anything is taken.
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        XCTAssertFalse(populateCraftingGridFromNearbyContainers(torch, grid: &grid, inventory: &inventory, world: world,
+                                                                centerX: 1, centerY: 64, centerZ: 1,
+                                                                radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertFalse(giveStackToNearbyCraftingContainers(nil, world: world, centerX: 1, centerY: 64, centerZ: 1,
+                                                            radius: CRAFTING_CONTAINER_RADIUS))
+        // No room for cobblestone anywhere but the furnace, which takes no returns.
+        let cobble = stack("cobblestone", 5)
+        XCTAssertFalse(giveStackToNearbyCraftingContainers(cobble, world: world, centerX: 1, centerY: 64, centerZ: 1,
+                                                            radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(cobble.count, 5)
+        XCTAssertEqual(reported, [], "nothing was written")
+        XCTAssertEqual(chest.items?[0], stack("oak_planks", 60))
+        XCTAssertEqual(grid.compactMap { $0 }, [])
+
+        // Ten planks: four top up the chest's stack, six find no room and stay with the caller.
+        let planks = stack("oak_planks", 10)
+        XCTAssertFalse(giveStackToNearbyCraftingContainers(planks, world: world, centerX: 1, centerY: 64, centerZ: 1,
+                                                            radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(planks.count, 6)
+        XCTAssertEqual(chest.items?[0], stack("oak_planks", 64))
+        XCTAssertEqual(reported, [[4, 64, 1]])
+        XCTAssertTrue((furnace.items ?? []).allSatisfy { $0 == nil })
+    }
+
+    /// A chest boat in the pool has no block entity and LAN does not send what it holds: taking
+    /// from it is reported to no one, and still takes.
+    func testThePoolTakesFromAChestBoatWithoutReportingAContainer() throws {
+        let world = makeWorld()
+        var reported: [[Int]] = []
+        world.hooks.onContainerItemsChanged = { _, x, y, z in reported.append([x, y, z]) }
+        let boat = Boat(world: world)
+        boat.hasChest = true
+        boat.x = 3.5
+        boat.y = 64
+        boat.z = 1.5
+        boat.chestItems[0] = stack("oak_planks", 4)
+        world.addEntity(boat)
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let table = try plan(named: "crafting_table", from: [stack("oak_planks", 4)])
+
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(table, grid: &grid, inventory: &inventory, world: world,
+                                                               centerX: 1, centerY: 64, centerZ: 1,
+                                                               radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertNil(boat.chestItems[0])
+        XCTAssertEqual(reported, [])
+        XCTAssertTrue(giveStackToNearbyCraftingContainers(stack("oak_planks", 2), world: world,
+                                                           centerX: 1, centerY: 64, centerZ: 1,
+                                                           radius: CRAFTING_CONTAINER_RADIUS))
+        XCTAssertEqual(boat.chestItems[0], stack("oak_planks", 2))
+        XCTAssertEqual(reported, [])
+    }
+
     func testCraftingPoolIncludesContainerAtExactRadiusAndExcludesOneBeyond() {
         let world = makeWorld(chunkRange: -1...4)
         world.setBlock(1, 64, 1, Int(cell(B.crafting_table)))
