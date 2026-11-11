@@ -585,8 +585,10 @@ a template's name says whether you have everything for it, and the **Materials**
 swaps the 3D model for a list of what the object needs and what you have, missing materials first.
 
 A survival placement puts every block down the way placing it by hand would: chests, furnaces and
-other containers are empty, a jukebox has no disc, crops are freshly planted, and a composter,
-cauldron or respawn anchor is empty. Signs keep their text and flower pots their plants. The dirt
+other containers are empty, a jukebox has no disc, crops are freshly planted, a composter,
+cauldron or respawn anchor is empty, and a piston is retracted. Signs keep their text and flower
+pots their plants. A part that no item places by itself is left out: the head of an extended
+piston, and half a door, bed or tall plant whose other half was not copied. The dirt
 filled in under the object is part of the cost. An object that holds a block no item can place
 (water, lava, fire, a portal, bedrock) cannot be placed in survival, and chat names the block.
 

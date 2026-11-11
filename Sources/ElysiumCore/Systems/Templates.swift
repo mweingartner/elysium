@@ -551,7 +551,7 @@ func rotatedValidatedObjectTemplate(_ template: ObjectTemplate, rotationSteps: I
         let p = rotatedTemplateCoordinate(x: block.dx, y: block.dy, z: block.dz,
                                           sizeX: template.sizeX, sizeZ: template.sizeZ,
                                           rotationSteps: rotation)
-        return TemplateBlock(dx: p.x, dy: p.y, dz: p.z, cell: block.cell)
+        return TemplateBlock(dx: p.x, dy: p.y, dz: p.z, cell: rotatedTemplateCell(block.cell, rotationSteps: rotation))
     }
     var blockEntities: [BlockEntityData] = []
     for be in template.blockEntities {

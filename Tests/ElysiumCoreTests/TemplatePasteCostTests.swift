@@ -293,6 +293,46 @@ final class TemplatePasteCostTests: XCTestCase {
         XCTAssertEqual(fixture.world.getBlock(origin.x + 1, origin.y, origin.z), Int(cell(B.composter, 8)))
     }
 
+    func testASurvivalPasteOfATurnedBedPlacesOneWholeBedForOneBed() throws {
+        let fixture = try makeFixture()
+        give(fixture, "red_bed", 2, slot: 0)
+        let bedroom = object("Bedroom", [(0, 0, 1, "red_bed", 0), (0, 0, 0, "red_bed", 4)])
+        try fixture.game.beginTemplatePlacement(bedroom)
+        XCTAssertTrue(fixture.game.rotateTemplatePlacement(by: 1))
+        let target = try XCTUnwrap(fixture.game.templatePlacementTarget())
+        for dx in 0..<2 { for dz in 0..<2 {
+            fixture.world.setBlock(target.originX + dx, target.originY - 1, target.originZ + dz, Int(cell(B.stone)), SET_SILENT)
+        } }
+        _ = try fixture.game.commitTemplatePlacement()
+        finishJob(fixture)
+        XCTAssertEqual(carried(fixture, "red_bed"), 1, "one bed, although it stands on two cells")
+        var halves: [(Int, Int, Int)] = []
+        for dx in 0..<2 { for dz in 0..<2 where fixture.world.getBlockId(target.originX + dx, target.originY, target.originZ + dz) == Int(B.red_bed) {
+            halves.append((target.originX + dx, target.originY, target.originZ + dz))
+        } }
+        XCTAssertEqual(halves.count, 2, "both halves are placed")
+        for half in halves {
+            XCTAssertNotNil(twoCellPartnerCell(in: fixture.world, of: fixture.world.getBlock(half.0, half.1, half.2),
+                                               half.0, half.1, half.2), "and they belong together")
+        }
+    }
+
+    func testASurvivalPasteLeavesOutLooseHalvesAndChargesNothingForThem() throws {
+        let fixture = try makeFixture()
+        give(fixture, "oak_planks", 1, slot: 0)
+        let loose = object("Loose", [(0, 0, 0, "oak_planks", 0), (1, 0, 0, "red_bed", 4), (2, 0, 0, "oak_door", 8)])
+        let origin = try paste(fixture, loose)
+        XCTAssertEqual(fixture.world.getBlockId(origin.x, origin.y, origin.z), Int(B.oak_planks))
+        XCTAssertEqual(fixture.world.getBlock(origin.x + 1, origin.y, origin.z), 0, "a bed head alone is not placed")
+        XCTAssertEqual(fixture.world.getBlock(origin.x + 2, origin.y, origin.z), 0, "nor a door top alone")
+        XCTAssertEqual(fixture.game.lastTemplatePlacementUndo?.materials?.total, 1)
+
+        let halvesOnly = object("Halves", [(0, 0, 0, "red_bed", 4)])
+        XCTAssertThrowsError(try fixture.game.beginTemplatePlacement(halvesOnly)) { error in
+            XCTAssertEqual(error as? TemplateError, .materials(TemplateMaterialError.nothingToPlace.description))
+        }
+    }
+
     // MARK: - The foundation
 
     func testTheGroundASurvivalPasteFillsInIsDirtAndCostsDirt() throws {

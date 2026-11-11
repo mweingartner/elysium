@@ -29,7 +29,8 @@ private let TEMPLATE_MATERIAL_FOR_BLOCK: [String: String] = [
     "farmland": "dirt", "dirt_path": "dirt", "tall_seagrass": "seagrass",
 ]
 
-/// Blocks that cost nothing because another block makes them: a piston's extended head.
+/// Blocks that cost nothing because another block makes them: a piston's extended head. A
+/// survival paste never places one (`templateForSurvivalPaste`); this is what it would cost.
 private let TEMPLATE_FREE_BLOCKS: Set<String> = ["piston_head", "cave_air", "void_air"]
 
 /// Breakable blocks that no item places, or whose item is not the block (a bucket of water),
@@ -102,6 +103,8 @@ func templateSurvivalCell(_ cellValue: UInt16) -> UInt16 {
         placed = 0
     case "cocoa", "turtle_egg":
         placed = meta & 3
+    case "piston", "sticky_piston":
+        placed = meta & 7              // retracted; its head is left out (`templateForSurvivalPaste`)
     case "cave_vines", "cave_vines_plant", "mangrove_propagule":
         placed = meta & ~8
     case "respawn_anchor":
@@ -160,6 +163,8 @@ public enum TemplateMaterialError: Error, Equatable, CustomStringConvertible {
     case missing([TemplateMaterialLine])
     /// An undo's refund needs this many more free slots.
     case noRoomForRefund(stacks: Int)
+    /// The object holds only parts that cannot be placed by themselves.
+    case nothingToPlace
 
     public var description: String {
         switch self {
@@ -169,6 +174,8 @@ public enum TemplateMaterialError: Error, Equatable, CustomStringConvertible {
             return "Missing \(templateMaterialListText(lines)) - nothing was placed."
         case .noRoomForRefund(let stacks):
             return "Make room for \(stacks) more \(stacks == 1 ? "stack" : "stacks") to undo this object."
+        case .nothingToPlace:
+            return "Survival can't place this object: it holds only parts of blocks. Switch to Creative to place it."
         }
     }
 }
@@ -211,6 +218,7 @@ extension TemplateError {
 /// one a survival paste places (`templateForSurvivalPaste`). Throws
 /// `TemplateMaterialError.notPlaceableInSurvival` for the first block no item places.
 func templateMaterialBill(_ template: ObjectTemplate) throws -> TemplateMaterialBill {
+    guard !template.blocks.isEmpty else { throw TemplateMaterialError.nothingToPlace }
     var counts: [Int: Int] = [:]
     for block in template.blocks {
         switch templateCellCharge(Int(block.cell)) {

@@ -40,12 +40,31 @@ func twoCellPartnerPosition(of cell: Int, _ x: Int, _ y: Int, _ z: Int) -> (x: I
     return (x, y + towardSecondary, z)
 }
 
+/// A template cell as it is after the template is turned `rotationSteps` quarter turns. A
+/// template keeps the facing of its blocks when it is turned, with one exception: a bed's two
+/// halves find each other through their facing, so a bed that is turned without it is two loose
+/// halves. Each quarter turn takes north to east, east to south, south to west, west to north.
+func rotatedTemplateCell(_ cell: UInt16, rotationSteps: Int) -> UInt16 {
+    let id = Int(cell >> 4)
+    guard id > 0, id < blockDefs.count, blockDefs[id].shape == .bed else { return cell }
+    var facing = Int(cell & 3)
+    for _ in 0..<(((rotationSteps % 4) + 4) % 4) { facing = [3, 2, 0, 1][facing] }
+    return (cell & ~3) | UInt16(facing)
+}
+
 /// The other half of the two-cell block at `x, y, z`, as it stands in `world`: the same block,
 /// the opposite half and, for a bed, the same facing. Nil when the half stands alone.
 func twoCellPartnerCell(in world: World, of cell: Int, _ x: Int, _ y: Int, _ z: Int) -> Int? {
+    twoCellPartnerCell(of: cell, x, y, z) { world.getBlock($0, $1, $2) }
+}
+
+/// The same question wherever the cells are kept: a world, or the blocks of a template.
+/// `cellAt` answers 0 where nothing stands.
+func twoCellPartnerCell(of cell: Int, _ x: Int, _ y: Int, _ z: Int,
+                        cellAt: (Int, Int, Int) -> Int) -> Int? {
     guard let half = twoCellHalf(of: cell),
           let position = twoCellPartnerPosition(of: cell, x, y, z) else { return nil }
-    let partner = world.getBlock(position.x, position.y, position.z)
+    let partner = cellAt(position.x, position.y, position.z)
     guard partner >> 4 == cell >> 4, let partnerHalf = twoCellHalf(of: partner), partnerHalf != half else {
         return nil
     }

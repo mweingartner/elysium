@@ -58,11 +58,34 @@ private func handPlacedBlockEntity(blockId: Int, at position: TemplatePos,
 }
 
 /// The template a survival paste places: as placed by hand, with nothing grown, filled or
-/// charged (`templateSurvivalCell`). What it costs is `templateMaterialBill` of the result.
+/// charged (`templateSurvivalCell`), and without the parts no item places by themselves. What
+/// it costs is `templateMaterialBill` of the result. The result can be empty.
 func templateForSurvivalPaste(_ template: ObjectTemplate) -> ObjectTemplate {
     var out = templateAsPlacedByHand(template)
-    out.blocks = out.blocks.map {
-        TemplateBlock(dx: $0.dx, dy: $0.dy, dz: $0.dz, cell: templateSurvivalCell($0.cell))
+    var cells: [TemplatePos: Int] = [:]
+    for block in out.blocks { cells[templatePos(block)] = Int(block.cell) }
+    out.blocks = out.blocks.compactMap { block in
+        guard templatePartStandsWithItsOwner(block, among: cells) else { return nil }
+        return TemplateBlock(dx: block.dx, dy: block.dy, dz: block.dz, cell: templateSurvivalCell(block.cell))
     }
+    let kept = Set(out.blocks.map(templatePos))
+    out.blockEntities = out.blockEntities.filter { kept.contains(templatePos($0)) }
     return out
+}
+
+/// Whether placing items by hand can put `block` where the template has it. Two kinds of cell
+/// only ever exist as part of another: the second half of a door, a bed or a tall plant, which
+/// comes with its first half, and the head of an extended piston, which a piston makes. A
+/// second half whose first half is not in the template beside it is left out, and so is every
+/// piston head: a hand-placed piston is retracted. Left in, such a part would be free, and it
+/// would still be half a bed to sleep in or half a door to open.
+private func templatePartStandsWithItsOwner(_ block: TemplateBlock, among cells: [TemplatePos: Int]) -> Bool {
+    let cellValue = Int(block.cell)
+    let id = cellValue >> 4
+    guard id > 0, id < blockDefs.count else { return true }
+    if blockDefs[id].shape == .pistonHead { return false }
+    guard twoCellHalf(of: cellValue) == .secondary else { return true }
+    return twoCellPartnerCell(of: cellValue, block.dx, block.dy, block.dz) { x, y, z in
+        cells[TemplatePos(x: x, y: y, z: z)] ?? 0
+    } != nil
 }

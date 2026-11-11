@@ -16,7 +16,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   Only ordinary stacks are taken, never an enchanted, renamed or filled item.
   A survival placement puts every block down as placing it by hand would: containers and furnaces
   empty, a jukebox without its disc, crops freshly planted, composters, cauldrons and respawn
-  anchors empty. The ground filled in under the object is dirt and is part of the cost. An object
+  anchors empty, pistons retracted. A part that no item places by itself is left out: the head of
+  an extended piston, and half a door, bed or tall plant whose other half is not in the object.
+  The ground filled in under the object is dirt and is part of the cost. An object
   holding a block no item places (water, lava, fire, a portal, bedrock) cannot be placed in
   survival. `Command-Z` pays back every block of the placement that still stands, to where it came
   from; a block you mined or replaced is not paid back, and without room for the refund undo
@@ -39,6 +41,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   breaking it leaves the neighbouring block alone. Such a half can no longer be used either:
   clicking the upper half of a door that had lost its lower half turned the block below it into
   a door, and half a bed could be slept in.
+
+- **A bed stays one bed when its template is turned.** A bed's two halves find each other through
+  the way the bed faces. Turning a template with `R` moved the halves and left the facing as it
+  was, so a turned bed was placed as two loose halves. The facing now turns with the object.
 
 - Bumped the release and exact-LAN-compatibility version to 1.4.6 for the LAN join fix and the
   guest object templates below. The template intent changed shape, so older binaries are rejected

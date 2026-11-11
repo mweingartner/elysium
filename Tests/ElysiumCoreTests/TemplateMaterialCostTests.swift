@@ -186,6 +186,8 @@ final class TemplateMaterialCostTests: XCTestCase {
         XCTAssertEqual(survivalMeta("cave_vines", 8), 0)
         XCTAssertEqual(survivalMeta("cave_vines_plant", 8), 0)
         XCTAssertEqual(survivalMeta("oak_sapling", 8), 0)
+        XCTAssertEqual(survivalMeta("piston", 5 | 8), 5, "a piston is placed retracted, facing kept")
+        XCTAssertEqual(survivalMeta("sticky_piston", 1 | 8), 1)
     }
 
     func testASurvivalCellKeepsFacingShapeAndCount() {
@@ -203,6 +205,103 @@ final class TemplateMaterialCostTests: XCTestCase {
             }
         }
         XCTAssertEqual(templateSurvivalCell(0), 0)
+    }
+
+    // MARK: - Parts that cannot stand alone
+
+    private func cells(of object: ObjectTemplate) -> [String: Int] {
+        var out: [String: Int] = [:]
+        for block in object.blocks { out["\(block.dx),\(block.dy),\(block.dz)"] = Int(block.cell) }
+        return out
+    }
+
+    /// The second half of a door, a bed or a tall plant comes with its first half, and a piston
+    /// makes its own head. Placing items by hand cannot put one down alone, so a survival paste
+    /// does not either. Left in, it would be free, and it would still be a bed or a door.
+    func testASurvivalPasteLeavesOutASecondHalfWithoutItsFirstAndEveryPistonHead() throws {
+        let object = template([
+            (0, 0, 0, cellValue("oak_door", 1)), (0, 1, 0, cellValue("oak_door", 8)),        // a whole door
+            (2, 1, 0, cellValue("oak_door", 8)),                                             // a door top alone
+            (3, 0, 1, cellValue("red_bed", 0)), (3, 0, 0, cellValue("red_bed", 4)),          // a whole bed, facing north
+            (5, 0, 0, cellValue("red_bed", 4 | 1)),                                          // a bed head alone
+            (6, 0, 0, cellValue("sunflower", 0)), (6, 1, 0, cellValue("sunflower", 1)),      // a whole sunflower
+            (7, 1, 0, cellValue("sunflower", 1)),                                            // its top alone
+            (0, 0, 4, cellValue("piston", 5 | 8)), (1, 0, 4, cellValue("piston_head", 5)),   // an extended piston
+            (4, 0, 4, cellValue("piston_head", 1)),                                          // a head alone
+        ])
+        let placed = cells(of: templateForSurvivalPaste(object))
+        XCTAssertEqual(placed, [
+            "0,0,0": cellValue("oak_door", 1), "0,1,0": cellValue("oak_door", 8),
+            "3,0,1": cellValue("red_bed", 0), "3,0,0": cellValue("red_bed", 4),
+            "6,0,0": cellValue("sunflower", 0), "6,1,0": cellValue("sunflower", 1),
+            "0,0,4": cellValue("piston", 5),
+        ])
+        let bill = try templateMaterialBill(templateForSurvivalPaste(object))
+        XCTAssertEqual(bill.total, 4, "one door, one bed, one sunflower, one piston")
+        for name in ["oak_door", "red_bed", "sunflower", "piston"] { XCTAssertEqual(bill.count(of: iid(name)), 1, name) }
+    }
+
+    func testAHalfBesideTheWrongPartnerIsStillALoneHalf() {
+        let object = template([
+            (0, 0, 0, cellValue("oak_door", 0)), (0, 1, 0, cellValue("spruce_door", 8)),     // another door's top
+            (2, 0, 1, cellValue("red_bed", 0)), (2, 0, 0, cellValue("red_bed", 4 | 2)),      // a head facing west
+            (4, 0, 1, cellValue("red_bed", 0)), (4, 0, 0, cellValue("blue_bed", 4)),         // another bed's head
+            (6, 0, 0, cellValue("oak_door", 8)), (6, 1, 0, cellValue("oak_door", 8)),        // two tops
+        ])
+        XCTAssertEqual(cells(of: templateForSurvivalPaste(object)), [
+            "0,0,0": cellValue("oak_door", 0), "2,0,1": cellValue("red_bed", 0), "4,0,1": cellValue("red_bed", 0),
+        ], "the first halves stay: each is the item, and worth one")
+    }
+
+    func testAnObjectOfLooseHalvesOnlyCannotBePlacedInSurvival() {
+        let halves = template([(0, 0, 0, cellValue("red_bed", 4)), (1, 0, 0, cellValue("oak_door", 8)),
+                               (2, 0, 0, cellValue("piston_head", 0))])
+        XCTAssertTrue(templateForSurvivalPaste(halves).blocks.isEmpty)
+        XCTAssertThrowsError(try templateMaterialBill(templateForSurvivalPaste(halves))) { error in
+            XCTAssertEqual(error as? TemplateMaterialError, .nothingToPlace)
+            XCTAssertEqual("\(error)", "Survival can't place this object: it holds only parts of blocks. "
+                + "Switch to Creative to place it.")
+        }
+    }
+
+    /// A block entity belongs to its block: when a part is left out, nothing of it stays behind.
+    func testNoBlockEntityStaysForAPartThatIsLeftOut() {
+        let stray = BlockEntityData(type: "container", x: 0, y: 0, z: 0)
+        stray.items = [stack("diamond", 64)]
+        let object = template([(0, 0, 0, cellValue("piston_head", 0)), (1, 0, 0, cellValue("oak_planks"))],
+                              blockEntities: [stray])
+        let survival = templateForSurvivalPaste(object)
+        XCTAssertEqual(survival.blocks.count, 1)
+        XCTAssertTrue(survival.blockEntities.isEmpty)
+    }
+
+    /// A template keeps its blocks' facing when it is turned, except for a bed: its two halves
+    /// find each other through their facing, so a turned bed must stay one bed.
+    func testABedStaysOneBedWhenItsTemplateIsTurned() throws {
+        let object = ObjectTemplate(name: "Bedroom", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 3, sizeY: 1, sizeZ: 2, blocks: [
+            TemplateBlock(dx: 0, dy: 0, dz: 1, cell: UInt16(cellValue("red_bed", 0))),
+            TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cellValue("red_bed", 4))),
+            TemplateBlock(dx: 2, dy: 0, dz: 0, cell: UInt16(cellValue("oak_stairs", 3))),
+        ])
+        for steps in 0..<4 {
+            let turned = try rotatedObjectTemplate(object, rotationSteps: steps)
+            var at: [TemplatePos: Int] = [:]
+            for block in turned.blocks { at[templatePos(block)] = Int(block.cell) }
+            let head = try XCTUnwrap(turned.blocks.first { twoCellHalf(of: Int($0.cell)) == .secondary })
+            XCTAssertNotNil(twoCellPartnerCell(of: Int(head.cell), head.dx, head.dy, head.dz) {
+                at[TemplatePos(x: $0, y: $1, z: $2)] ?? 0
+            }, "turned \(steps) quarter turns, the head has lost its foot")
+            XCTAssertEqual(templateForSurvivalPaste(turned).blocks.count, 3, "turned \(steps): nothing is left out")
+            XCTAssertEqual(try templateMaterialBill(templateForSurvivalPaste(turned)).count(of: iid("red_bed")), 1)
+            XCTAssertTrue(turned.blocks.contains { Int($0.cell) == cellValue("oak_stairs", 3) }, "other blocks keep their facing")
+        }
+        for facing in 0..<4 {
+            var value = UInt16(cellValue("red_bed", 4 | facing))
+            for _ in 0..<4 { value = rotatedTemplateCell(value, rotationSteps: 1) }
+            XCTAssertEqual(Int(value), cellValue("red_bed", 4 | facing), "four quarter turns are a full turn")
+            XCTAssertEqual(rotatedTemplateCell(UInt16(cellValue("red_bed", facing)), rotationSteps: -1),
+                           rotatedTemplateCell(UInt16(cellValue("red_bed", facing)), rotationSteps: 3))
+        }
     }
 
     // MARK: - No profit, for every block and every metadata value
@@ -474,7 +573,12 @@ final class TemplateMaterialCostTests: XCTestCase {
             stuffed.lootTable = "chests/simple_dungeon"
             let survival = templateForSurvivalPaste(template([(0, 0, 0, Int(cell(UInt16(id), 0)))],
                                                              blockEntities: [stuffed]))
-            let placedID = Int(survival.blocks[0].cell >> 4)   // a lit furnace is placed as a furnace
+            guard let placed = survival.blocks.first else {
+                XCTAssertEqual(blockDefs[id].shape, .pistonHead, "\(blockDefs[id].name) was left out of the paste")
+                XCTAssertTrue(survival.blockEntities.isEmpty)
+                continue
+            }
+            let placedID = Int(placed.cell >> 4)   // a lit furnace is placed as a furnace
             let fresh = placementBlockEntity(placedID, 0, 0, 0)
             XCTAssertEqual(survival.blockEntities.count, fresh == nil ? 0 : 1, blockDefs[id].name)
             guard let rebuilt = survival.blockEntities.first else { continue }
