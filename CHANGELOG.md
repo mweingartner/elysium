@@ -24,10 +24,11 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   host takes the materials when it accepts a placement and pays them back on undo, and a guest
   places for free only in creative mode the host has granted.
 
-- **A lever, button or redstone torch with a broken facing no longer stops the game.** These
-  blocks keep the face they hang on in their data. A block that came from a template could name a
-  face that does not exist, and clicking it, or the torch's next update, read past the end of a
-  table and ended the game.
+- **A block with a broken facing no longer stops the game.** Levers, buttons, redstone torches,
+  hoppers, dispensers, droppers, pistons and observers keep the face they point at in their data.
+  A block that came from a template could name a face that does not exist, and clicking it or its
+  next update read past the end of a table and ended the game. In a LAN world a guest's template
+  could end the host's game that way. Such a block now does nothing.
 
 - **Doors, beds and tall flowers drop exactly one item.** Each of them stands on two cells but is
   one item, and the two halves were handled separately. Breaking a door or a tall flower by its
