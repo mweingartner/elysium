@@ -206,6 +206,76 @@ final class TwoCellBlockDropTests: XCTestCase {
         }
     }
 
+    // MARK: A half is not the block
+
+    private func use(_ world: World, _ player: Player, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+        let hit = RaycastHit(x: x, y: y, z: z, face: 1, cell: world.getBlock(x, y, z), t: 1,
+                             px: Double(x) + 0.5, py: Double(y) + 1, pz: Double(z) + 0.5)
+        return useBlock(InteractCtx(world: world, player: player), hit)
+    }
+
+    /// Opening a door writes the open state into its lower half. A top half without a door under
+    /// it used to write that into whatever stood there, and turned dirt into a door.
+    func testADoorHalfWithoutItsPartnerCannotBeOpenedAndChangesNothing() {
+        let (world, player) = makeFixture()
+        world.setBlock(6, 64, 6, Int(cell(B.dirt)))
+        world.setBlock(6, 65, 6, Int(cell(B.oak_door, 8)))
+        world.setBlock(9, 63, 6, Int(cell(B.stone)))
+        world.setBlock(9, 64, 6, Int(cell(B.oak_door, 0)))
+        world.setBlock(9, 65, 6, Int(cell(B.stone)))
+        XCTAssertFalse(use(world, player, 6, 65, 6))
+        XCTAssertEqual(world.getBlock(6, 64, 6), Int(cell(B.dirt)), "the dirt under a loose door top stays dirt")
+        XCTAssertFalse(use(world, player, 9, 64, 6))
+        XCTAssertEqual(world.getBlock(9, 64, 6), Int(cell(B.oak_door, 0)))
+        XCTAssertEqual(world.getBlock(9, 65, 6), Int(cell(B.stone)))
+    }
+
+    func testAWholeDoorStillOpensFromEitherHalf() {
+        let (world, player) = makeFixture()
+        world.setBlock(6, 63, 6, Int(cell(B.stone)))
+        world.setBlock(6, 64, 6, Int(cell(B.oak_door, 1)))
+        world.setBlock(6, 65, 6, Int(cell(B.oak_door, 8)))
+        XCTAssertTrue(use(world, player, 6, 65, 6))
+        XCTAssertEqual(world.getBlock(6, 64, 6), Int(cell(B.oak_door, 1 ^ 4)))
+        XCTAssertTrue(use(world, player, 6, 64, 6))
+        XCTAssertEqual(world.getBlock(6, 64, 6), Int(cell(B.oak_door, 1)))
+    }
+
+    /// Half a bed gives no spawn point and, where beds explode, no explosion.
+    func testHalfABedIsNoBed() {
+        for head in [true, false] {
+            let (world, player) = makeFixture()
+            let before = player.spawnPoint.map { [$0.0, $0.1, $0.2] }
+            world.setBlock(6, 64, 6, Int(cell(B.red_bed, head ? 4 : 0)))
+            XCTAssertFalse(use(world, player, 6, 64, 6), head ? "head" : "foot")
+            XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, before)
+            XCTAssertEqual(world.getBlockId(6, 64, 6), Int(B.red_bed))
+        }
+        let nether = World(dim: .nether, seed: 0xBED3)
+        let info = dimInfo(.nether)
+        let chunk = Chunk(cx: 0, cz: 0, minY: info.minY, height: info.height)
+        chunk.buildHeightmap()
+        nether.setChunk(chunk)
+        nether.light.initChunkLight(chunk)
+        let visitor = Player(world: nether)
+        visitor.setPos(12.5, 64, 12.5)
+        nether.setBlock(6, 64, 6, Int(cell(B.red_bed, 4)))
+        nether.setBlock(6, 64, 8, Int(cell(B.glass)))
+        XCTAssertFalse(use(nether, visitor, 6, 64, 6))
+        XCTAssertEqual(nether.getBlockId(6, 64, 6), Int(B.red_bed), "a loose head does not explode")
+        XCTAssertEqual(nether.getBlockId(6, 64, 8), Int(B.glass))
+    }
+
+    func testAWholeBedSetsTheSpawnPointFromEitherHalf() {
+        for useHead in [true, false] {
+            let (world, player) = makeFixture()
+            let bed = placeBed(in: world)
+            let target = useHead ? bed.head : bed.foot
+            XCTAssertTrue(use(world, player, target.0, target.1, target.2))
+            XCTAssertEqual(player.spawnPoint.map { [$0.0, $0.1, $0.2] }, [target.0, target.1, target.2])
+        }
+    }
+
     // MARK: Tall plants
 
     func testBreakingEitherHalfOfATallFlowerByHandDropsOneFlowerAndRemovesBoth() {

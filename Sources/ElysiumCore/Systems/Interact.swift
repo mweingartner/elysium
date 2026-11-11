@@ -134,6 +134,9 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
 
     // doors / trapdoors / gates
     if shape == .door && id != Int(B.iron_door) {
+        // A door half that has lost its other half is no door: opening it would write a door
+        // into whatever stands above or below it.
+        guard twoCellPartnerCell(in: world, of: c, x, y, z) != nil else { return false }
         let lowerY = (meta & 8) != 0 ? y - 1 : y
         let lower = world.getBlock(x, lowerY, z)
         world.setBlock(x, lowerY, z, Int(cell(UInt16(id), (lower & 15) ^ 4)))
@@ -344,6 +347,8 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
     }
     // beds
     if shape == .bed {
+        // Half a bed is no bed: it gives no rest, no spawn point and no explosion.
+        guard twoCellPartnerCell(in: world, of: c, x, y, z) != nil else { return false }
         return useBed(ctx, x, y, z, c)
     }
     if id == Int(B.respawn_anchor) {

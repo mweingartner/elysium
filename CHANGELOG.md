@@ -36,7 +36,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   door half that had lost its partner removed whatever block stood above or below it. The lower
   half of a door, the foot of a bed and the base of a plant now carry the item, whichever half is
   broken. A half left standing without its partner is worth nothing, also with Silk Touch, and
-  breaking it leaves the neighbouring block alone.
+  breaking it leaves the neighbouring block alone. Such a half can no longer be used either:
+  clicking the upper half of a door that had lost its lower half turned the block below it into
+  a door, and half a bed could be slept in.
 
 - Bumped the release and exact-LAN-compatibility version to 1.4.6 for the LAN join fix and the
   guest object templates below. The template intent changed shape, so older binaries are rejected
