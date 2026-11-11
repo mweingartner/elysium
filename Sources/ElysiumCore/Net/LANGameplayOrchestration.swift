@@ -32,8 +32,10 @@ public enum LANTemplateIntentResult: Equatable {
     case accepted(action: LANTemplateIntent.Action, name: String)
     /// A running job's progress, queued every `LAN_MULTIPLAYER_TEMPLATE_PROGRESS_REPORT_STEPS`.
     case progress(action: LANTemplateIntent.Action, name: String, percent: Int, phase: String)
-    case placed(name: String, blocks: Int, blockEntities: Int, cleared: Int, filled: Int)
-    case undone(name: String, restored: Int)
+    /// `payment` and `refund` are sentences for the guest: what a survival paste used, and what
+    /// its undo returned. Empty for a free paste.
+    case placed(name: String, blocks: Int, blockEntities: Int, cleared: Int, filled: Int, payment: String = "")
+    case undone(name: String, restored: Int, refund: String = "")
     case rejected(String)
 }
 

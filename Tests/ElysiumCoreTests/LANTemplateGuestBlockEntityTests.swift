@@ -33,6 +33,7 @@ final class LANTemplateGuestBlockEntityTests: XCTestCase {
         session.updatePlayerState(LANPlayerState(
             playerID: "guest", displayName: "Alex", x: 8.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
             health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival))
+        session.letPasteForFree("guest")
         return session
     }
 

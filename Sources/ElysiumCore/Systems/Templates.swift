@@ -1657,6 +1657,10 @@ public final class ObjectTemplateUndoRestoreJob {
         touched.reserveCapacity(snapshot.cells.count)
     }
 
+    /// Called with each cell just before it is restored, while what the undo is about to
+    /// replace still stands there. A refund is counted here, never from an earlier look.
+    public var onWillRestore: ((TemplatePlacementUndoCell) -> Void)?
+
     public var isDone: Bool { phase == .done }
     /// Valid once `isDone` is true — the count of cells actually restored (unloaded cells
     /// are skipped and do not count toward this total, matching `restoreObjectTemplatePlacementUndo`).
@@ -1690,6 +1694,7 @@ public final class ObjectTemplateUndoRestoreJob {
                     budget -= 1
                     continue
                 }
+                onWillRestore?(cellRecord)
                 _ = world.setBlock(cellRecord.x, cellRecord.y, cellRecord.z, cellRecord.cell, SET_NO_NEIGHBORS)
                 if let blockEntity = cellRecord.blockEntity,
                    let copy = sanitizedTemplateBlockEntity(blockEntity) {

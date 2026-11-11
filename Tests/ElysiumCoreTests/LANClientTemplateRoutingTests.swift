@@ -60,13 +60,17 @@ final class LANClientTemplateRoutingTests: XCTestCase {
 
     /// A guest standing on flat ground and looking along +z, connected through a handler that
     /// records what it sends.
-    private func makeGuest(connected: Bool = true) -> Guest {
+    private func makeGuest(connected: Bool = true, mode: Int = GameMode.creative) -> Guest {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "lan-client-template")
         let screen = CapturingHost()
         game.host = screen
         game.enterLANClientWorld(LANWorldSummary(
             worldID: "host world", worldName: "Host LAN", seed: 42, gameMode: GameMode.survival,
             difficulty: 2, dimension: Dim.overworld.rawValue, playerCount: 2))
+        // Most tests here are about what a guest sends and shows, not what a paste costs: their
+        // guest is in creative, where a paste is free and the client checks no materials.
+        game.player.setGameMode(mode)
+        for index in game.player.inventory.indices { game.player.inventory[index] = nil }
         game.player.setPos(8.5, 65, 4.5)
         game.player.yaw = 0
         game.player.pitch = 0
@@ -352,6 +356,7 @@ final class LANClientTemplateRoutingTests: XCTestCase {
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "guest", displayName: "Alex")
         session.updatePlayerState(makeLANPlayerState(guest.game.player, playerID: "guest", displayName: "Alex"))
+        session.letPasteForFree("guest")
 
         try guest.game.beginTemplatePlacement(marker())
         let target = try XCTUnwrap(guest.game.templatePlacementTarget())
@@ -392,6 +397,106 @@ final class LANClientTemplateRoutingTests: XCTestCase {
         XCTAssertEqual(guest.screen.chat.last, "§c" + LANTemplateRefusal.nothingToUndo)
     }
 
+    // MARK: - a survival guest pays, end to end
+
+    /// A guest in survival and its host, with every message through the frame codec and the
+    /// host's grants applied by the real client: the click pays, the blocks arrive, undo pays back.
+    func testASurvivalGuestPaysForItsPasteAndIsPaidBackByUndo() throws {
+        let guest = makeGuest(mode: GameMode.survival)
+        let hostWorld = World(dim: .overworld, seed: 42)
+        _ = groundChunk(in: hostWorld)
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "guest", displayName: "Alex")
+        session.updatePlayerState(makeLANPlayerState(guest.game.player, playerID: "guest", displayName: "Alex"))
+        guest.game.lanInventoryPublishHandler = { snapshot, revision in
+            _ = session.applyInventoryUpdate(LANInventoryUpdate(playerID: "guest", revision: revision, snapshot: snapshot),
+                                             from: "guest")
+        }
+        func carried(_ name: String = "oak_planks") -> Int { guest.game.player.countItem(iid(name)) }
+        func hostCopy(_ name: String = "oak_planks") -> Int {
+            (session.peerInventorySnapshotsByPlayerID()["guest"]?.slots ?? [])
+                .filter { $0.itemID == iid(name) }.reduce(0) { $0 + $1.count }
+        }
+        func deliverGrants() throws {
+            for grant in session.drainGrants(for: "guest") {
+                guard case .inventoryGrant(let received) = try overTheWire(.inventoryGrant(grant)) else {
+                    return XCTFail("a grant must survive the frame codec")
+                }
+                guest.game.applyLANGrant(received)
+            }
+        }
+
+        // Nothing carried: the client itself says what is missing and asks nobody.
+        try guest.game.beginTemplatePlacement(marker())
+        XCTAssertEqual(guest.screen.chat, ["§eCosts 1 material. Still missing 1 Oak Planks."])
+        guest.game.mouseDown(0)
+        XCTAssertTrue(sentIntents.isEmpty, "a paste the guest can see it cannot pay is not sent")
+        XCTAssertEqual(guest.screen.chat.last, "§cMissing 1 Oak Planks - nothing was placed.")
+        XCTAssertNotNil(guest.game.templatePlacement, "the preview stays armed")
+
+        // With planks in a slot the host has not heard of yet: the click publishes, then asks.
+        // The marker floats one block above the ground, so the host has to fill under it, and
+        // only the host knows that: it refuses for the dirt the guest's own quote could not see.
+        guest.game.player.inventory[7] = stack("oak_planks", 5)
+        let target = try XCTUnwrap(guest.game.templatePlacementTarget())
+        guest.game.mouseDown(0)
+        XCTAssertEqual(hostCopy(), 5, "the host hears the inventory before it hears the request")
+        let short = try sendLastIntent(to: session, world: hostWorld)
+        XCTAssertEqual(short, .rejected("Missing 1 Dirt - nothing was placed."))
+        try deliver(short, to: guest)
+        XCTAssertEqual(guest.screen.chat.last, "§cMissing 1 Dirt - nothing was placed.")
+        XCTAssertNotNil(guest.game.templatePlacement)
+        XCTAssertEqual(session.drainGrants(for: "guest").count, 0)
+        XCTAssertEqual(carried(), 5)
+
+        guest.game.player.inventory[8] = stack("dirt", 3)
+        guest.game.mouseDown(0)
+        let admitted = try sendLastIntent(to: session, world: hostWorld)
+        XCTAssertEqual(admitted, .accepted(action: .placeTemplate, name: "Marker"))
+        XCTAssertEqual(hostCopy(), 4)
+        XCTAssertEqual(hostCopy("dirt"), 2)
+        try deliverGrants()                                  // the payment goes out before the answer
+        XCTAssertEqual(carried(), 4, "the guest removes what the host took")
+        XCTAssertEqual(carried("dirt"), 2)
+        try deliver(admitted, to: guest)
+        try runHostJob(session, world: hostWorld, to: guest)
+        XCTAssertEqual(hostWorld.getBlock(target.targetX, target.targetY, target.targetZ), Int(cell(B.oak_planks, 0)))
+        XCTAssertEqual(hostWorld.getBlockId(target.targetX, target.targetY - 1, target.targetZ), Int(B.dirt))
+        XCTAssertTrue(guest.screen.chat.last?.hasSuffix("Used 2 materials.") == true,
+                      "\(guest.screen.chat)")
+
+        // Undo: the plank and the dirt still stand, so both come back.
+        XCTAssertTrue(guest.game.undoLastTemplatePlacement())
+        let undoing = try sendLastIntent(to: session, world: hostWorld)
+        XCTAssertEqual(undoing, .accepted(action: .undoPlacement, name: "Marker"))
+        try deliver(undoing, to: guest)
+        try runHostJob(session, world: hostWorld, to: guest)
+        try deliverGrants()
+        XCTAssertEqual(carried(), 5)
+        XCTAssertEqual(carried("dirt"), 3)
+        XCTAssertEqual(hostCopy(), 5)
+        XCTAssertEqual(hostCopy("dirt"), 3)
+        XCTAssertTrue(guest.screen.chat.last?.hasSuffix("Returned 2 materials.") == true,
+                      "\(guest.screen.chat)")
+        XCTAssertEqual(hostWorld.getBlock(target.targetX, target.targetY, target.targetZ), 0)
+    }
+
+    /// The host's copy of a guest's inventory does not show what a stack holds, so a filled
+    /// shulker box looks plain to it. The guest's own client refuses to pay with one.
+    func testAGuestDoesNotAskToPayWithAFilledShulkerBox() throws {
+        let guest = makeGuest(mode: GameMode.survival)
+        var filled = StackData()
+        filled.contents = [stack("diamond", 64)]
+        guest.game.player.inventory[0] = ItemStack(iid("shulker_box"), 1, data: filled)
+        let box = ObjectTemplate(name: "Box", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 1, sizeY: 1, sizeZ: 1,
+                                 blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.shulker_box, 0)))])
+        try guest.game.beginTemplatePlacement(box)
+        guest.game.mouseDown(0)
+        XCTAssertTrue(sentIntents.isEmpty)
+        XCTAssertEqual(guest.screen.chat.last, "§cMissing 1 Shulker Box - nothing was placed.")
+        XCTAssertNotNil(guest.game.player.inventory[0]?.data.contents)
+    }
+
     // MARK: - rotation, end to end
 
     /// Five different blocks, no two alike, in a box whose anchor is not at its origin: any
@@ -415,6 +520,7 @@ final class LANClientTemplateRoutingTests: XCTestCase {
             let session = LANMultiplayerHostSession()
             session.acceptPeer(playerID: "guest", displayName: "Alex")
             session.updatePlayerState(makeLANPlayerState(guest.game.player, playerID: "guest", displayName: "Alex"))
+        session.letPasteForFree("guest")
 
             try guest.game.beginTemplatePlacement(asymmetricTemplate())
             if rotation > 0 { XCTAssertTrue(guest.game.rotateTemplatePlacement(by: rotation)) }

@@ -5,7 +5,8 @@ import Foundation
 // A survival paste costs the items that place its blocks (`TemplateMaterials.swift`). They come
 // from the player's inventory first and then from the containers crafting already pools,
 // within `CRAFTING_CONTAINER_RADIUS`. Creative is free. A LAN guest's paste is placed and
-// charged by the host; on a guest this file only says what a paste will cost.
+// charged by the host from what the guest carries (`LANTemplatePayment.swift`); on a guest
+// this file only says what a paste will cost.
 //
 // `/give` and `/gamemode` are open to the player of a single-player or host world, so this is a
 // rule of normal play and not a barrier against cheating. The paste itself must still never
@@ -148,8 +149,6 @@ extension GameCore {
     /// the paste will cost and what is still missing. The click decides; the player may fetch
     /// what is missing first.
     func checkTemplateMaterialsOnArm(_ session: TemplatePlacementSession) throws {
-        // A LAN guest's paste is placed by the host, which does not charge for it yet.
-        guard !isLANClientWorld else { return }
         let quote = templateMaterialQuote(for: session.baseTemplate)
         switch quote {
         case .free:

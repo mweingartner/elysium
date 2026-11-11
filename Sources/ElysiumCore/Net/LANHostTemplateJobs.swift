@@ -3,6 +3,10 @@ import Foundation
 // The LAN host's side of a guest's object-template paste and undo: admission, the tick-sliced
 // jobs, their completion, and the settle when the host quits. The session's stored state
 // (`peers`, `templateJobs`, `pendingTemplateResponses`) stays in LANReplication.swift.
+//
+// A guest in survival pays for its paste from what it carries (`LANTemplatePayment.swift`): the
+// host charges at admission, pays back at completion what the job could not write, and pays
+// back at the end of an undo what the undo found standing as it restored each cell.
 
 extension LANMultiplayerHostSession {
     /// Admits a guest's template place or undo. The guest sends the template itself
@@ -31,11 +35,25 @@ extension LANMultiplayerHostSession {
             // Busy is answered before the payload is decoded, so a peer with a job in flight
             // cannot make the host decode a template for every further intent.
             guard templateJobs[playerID] == nil else { return .rejected(LANTemplateRefusal.busy) }
+            // The host's copy of the guest's inventory is only right once the guest has removed
+            // what its last paste cost. Until it says so, a second paste would be charged
+            // against materials that are already spent.
+            let pays = !lanTemplatePasteIsFree(playerState, peer.permissions)
+            guard !pays || intent.appliedGrantID >= peer.lastPaymentGrantID else {
+                return .rejected(LANTemplateRefusal.paymentPending)
+            }
             guard let payload = intent.templateData else {
                 return .rejected(LANTemplateRefusal.missingTemplate)
             }
             do {
-                let rawTemplate = try lanHostTemplate(fromGuestPayload: payload)
+                var rawTemplate = try lanHostTemplate(fromGuestPayload: payload)
+                var options = TemplatePlacementOptions(prepareTerrain: true)
+                var bill: TemplateMaterialBill?
+                if pays {
+                    rawTemplate = templateForSurvivalPaste(rawTemplate)
+                    bill = try templateMaterialBill(rawTemplate)
+                    options.plainDirtSupport = true
+                }
                 guard isWithinLANTemplateReach(playerState, template: rawTemplate, rotationSteps: intent.rotation,
                                                targetX: intent.x, targetY: intent.y, targetZ: intent.z) else {
                     return .rejected(LANTemplateRefusal.outOfReach)
@@ -51,8 +69,20 @@ extension LANMultiplayerHostSession {
                     targetY: intent.y,
                     targetZ: intent.z,
                     rotationSteps: intent.rotation,
-                    options: TemplatePlacementOptions(prepareTerrain: true)
+                    options: options
                 )
+                // The job is admitted and nothing has changed yet: charge now, or refuse.
+                if let bill {
+                    switch lanPayTemplateMaterials(
+                        bill.adding(itemID: iid("dirt"), count: job.plannedSupportCellCount),
+                        from: peer.inventory, playerID: playerID) {
+                    case .failure(let error):
+                        return .rejected(error.description)
+                    case .success(let payment):
+                        chargeTemplatePayment(payment, to: playerID)
+                        job.materials = payment.receipt
+                    }
+                }
                 // No dirty-section marking and no manual change-log loop here: the
                 // `onWorldBlockChanged` hook streams every write as the job steps, and
                 // `recordDirtyChunkSections` runs once at completion (finishTemplateJob) as the
@@ -79,16 +109,33 @@ extension LANMultiplayerHostSession {
                 return .rejected(LANTemplateRefusal.undoNotLoaded)
             }
             guard templateJobs[playerID] == nil else { return .rejected(LANTemplateRefusal.busy) }
+            // An undo of a paid paste starts only when its refund has room in what the guest
+            // carries, so an undo scatters nothing. This look only decides whether to start:
+            // what is paid back is counted cell by cell as the job restores each one.
+            var refundTally: LANTemplateRefundTally?
+            if let receipt = undo.materials, receipt.total > 0 {
+                let short = lanTemplateRefundShortfall(
+                    templateStandingMaterials(in: world, restoring: undo.cells),
+                    receipt: receipt, inventory: peer.inventory, playerID: playerID)
+                guard short == 0 else {
+                    return .rejected(TemplateMaterialError.noRoomForRefund(stacks: short).description)
+                }
+                refundTally = LANTemplateRefundTally()
+            }
             // `lastTemplateUndo` is deliberately NOT cleared here — only at undo-completion
             // (finishTemplateJob). The busy guard above already prevents a second undo from
             // starting while this one is in flight, so early-clearing is unnecessary and would
             // lose the snapshot if the peer disconnects mid-undo.
             let job = ObjectTemplateUndoRestoreJob(snapshot: undo, in: world)
+            if let refundTally {
+                job.onWillRestore = { [unowned world] cell in refundTally.note(restoring: cell, in: world) }
+            }
             templateJobs[playerID] = TemplateJobEntry(
                 job: .undo(job),
                 action: .undoPlacement,
                 templateName: undo.templateName,
-                dimension: undo.dimension
+                dimension: undo.dimension,
+                refundTally: refundTally
             )
             return .accepted(action: .undoPlacement, name: undo.templateName)
         }
@@ -151,6 +198,9 @@ extension LANMultiplayerHostSession {
                 print("[lan] template job for \(playerID) finished without a result; dropping without completion")
                 return
             }
+            // Before the undo record is read: what the job could not write is paid back and
+            // comes off the receipt the record carries.
+            let payment = settleTemplatePayment(of: job, result: result, for: playerID, in: world)
             let undo = job.undoSnapshot
             recordDirtyChunkSections(from: undo, in: world)
             if var peer = peers[playerID] {
@@ -162,17 +212,104 @@ extension LANMultiplayerHostSession {
                 blocks: result.blocksPlaced,
                 blockEntities: result.blockEntitiesPlaced,
                 cleared: result.blocksCleared,
-                filled: result.supportBlocksFilled
+                filled: result.supportBlocksFilled,
+                payment: payment
             )))
         case .undo(let job):
             let undo = job.undoSnapshot
             recordDirtyChunkSections(from: undo, in: world)
+            var refund = ""
+            if var receipt = undo.materials, let tally = entry.refundTally {
+                refund = returnTemplateMaterials(tally.standing, against: &receipt, to: playerID, in: world,
+                                                 near: undo.cells.first.map { ($0.x, $0.y, $0.z) })
+            }
             if var peer = peers[playerID] {
                 peer.lastTemplateUndo = nil
                 peers[playerID] = peer
             }
-            pendingTemplateResponses.append((playerID, .undone(name: undo.templateName, restored: job.restored)))
+            pendingTemplateResponses.append((playerID, .undone(name: undo.templateName, restored: job.restored,
+                                                               refund: refund)))
         }
+    }
+
+    /// Records a guest's payment: the host's copy of its inventory loses the materials, and a
+    /// grant tells the guest to remove the same items. The grant's id is remembered so the next
+    /// paste is admitted only after the guest has applied it.
+    private func chargeTemplatePayment(_ payment: LANTemplatePayment, to playerID: String) {
+        guard var peer = peers[playerID] else { return }
+        peer.inventory = payment.inventory
+        peers[playerID] = peer
+        guard !payment.take.isEmpty,
+              let grant = enqueueGrant(items: [], xp: 0, clearAll: false, to: playerID, take: payment.take)
+        else { return }
+        peers[playerID]?.lastPaymentGrantID = grant.grantID
+    }
+
+    /// A finished paste: pays back what the guest paid for blocks the job could not write and
+    /// for ground it did not have to fill, and takes that off the job's receipt. Returns what
+    /// the paste used, as a sentence for the guest; empty for a free paste.
+    private func settleTemplatePayment(of job: ObjectTemplatePlacementJob, result: TemplatePlacementResult,
+                                       for playerID: String, in world: World) -> String {
+        guard var receipt = job.materials else { return "" }
+        let unwritten = templateUnwrittenMaterials(
+            unplacedBlocks: job.unplacedBlocks,
+            unfilledSupportCells: job.plannedSupportCellCount - result.supportBlocksFilled)
+        if !unwritten.isEmpty {
+            _ = returnTemplateMaterials(unwritten, against: &receipt, to: playerID, in: world,
+                                        near: (result.originX, result.originY, result.originZ))
+            job.materials = receipt
+        }
+        // The host's chat shows this sentence too, under the guest's name, so it says "used"
+        // and not "from your inventory".
+        return receipt.total > 0 ? "Used \(templateMaterialCountText(receipt.total))." : ""
+    }
+
+    /// Gives `materials` back to a guest, for each item no more than `receipt` still holds: into
+    /// the host's copy of its inventory and, with an additive grant, into the guest's own. What
+    /// has no room, or all of it when the guest is dead or has left, is dropped as stacks beside
+    /// the guest, or at `near` when the guest is not in this world. Returns a sentence for the guest.
+    private func returnTemplateMaterials(_ materials: [Int: Int], against receipt: inout TemplateMaterialReceipt,
+                                         to playerID: String, in world: World,
+                                         near: (x: Int, y: Int, z: Int)?) -> String {
+        let peer = peers[playerID]
+        let state = peer?.playerState
+        let alive = peer?.lifecycle == .connected && state?.dead != true
+        var dropped: [TemplateMaterialLine]
+        var returned = 0
+        if alive, var peer {
+            let refund = lanRefundTemplateMaterials(materials, against: &receipt, into: peer.inventory, playerID: playerID)
+            peer.inventory = refund.inventory
+            peers[playerID] = peer
+            if !refund.items.isEmpty {
+                _ = enqueueGrant(items: refund.items, xp: 0, clearAll: false, to: playerID)
+            }
+            returned = refund.returned
+            dropped = refund.leftover
+        } else {
+            dropped = materials.keys.sorted().compactMap { itemID in
+                let share = receipt.giveBack(itemID: itemID, count: materials[itemID] ?? 0)
+                let count = share.toInventory + share.toStorage
+                return count > 0 ? TemplateMaterialLine(itemID: itemID, count: count) : nil
+            }
+        }
+        var spot = near.map { (Double($0.x) + 0.5, Double($0.y) + 1, Double($0.z) + 0.5) }
+        if alive, let state, state.dimension == world.dim.rawValue { spot = (state.x, state.y + 0.5, state.z) }
+        var droppedCount = 0
+        for line in dropped where line.itemID >= 0 && line.itemID < itemDefs.count {
+            guard let spot else { break }
+            var left = line.count
+            while left > 0 {
+                let count = min(left, max(1, itemDefs[line.itemID].maxStack))
+                _ = spawnItem(world, spot.0, spot.1, spot.2, ItemStack(line.itemID, count))
+                left -= count
+            }
+            droppedCount += line.count
+        }
+        var text = returned > 0 ? "Returned \(templateMaterialCountText(returned))." : ""
+        if droppedCount > 0 {
+            text += (text.isEmpty ? "" : " ") + "\(templateMaterialCountText(droppedCount)) had no room and \(droppedCount == 1 ? "lies" : "lie") on the ground."
+        }
+        return text
     }
 
     /// Drains queued template-job completion responses in completion order.

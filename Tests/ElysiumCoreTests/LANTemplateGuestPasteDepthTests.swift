@@ -57,6 +57,7 @@ final class LANTemplateGuestPasteDepthTests: XCTestCase {
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "guest", displayName: "Alex")
         session.updatePlayerState(playerState(x: x, y: y, z: z))
+        session.letPasteForFree("guest")
         return session
     }
 

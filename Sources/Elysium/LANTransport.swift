@@ -3441,7 +3441,14 @@ final class LANMultiplayerManager {
             appendStatus("LAN template intent from \(peerName) rejected: \(reason)")
         }
         let event = lanTemplateGameplayEvent(for: result, playerID: playerID, tick: game.rpgSimulationTick)
-        queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+        // What the paste cost goes out before the answer, so the guest has paid by the time it
+        // may ask again.
+        let grants = hostReplicationSession.drainGrants(for: playerID)
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let peer = self.hostPeers[peerID], peer.accepted { for grant in grants { self.send(.inventoryGrant(grant), to: peer) } }
+            self.sendGameplayEvent(event, to: peerID)
+        }
     }
 
     /// A2: serves chunk requests for the GUEST's dimension, not just the host's current one —

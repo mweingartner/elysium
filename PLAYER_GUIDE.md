@@ -602,6 +602,11 @@ the action bar shows the host placing it and chat shows the result. If the host 
 why (for example the spot is too far away, or the host is in another dimension) and the wireframe
 stays so you can adjust and click again. `Command-Z` asks the host to undo your own most recent
 placement; it cannot undo another player's, and it is forgotten when you leave the session.
+In survival a guest pays for a placement like everyone else, but only from what it carries: the
+host's containers are not drawn on. If you are short, your own game says what is missing before the
+host is asked. Otherwise the host takes the materials when it accepts, and the result in chat says
+what was used. `Command-Z` pays back what still stands into your inventory and needs room there.
+A guest places for free only in creative mode that the host has granted.
 What you place as a guest arrives as if newly built: chests, furnaces and other containers are
 empty, a jukebox has no disc, a spawner is inactive and a decorated pot is plain. Signs keep
 their text and flower pots keep their plants. An object of more than about 90,000 blocks is too

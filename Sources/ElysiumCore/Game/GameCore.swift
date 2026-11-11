@@ -561,7 +561,7 @@ public final class GameCore {
     /// player is temporarily held for unloaded chunks and their entity tick is
     /// not advancing `attackAnim`.
     private var miningSwingTicksRemaining = 0
-    private var lanLastAppliedGrantID = 0
+    private(set) var lanLastAppliedGrantID = 0
     public private(set) var lanConnectionLost = false
     private var lanDeferredReplication = LANDeferredReplicationBuffer()
     /// position/type of the mirrored container screen currently open (if any) — used to detect
@@ -5506,6 +5506,7 @@ public final class GameCore {
         if grant.clearAll {
             for i in 0..<p.inventory.count { p.inventory[i] = nil }
         }
+        lanApplyTemplateTake(grant.take, to: &p.inventory)
         for slot in grant.clearedSlots where slot >= 0 && slot < p.inventory.count {
             p.inventory[slot] = nil
         }
@@ -5543,7 +5544,8 @@ public final class GameCore {
         }
         if grant.xp > 0 { p.addXP(grant.xp) }
         lanLocalInventoryRevision += 1
-        lanLastPublishedInventory = makeLANInventorySnapshot(p, playerID: "")
+        // After a take the host hears the result, so its copy cannot stay behind a late publish.
+        lanLastPublishedInventory = grant.take.isEmpty ? makeLANInventorySnapshot(p, playerID: "") : nil
     }
 
     /// applies a host-relayed damage event against the local player (the host validated the
@@ -5821,6 +5823,7 @@ public final class GameCore {
     /// snapshot; on change, bumps the client-owned revision counter and publishes. Client-owned
     /// inventory authority (D-A): the host never overwrites this except via LANRestoreState
     /// (reconnect) or LANInventoryGrant (additive correction).
+    func publishLANInventoryNow() { lanLastPublishedInventory = nil; publishLANInventoryIfChanged() }
     private func publishLANInventoryIfChanged() {
         guard let p = player, let handler = lanInventoryPublishHandler else { return }
         if p.dead || p.deathTime > 0 { return }   // D-race: don't overwrite the host's pre-death snapshot

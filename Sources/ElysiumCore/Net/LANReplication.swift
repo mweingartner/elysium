@@ -350,6 +350,8 @@ public final class LANMultiplayerHostSession {
         var deathEpoch = 0
         var deathHandledEpoch = 0
         var lastTemplateUndo: TemplatePlacementUndoSnapshot?
+        /// The grant that told this guest what its last paste cost; see `LANTemplateIntent.appliedGrantID`.
+        var lastPaymentGrantID = 0
         var lastAckTick = 0
         var lastAckSequence: UInt32 = 0
         /// Event-only block strikes have their own semantic sequence. Wire-frame sequencing
@@ -432,6 +434,7 @@ public final class LANMultiplayerHostSession {
         /// than aborting, and resumes once the host returns to that dimension.
         var dimension: Int
         var stepsSinceReport = 0
+        var refundTally: LANTemplateRefundTally?
     }
 
     var peers: [String: Peer] = [:]
@@ -1663,7 +1666,8 @@ public final class LANMultiplayerHostSession {
         clearAll: Bool,
         to rawPlayerID: String,
         slots: [LANInventorySlotSnapshot] = [],
-        clearedSlots: [Int] = []
+        clearedSlots: [Int] = [],
+        take: [LANInventorySlotSnapshot] = []
     ) -> LANInventoryGrant? {
         let playerID = String(rawPlayerID.prefix(128))
         guard var peer = peers[playerID] else { return nil }
@@ -1675,7 +1679,8 @@ public final class LANMultiplayerHostSession {
             xp: xp,
             clearAll: clearAll,
             slots: slots,
-            clearedSlots: clearedSlots
+            clearedSlots: clearedSlots,
+            take: take
         )
         peers[playerID] = peer
         pendingGrants[playerID, default: []].append(grant)
@@ -2125,7 +2130,7 @@ public func makeLANPlayerState(_ player: Player, playerID: String, displayName: 
     )
 }
 
-private func makeLANInventorySlotSnapshots(_ inventory: [ItemStack?]) -> [LANInventorySlotSnapshot] {
+func makeLANInventorySlotSnapshots(_ inventory: [ItemStack?]) -> [LANInventorySlotSnapshot] {
     inventory.enumerated().compactMap { index, stack -> LANInventorySlotSnapshot? in
         guard let stack, stack.count > 0, stack.id >= 0, stack.id < itemDefs.count else { return nil }
         return LANInventorySlotSnapshot(
@@ -2319,7 +2324,7 @@ public func makeLANBlockEntitySnapshots(
     return out
 }
 
-private let LAN_PLAYER_INVENTORY_SLOT_COUNT = 36
+let LAN_PLAYER_INVENTORY_SLOT_COUNT = 36
 
 private func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot) -> LANPlayerInventorySnapshot? {
     var seenSlots = Set<Int>()
@@ -2355,7 +2360,7 @@ private func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapsh
     )
 }
 
-private func makeInventory(from snapshot: LANPlayerInventorySnapshot) -> [ItemStack?]? {
+func makeInventory(from snapshot: LANPlayerInventorySnapshot) -> [ItemStack?]? {
     guard let snapshot = normalizedLANInventorySnapshot(snapshot) else { return nil }
     var inventory: [ItemStack?] = Array(repeating: nil, count: LAN_PLAYER_INVENTORY_SLOT_COUNT)
     for slot in snapshot.slots {

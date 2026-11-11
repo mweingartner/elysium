@@ -2189,10 +2189,13 @@ public struct LANInventoryGrant: Codable, Equatable {
         case clearAll
         case slots
         case clearedSlots
+        case take
     }
 
     public var playerID: String
     public var grantID: Int
+    /// Plain items the guest removes wherever they sit now (a paste it paid for), applied first.
+    public var take: [LANInventorySlotSnapshot]
     /// Additive merge (host-side pickups): merged into the client inventory via `give` semantics.
     public var items: [LANInventorySlotSnapshot]
     public var xp: Int
@@ -2210,10 +2213,12 @@ public struct LANInventoryGrant: Codable, Equatable {
         xp: Int,
         clearAll: Bool,
         slots: [LANInventorySlotSnapshot] = [],
-        clearedSlots: [Int] = []
+        clearedSlots: [Int] = [],
+        take: [LANInventorySlotSnapshot] = []
     ) {
         self.playerID = String(playerID.prefix(128))
         self.grantID = max(0, grantID)
+        self.take = Array(take.prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS))
         self.items = Array(items.prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS))
         self.xp = max(0, min(1_000_000_000, xp))
         self.clearAll = clearAll
@@ -2239,7 +2244,8 @@ public struct LANInventoryGrant: Codable, Equatable {
             xp: try c.decodeIfPresent(Int.self, forKey: .xp) ?? 0,
             clearAll: try c.decodeIfPresent(Bool.self, forKey: .clearAll) ?? false,
             slots: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .slots) ?? [],
-            clearedSlots: try c.decodeIfPresent([Int].self, forKey: .clearedSlots) ?? []
+            clearedSlots: try c.decodeIfPresent([Int].self, forKey: .clearedSlots) ?? [],
+            take: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .take) ?? []
         )
     }
 }

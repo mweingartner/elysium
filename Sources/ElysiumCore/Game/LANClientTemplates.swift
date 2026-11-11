@@ -39,10 +39,20 @@ extension GameCore {
             return nil
         }
         guard let target = templatePlacementTarget() else { throw TemplateError.missingTarget }
+        // The host charges a survival paste from its copy of this inventory, and that copy does
+        // not show what a stack holds: a filled shulker box looks like an empty one to it. So
+        // what this client can see is missing is refused here, before the host is asked.
+        let quote = templateMaterialQuote(for: session.baseTemplate)
+        guard quote.missing.isEmpty else {
+            throw TemplateError.materials(TemplateMaterialError.missing(quote.missing).description)
+        }
+        // The host must hear what this inventory holds now before it hears the request.
+        publishLANInventoryNow()
         handler(LANTemplateIntent(
             action: .placeTemplate, templateName: session.name,
             x: target.targetX, y: target.targetY, z: target.targetZ,
-            rotation: session.rotationSteps, templateData: payload))
+            rotation: session.rotationSteps, templateData: payload,
+            appliedGrantID: lanLastAppliedGrantID))
         lanClientTemplates.awaiting = (.placeTemplate, LAN_CLIENT_TEMPLATE_ANSWER_TIMEOUT_TICKS)
         lanClientTemplates.placeRequestArm = lanClientTemplates.armSerial
         host?.showActionBar("Asking the host to place \"\(session.name)\"", 60)
@@ -58,7 +68,10 @@ extension GameCore {
             showLANClientTemplateProblem("No active LAN connection.")
             return false
         }
-        handler(LANTemplateIntent(action: .undoPlacement, templateName: "", x: 0, y: 0, z: 0, rotation: 0))
+        // The host sizes the refund to the room it believes this inventory has.
+        publishLANInventoryNow()
+        handler(LANTemplateIntent(action: .undoPlacement, templateName: "", x: 0, y: 0, z: 0, rotation: 0,
+                                  appliedGrantID: lanLastAppliedGrantID))
         lanClientTemplates.awaiting = (.undoPlacement, LAN_CLIENT_TEMPLATE_ANSWER_TIMEOUT_TICKS)
         host?.showActionBar("Asking the host to undo your last object", 60)
         return true

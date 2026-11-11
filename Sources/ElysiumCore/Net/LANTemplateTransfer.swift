@@ -33,7 +33,7 @@ public struct LANTemplateIntent: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case action, templateName, x, y, z, rotation, templateData
+        case action, templateName, x, y, z, rotation, templateData, appliedGrantID
     }
 
     public var action: Action
@@ -46,11 +46,16 @@ public struct LANTemplateIntent: Codable, Equatable {
     /// `.placeTemplate` only: the guest's own template as `PBT2` bytes, unrotated. Nil when the
     /// caller gave none or gave more than `LAN_MULTIPLAYER_MAX_TEMPLATE_PAYLOAD_BYTES`.
     public private(set) var templateData: Data?
+    /// The last inventory grant the guest had applied when it sent this. The host charges for a
+    /// paste from its copy of the guest's inventory, and that copy is only right once the guest
+    /// has removed what the previous paste cost.
+    public var appliedGrantID: Int
 
     public init(action: Action, templateName: String, x: Int, y: Int, z: Int, rotation: Int,
-                templateData: Data? = nil) {
+                templateData: Data? = nil, appliedGrantID: Int = 0) {
         let limit = LAN_TEMPLATE_INTENT_MAX_COORDINATE
         self.action = action
+        self.appliedGrantID = max(0, appliedGrantID)
         self.templateName = sanitizedLANTemplateName(templateName)
         self.x = max(-limit, min(limit, x))
         self.y = max(-limit, min(limit, y))
@@ -74,7 +79,8 @@ public struct LANTemplateIntent: Codable, Equatable {
             z: try c.decode(Int.self, forKey: .z),
             rotation: try c.decodeIfPresent(Int.self, forKey: .rotation) ?? 0,
             templateData: (try c.decodeIfPresent(String.self, forKey: .templateData))
-                .flatMap(lanTemplateData(fromWireText:))
+                .flatMap(lanTemplateData(fromWireText:)),
+            appliedGrantID: try c.decodeIfPresent(Int.self, forKey: .appliedGrantID) ?? 0
         )
     }
 
@@ -87,6 +93,7 @@ public struct LANTemplateIntent: Codable, Equatable {
         try c.encode(z, forKey: .z)
         try c.encode(rotation, forKey: .rotation)
         try c.encodeIfPresent(templateData.map(lanTemplateWireText), forKey: .templateData)
+        try c.encode(appliedGrantID, forKey: .appliedGrantID)
     }
 }
 
@@ -119,6 +126,7 @@ public enum LANTemplateRefusal {
     public static let nothingToUndo = "No object placement to undo."
     public static let undoOtherDimension = "The host is in another dimension than the object, so it cannot be undone now."
     public static let undoNotLoaded = "Move closer to the object to undo it."
+    public static let paymentPending = "Your last object is still being paid for. Try again in a moment."
 
     /// The player-facing sentence for a refusal from `LANMultiplayerHostSession.authorize`.
     static func authorization(_ result: LANAuthorizationResult, for permission: LANGameplayPermission) -> String? {
@@ -178,10 +186,10 @@ public func isWithinLANTemplateReach(_ player: LANPlayerState, template: ObjectT
 
 /// What a finished placement says, on the host's own screen and on a guest's.
 public func templatePlacementCompletionText(name: String, blocks: Int, blockEntities: Int,
-                                            cleared: Int, filled: Int) -> String {
+                                            cleared: Int, filled: Int, payment: String = "") -> String {
     var details = "\(blocks) blocks, \(blockEntities) block entities"
     if cleared > 0 || filled > 0 { details += ", cleared \(cleared), filled \(filled)" }
-    return "Placed object \"\(name)\" - \(details)"
+    return "Placed object \"\(name)\" - \(details)" + (payment.isEmpty ? "" : ". " + payment)
 }
 
 /// The short form of a completion text for the action bar (`Placed object "Name"`); chat has
@@ -196,8 +204,8 @@ public func templateProgressText(undo: Bool = false, name: String, percent: Int,
 }
 
 /// What a finished undo says, on the host's own screen and on a guest's.
-public func templateUndoCompletionText(name: String, restored: Int) -> String {
-    "Undid object placement \"\(name)\" - restored \(restored) cells"
+public func templateUndoCompletionText(name: String, restored: Int, refund: String = "") -> String {
+    "Undid object placement \"\(name)\" - restored \(restored) cells" + (refund.isEmpty ? "" : ". " + refund)
 }
 
 /// The event the host sends its guest for one template result. A guest acts on the kind and
@@ -213,13 +221,13 @@ public func lanTemplateGameplayEvent(for result: LANTemplateIntentResult, player
     case .progress(let action, let name, let percent, let phase):
         kind = .templateProgress
         message = templateProgressText(undo: action == .undoPlacement, name: name, percent: percent, phase: phase)
-    case .placed(let name, let blocks, let blockEntities, let cleared, let filled):
+    case .placed(let name, let blocks, let blockEntities, let cleared, let filled, let payment):
         kind = .templateCompleted
         message = templatePlacementCompletionText(name: name, blocks: blocks, blockEntities: blockEntities,
-                                                  cleared: cleared, filled: filled)
-    case .undone(let name, let restored):
+                                                  cleared: cleared, filled: filled, payment: payment)
+    case .undone(let name, let restored, let refund):
         kind = .templateCompleted
-        message = templateUndoCompletionText(name: name, restored: restored)
+        message = templateUndoCompletionText(name: name, restored: restored, refund: refund)
     case .rejected(let reason):
         kind = .templateRefused
         message = reason
