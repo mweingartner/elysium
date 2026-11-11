@@ -2135,6 +2135,14 @@ final class LANMultiplayerManager {
                     message.kind, playerID: peer.playerID, peerID: peer.id,
                     peerName: peer.playerName
                 )
+                // What the guest did on its own side still stands there. A dropped container
+                // edit is handed back; a dropped inventory is asked for again (an empty grant).
+                if case .containerEditIntent(_, let intent) = message {
+                    self.correctRefusedContainerEdit(intent, playerID: peer.playerID)
+                } else if case .inventoryUpdate(let update) = message {
+                    self.hostReplicationSession.noteInventoryHeard(update, from: peer.playerID)
+                    _ = self.hostReplicationSession.enqueueGrant(items: [], xp: 0, clearAll: false, to: peer.playerID)
+                }
                 return
             }
             self.handleHostMessage(message, from: peer, passedRPGClockGate: true)
@@ -2823,7 +2831,6 @@ final class LANMultiplayerManager {
             reportBlockIntentRejected("target out of reach", playerID: playerID, peerName: peerName, tick: game.rpgSimulationTick)
             return
         }
-        let beforeInventory = record.inventory
         let outcome = hostGhostRegistry.applyBreak(for: playerID, x: intent.x, y: intent.y, z: intent.z, world: world, session: hostReplicationSession)
         guard outcome.broke else {
             if let reason = outcome.reason {
@@ -2831,9 +2838,8 @@ final class LANMultiplayerManager {
             }
             return
         }
-        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        sendGhostInventory(outcome.inventory, playerID: playerID)
         recordAndPublishHostGhostRPGState(outcome.rpg, for: playerID)
-        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
         // the block change itself was already captured via `onWorldBlockChanged` ->
         // `recordBlockChange` (world.setBlock fires that hook during finishBreaking) — drain
         // and broadcast it promptly rather than waiting for the next periodic tick.
@@ -2854,8 +2860,7 @@ final class LANMultiplayerManager {
         precondition(Thread.isMainThread)
         guard let game = activeGame, game.hasWorld() else { return }
         let world = game.world
-        guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
-        let beforeInventory = record.inventory
+        guard hostReplicationSession.peerRecord(playerID: playerID) != nil else { return }
         let outcome = hostGhostRegistry.applyPlace(for: playerID, intent: intent, world: world, session: hostReplicationSession)
         guard outcome.placed else {
             if let reason = outcome.reason {
@@ -2863,8 +2868,7 @@ final class LANMultiplayerManager {
             }
             return
         }
-        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
-        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+        sendGhostInventory(outcome.inventory, playerID: playerID)
         let changes = hostReplicationSession.drainBlockChanges()
         guard !changes.isEmpty else { return }
         let batch = LANReplicationBatch(tick: game.rpgSimulationTick,
@@ -2910,8 +2914,7 @@ final class LANMultiplayerManager {
     private func applyHostAttackIntent(_ intent: LANAttackIntent, from playerID: String, peerName: String) {
         precondition(Thread.isMainThread)
         guard let game = activeGame, game.hasWorld() else { return }
-        guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
-        let beforeInventory = record.inventory
+        guard hostReplicationSession.peerRecord(playerID: playerID) != nil else { return }
         let outcome = hostGhostRegistry.applyAttack(for: playerID, targetEntityID: intent.targetEntityID, world: game.world, session: hostReplicationSession)
         guard outcome.attacked else {
             if let reason = outcome.reason {
@@ -2919,9 +2922,8 @@ final class LANMultiplayerManager {
             }
             return
         }
-        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        sendGhostInventory(outcome.inventory, playerID: playerID)
         recordAndPublishHostGhostRPGState(outcome.rpg, for: playerID)
-        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
     }
 
     /// Guest ordinary bows are deliberately two-phase. The host session records the begin tick
@@ -2942,8 +2944,7 @@ final class LANMultiplayerManager {
         case .drawStarted:
             return
         case .released(let chargeTicks):
-            guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
-            let beforeInventory = record.inventory
+            guard hostReplicationSession.peerRecord(playerID: playerID) != nil else { return }
             let outcome = hostGhostRegistry.applyBow(
                 for: playerID,
                 chargeTicks: chargeTicks,
@@ -2962,13 +2963,8 @@ final class LANMultiplayerManager {
                 }
                 return
             }
-            hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+            sendGhostInventory(outcome.inventory, playerID: playerID)
             recordAndPublishHostGhostRPGState(outcome.rpg, for: playerID)
-            sendInventoryDeltaGrantIfNeeded(
-                before: beforeInventory,
-                after: outcome.inventory,
-                playerID: playerID
-            )
         case .ignored(let reason):
             appendStatus("LAN bow intent from \(peerName) ignored: \(reason).")
         case .rejected(let reason):
@@ -2977,14 +2973,12 @@ final class LANMultiplayerManager {
     }
 
     /// §7.2: `.tossIntent` → `ghostRegistry.applyToss` (removes items from the stored peer
-    /// inventory and authoritatively spawns them into the shared world); any mismatch between the
-    /// client's optimistic local decrement and the host's authoritative result is corrected via
-    /// the same additive grant mechanism.
+    /// inventory and authoritatively spawns them into the shared world); the guest removes them
+    /// from its own inventory when the grant for that change arrives.
     private func applyHostTossIntent(_ intent: LANTossIntent, from playerID: String, peerName: String) {
         precondition(Thread.isMainThread)
         guard let game = activeGame, game.hasWorld() else { return }
-        guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
-        let beforeInventory = record.inventory
+        guard hostReplicationSession.peerRecord(playerID: playerID) != nil else { return }
         let outcome = hostGhostRegistry.applyToss(for: playerID, intent: intent, world: game.world, session: hostReplicationSession)
         guard outcome.tossed else {
             if let reason = outcome.reason {
@@ -2992,8 +2986,7 @@ final class LANMultiplayerManager {
             }
             return
         }
-        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
-        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+        sendGhostInventory(outcome.inventory, playerID: playerID)
     }
 
     private func applyHostRPGIntent(_ intent: LANRPGIntent, from playerID: String, peerID: UUID, peerName: String) {
@@ -3042,10 +3035,7 @@ final class LANMultiplayerManager {
                 // correct exactly those host-authoritative inventory changes
                 // before publishing the resulting RPG state, just as the
                 // ordinary ghost attack/break routes do.
-                let beforeInventory = hostReplicationSession.peerRecord(playerID: playerID)?.inventory
-                let inventory = makeLANInventorySnapshot(ghost, playerID: playerID)
-                hostReplicationSession.recordInventorySnapshot(inventory, from: playerID)
-                sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: inventory, playerID: playerID)
+                sendGhostInventory(makeLANInventorySnapshot(ghost, playerID: playerID), playerID: playerID)
                 let ghostState = makeLANPlayerState(ghost, playerID: playerID, displayName: peerName, dimension: world.dim.rawValue, includeRPG: false)
                 _ = hostReplicationSession.updatePlayerState(
                     ghostState,
@@ -3287,6 +3277,7 @@ final class LANMultiplayerManager {
         case .rejected(let reason):
             appendStatus("LAN container edit from \(peerName) rejected: \(reason).")
             let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.rpgSimulationTick)
+            correctRefusedContainerEdit(intent, playerID: playerID)
             queue.async { [weak self] in self?.sendGameplayEvent(event, to: nil) }
         }
     }
@@ -3305,40 +3296,39 @@ final class LANMultiplayerManager {
         }
     }
 
-    /// Diffs a ghost-driven outcome's resulting inventory against the peer's inventory as it stood
-    /// immediately before the intent, and — if anything changed (durability consumed, items
-    /// removed by a break/attack/toss/place) — enqueues an additive correction grant so the guest's
-    /// client-authoritative inventory converges with the host's authoritative result. Grants are
-    /// Sends a ghost-driven inventory correction as ABSOLUTE per-slot deltas: only the slots the
-    /// intent actually changed are replaced (`slots`) or emptied (`clearedSlots`) on the client,
-    /// preserving the guest's inventory arrangement and any concurrent client-side edits to other
-    /// slots. Slot-set semantics are idempotent, so a replayed grant converges to the same state.
-    private func sendInventoryDeltaGrantIfNeeded(before: LANPlayerInventorySnapshot?, after: LANPlayerInventorySnapshot, playerID: String) {
-        guard before != after else { return }
-        var beforeBySlot: [Int: LANInventorySlotSnapshot] = [:]
-        for slot in before?.slots ?? [] { beforeBySlot[slot.slot] = slot }
-        var changedSlots: [LANInventorySlotSnapshot] = []
-        var seenSlots = Set<Int>()
-        for slot in after.slots {
-            seenSlots.insert(slot.slot)
-            if beforeBySlot[slot.slot] != slot {
-                changedSlots.append(slot)
-            }
-        }
-        let clearedSlots = beforeBySlot.keys.filter { !seenSlots.contains($0) }.sorted()
-        guard !changedSlots.isEmpty || !clearedSlots.isEmpty else { return }
-        guard let grant = hostReplicationSession.enqueueGrant(
-            items: [],
-            xp: 0,
-            clearAll: false,
-            to: playerID,
-            slots: changedSlots,
-            clearedSlots: clearedSlots
-        ) else { return }
+    /// A ghost acted for a guest and left `inventory`. The session works out which stacks
+    /// changed (a tool that wore, an item that was used up) and the guest is sent those, so it
+    /// makes the same changes wherever those stacks sit now (`recordGhostInventory`).
+    private func sendGhostInventory(_ inventory: LANPlayerInventorySnapshot, playerID: String) {
+        guard hostReplicationSession.recordGhostInventory(inventory, for: playerID) != nil else { return }
+        sendQueuedGrants(to: playerID)
+    }
+
+    /// Sends a guest the grants the session has queued for it, in order, ahead of the next tick.
+    private func sendQueuedGrants(to playerID: String) {
+        let grants = hostReplicationSession.drainGrants(for: playerID)
+        guard !grants.isEmpty else { return }
         queue.async { [weak self] in
             guard let self, let peer = self.hostPeers.values.first(where: { $0.accepted && $0.playerID == playerID }) else { return }
-            self.send(.inventoryGrant(grant), to: peer)
+            for grant in grants { self.send(.inventoryGrant(grant), to: peer) }
         }
+    }
+
+    /// The host did not take a guest's container edit, but the guest made that edit on its own
+    /// side before it asked. The guest gets the containers and its inventory back as the host
+    /// holds them, the containers first.
+    private func correctRefusedContainerEdit(_ intent: LANContainerEditIntent, playerID: String) {
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let containers = hostReplicationSession.correctRefusedContainerEdit(intent, from: playerID, in: game.world)
+        if !containers.isEmpty {
+            let batch = LANReplicationBatch(tick: game.rpgSimulationTick, fullSnapshot: false, blockEntities: containers)
+            queue.async { [weak self] in
+                guard let self, let peer = self.hostPeers.values.first(where: { $0.accepted && $0.playerID == playerID }) else { return }
+                self.broadcastHostReplicationBatch(batch, drainedBlockChanges: [], to: peer.id)
+            }
+        }
+        sendQueuedGrants(to: playerID)
     }
 
     /// lan-client-parity (change 4), design.md §11: HOST-AUTHORITATIVE

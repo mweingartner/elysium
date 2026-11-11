@@ -79,8 +79,7 @@ extension LANMultiplayerHostSession {
                 // The job is admitted and nothing has changed yet: charge now, or refuse.
                 if let bill {
                     switch lanPayTemplateMaterials(
-                        bill.adding(itemID: iid("dirt"), count: job.plannedSupportCellCount),
-                        from: peer.inventory, playerID: playerID) {
+                        bill.adding(itemID: iid("dirt"), count: job.plannedSupportCellCount), from: peer.inventory) {
                     case .failure(let error):
                         return .rejected(error.description)
                     case .success(let payment):
@@ -124,7 +123,7 @@ extension LANMultiplayerHostSession {
                 }
                 let short = lanTemplateRefundShortfall(
                     templateStandingMaterials(in: world, restoring: undo.cells),
-                    receipt: receipt, inventory: peer.inventory, playerID: playerID)
+                    receipt: receipt, inventory: peer.inventory)
                 guard short == 0 else {
                     return .rejected(TemplateMaterialError.noRoomForRefund(stacks: short).description)
                 }
@@ -240,18 +239,14 @@ extension LANMultiplayerHostSession {
         }
     }
 
-    /// Records a guest's payment: the host's copy of its inventory loses the materials, and a
-    /// grant tells the guest to remove the same items. The grant's id is remembered so the next
-    /// paste is admitted only after the guest has applied it.
+    /// Records a guest's payment: a grant tells the guest to remove the materials and takes
+    /// the same items off the host's copy of its inventory. The grant's id is remembered so the
+    /// next paste is admitted only after the guest has applied it.
     private func chargeTemplatePayment(_ payment: LANTemplatePayment, to playerID: String) {
-        guard var peer = peers[playerID] else { return }
-        peer.inventory = payment.inventory
-        peers[playerID] = peer
         guard !payment.take.isEmpty,
               let grant = enqueueGrant(items: [], xp: 0, clearAll: false, to: playerID, take: payment.take)
         else { return }
         peers[playerID]?.lastPaymentGrantID = grant.grantID
-        peers[playerID]?.pendingTake = LANTemplatePendingTake(grantID: grant.grantID, take: payment.take)
     }
 
     /// A finished paste: pays back what the guest paid for blocks the job could not write and
@@ -271,8 +266,8 @@ extension LANMultiplayerHostSession {
         return receipt.total > 0 ? "Used \(templateMaterialCountText(receipt.total))." : ""
     }
 
-    /// Gives `materials` back to a guest, for each item no more than `receipt` still holds: into
-    /// the host's copy of its inventory and, with an additive grant, into the guest's own. What
+    /// Gives `materials` back to a guest, for each item no more than `receipt` still holds: with
+    /// an additive grant, into the guest's inventory and the host's copy of it alike. What
     /// has no room, or all of it when the guest is dead or has left, is dropped as stacks beside
     /// the guest, or at `near` when the guest is not in this world. Returns a sentence for the guest.
     private func returnTemplateMaterials(_ materials: [Int: Int], against receipt: inout TemplateMaterialReceipt,
@@ -283,10 +278,8 @@ extension LANMultiplayerHostSession {
         let alive = peer?.lifecycle == .connected && state?.dead != true
         var dropped: [TemplateMaterialLine]
         var returned = 0
-        if alive, var peer {
-            let refund = lanRefundTemplateMaterials(materials, against: &receipt, into: peer.inventory, playerID: playerID)
-            peer.inventory = refund.inventory
-            peers[playerID] = peer
+        if alive, let peer {
+            let refund = lanRefundTemplateMaterials(materials, against: &receipt, into: peer.inventory)
             if !refund.items.isEmpty {
                 _ = enqueueGrant(items: refund.items, xp: 0, clearAll: false, to: playerID)
             }

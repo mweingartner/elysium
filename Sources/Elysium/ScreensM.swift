@@ -160,6 +160,8 @@ class ContainerScreen: Screen {
     /// guest's edit reaches the host without waiting for the screen to close.
     var lanEditBE: BlockEntityData?
     var lanEditBEs: [BlockEntityData] = []
+    /// Whether every slot of this screen is the player's inventory or a mirrored block entity.
+    var showsOnlyMirroredContainers: Bool { lanEditBE != nil || !lanEditBEs.isEmpty }
     private var lanLastCaptureTime = 0.0
     private var lanLastCapturedFingerprint: [Int]?
     private let lanCaptureInterval = 0.2 // 5 Hz
@@ -190,16 +192,17 @@ class ContainerScreen: Screen {
         drawExtra(ui, game)
         ui.drawSlots(self, slotBg: !textured)
         ui.drawButtons(self)
-        tickLANContainerEditFlush(game)
+        tickLANContainerEditFlush(ui, game)
     }
     func drawExtra(_ ui: UIManager, _ game: GameCore) {}
 
     /// ≤5 Hz debounced capture while the screen is open: only sends when a cheap fingerprint
     /// (slot ids/counts) of the mirrored BE actually changed since the last capture, so idle
-    /// screens produce no traffic.
-    private func tickLANContainerEditFlush(_ game: GameCore) {
+    /// screens produce no traffic. A stack on the cursor is in neither the inventory nor the
+    /// container, so an edit sent then cannot add up for the host: it waits until it is put down.
+    private func tickLANContainerEditFlush(_ ui: UIManager, _ game: GameCore) {
         let editBEs = lanEditBEs.isEmpty ? [lanEditBE].compactMap { $0 } : lanEditBEs
-        guard game.isLANClientWorld, let be = editBEs.first else { return }
+        guard game.isLANClientWorld, ui.cursorStack == nil, let be = editBEs.first else { return }
         let now = Date.timeIntervalSinceReferenceDate
         guard now - lanLastCaptureTime >= lanCaptureInterval else { return }
         let fingerprint = editBEs.flatMap { be -> [Int] in

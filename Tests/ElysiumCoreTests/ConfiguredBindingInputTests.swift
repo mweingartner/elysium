@@ -73,7 +73,7 @@ final class ConfiguredBindingInputTests: XCTestCase {
         XCTAssertEqual(captured.count, 1)
         XCTAssertEqual(captured.first?.count, 1)
         XCTAssertFalse(captured.first?.all ?? true)
-        XCTAssertEqual(game.player.inventory[0]?.count, 4)
+        XCTAssertEqual(game.player.inventory[0]?.count, 5, "a LAN guest only asks; the host's grant takes the item")
     }
 
     func testModifiedInventoryBindingExecutesCanonicalInventoryAction() throws {

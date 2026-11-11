@@ -177,6 +177,15 @@ final class HostBridge: GameHost {
         app?.gameView.releaseMouse()
     }
     func closeAllScreens() { elysiumMainActorSync { ui.closeAll(game) } }
+    /// Closing an inventory screen puts its cursor stack and its own slots back into the
+    /// inventory. A mirrored container with nothing on the cursor holds nothing else and stays.
+    func returnStacksHeldByScreens() {
+        elysiumMainActorSync {
+            guard let screen = ui.current() as? ContainerScreen,
+                  ui.cursorStack != nil || !screen.showsOnlyMirroredContainers else { return }
+            ui.closeAll(game)
+        }
+    }
     func releasePointer() { app?.gameView.releaseMouse() }
     func capturePointer() { app?.gameView.captureMouse() }
 

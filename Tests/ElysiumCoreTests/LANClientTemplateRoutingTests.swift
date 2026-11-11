@@ -516,21 +516,23 @@ final class LANClientTemplateRoutingTests: XCTestCase {
                                                    items: [LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 1)],
                                                    xp: 0, clearAll: false))
         step(guest.game, ticks: 1)
-        XCTAssertEqual(log, ["publish 1 planks 2"], "a plain grant is not published back: the host already counted it")
+        XCTAssertEqual(log, ["publish 1 planks 2", "publish 3 planks 3"],
+                       "every grant is published back: the host hears that it was applied")
         log = []
 
         try guest.game.beginTemplatePlacement(marker())
         guest.game.mouseDown(0)
-        XCTAssertEqual(log, ["publish 3 planks 3", "intent placeTemplate applied 7"])
+        XCTAssertEqual(log, ["publish 4 planks 3", "intent placeTemplate applied 7"])
         try deliver(.rejected(LANTemplateRefusal.outOfReach), to: guest)
         log = []
         XCTAssertTrue(guest.game.undoLastTemplatePlacement())
-        XCTAssertEqual(log, ["publish 4 planks 3", "intent undoPlacement applied 7"], "published although nothing changed")
+        XCTAssertEqual(log, ["publish 5 planks 3", "intent undoPlacement applied 7"], "published although nothing changed")
     }
 
-    /// After a take the guest publishes on its next tick, so the host's copy cannot stay behind
-    /// a publish that crossed the take. A grant that only adds is not published back.
-    func testAfterATakeTheGuestPublishesAgainOnItsNextTick() {
+    /// After a grant the guest publishes on its next tick: the host hears what the grant left
+    /// and that it was applied, and can stop keeping it. A grant with nothing in it asks for
+    /// exactly that.
+    func testAfterAGrantTheGuestPublishesAgainOnItsNextTick() {
         let guest = makeGuest(mode: GameMode.survival)
         var published: [Int] = []
         guest.game.lanInventoryPublishHandler = { snapshot, _ in
@@ -553,6 +555,16 @@ final class LANClientTemplateRoutingTests: XCTestCase {
         step(guest.game, ticks: 1)
         XCTAssertEqual(guest.game.player.countItem(iid("oak_planks")), 5)
         XCTAssertEqual(published, [9, 5])
+        // A grant that only adds is published back too, and so is one that changes nothing.
+        guest.game.applyLANGrant(LANInventoryGrant(playerID: "", grantID: 2,
+                                                   items: [LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 2)],
+                                                   xp: 0, clearAll: false))
+        step(guest.game, ticks: 1)
+        XCTAssertEqual(published, [9, 5, 7])
+        guest.game.applyLANGrant(LANInventoryGrant(playerID: "", grantID: 3, items: [], xp: 0, clearAll: false))
+        step(guest.game, ticks: 1)
+        XCTAssertEqual(published, [9, 5, 7, 7], "the host asked what the guest holds")
+        XCTAssertEqual(guest.game.lanLastAppliedGrantID, 3)
     }
 
     /// The client's own check counts what the host's take can remove: a renamed stack is no
@@ -571,19 +583,13 @@ final class LANClientTemplateRoutingTests: XCTestCase {
         XCTAssertEqual(sentIntents.count, 1, "creative carries nothing and still asks: the host decides")
     }
 
-    /// FINDING (low): a grant that only adds (a refund, a pickup) sets the client's last
-    /// published inventory to what it holds after the grant, on the assumption that the host's
-    /// copy already counts it. A publish that crossed the grant, such as the one every request
-    /// now sends first, has replaced the copy with the inventory before the grant, and nothing
-    /// publishes again. Here the guest asks to undo once more while its refund is on its way:
-    /// the host's copy stays one plank short until something else changes the inventory. A
-    /// disconnect or a death in that time loses the plank. It is a loss only, a picked-up item
-    /// has always had the same window, and the decision record lists it as accepted. Expected to
-    /// fail until the host keeps every grant a published snapshot does not include yet, as it
-    /// already does for a payment (`Peer.pendingTake`). Publishing back after every grant is not
-    /// the fix: a publish that crosses a second grant would drop a host-crafted quality item
-    /// from the copy, and the host refuses a later publish that brings one back.
-    func testARefundThatCrossesTheNextRequestsPublishIsMissingFromTheHostsCopy() throws {
+    /// A grant that only adds (a refund, a pickup) and a publish cross on the wire: the publish
+    /// every request sends first does not hold the refund yet. Until 1.5.0 the host stored that
+    /// publish as it came, so its copy was one plank short until something else changed the
+    /// guest's inventory, and a disconnect or a death in that time lost the plank. The host now
+    /// keeps every grant the guest has not named as applied and applies it to a publish that is
+    /// behind it (`LANGuestInventoryCopy.swift`), and the guest publishes after every grant.
+    func testARefundThatCrossesTheNextRequestsPublishStaysInTheHostsCopy() throws {
         let guest = makeGuest(mode: GameMode.survival)
         let hostWorld = World(dim: .overworld, seed: 42)
         _ = groundChunk(in: hostWorld)
@@ -630,13 +636,13 @@ final class LANClientTemplateRoutingTests: XCTestCase {
 
         XCTAssertTrue(guest.game.undoLastTemplatePlacement())
         XCTAssertEqual(try sendLastIntent(to: session, world: hostWorld), .rejected(LANTemplateRefusal.nothingToUndo))
-        XCTAssertEqual(hostCopy(), 4, "the request's publish did not hold the refund yet")
+        XCTAssertEqual(carried(), 4, "the refund has not arrived")
+        XCTAssertEqual(hostCopy(), 5, "the request's publish did not hold the refund yet, and the host's copy still does")
         try deliverGrants(refund)
         step(guest.game, ticks: 5)
         XCTAssertEqual(carried(), 5)
-        XCTExpectFailure("T2: an additive grant that crossed a publish is never published back") {
-            XCTAssertEqual(hostCopy(), carried())
-        }
+        XCTAssertEqual(hostCopy(), carried())
+        XCTAssertEqual(session.peers["guest"]?.unacknowledgedGrants.count, 0, "the guest named the refund as applied")
     }
 
     // MARK: - rotation, end to end

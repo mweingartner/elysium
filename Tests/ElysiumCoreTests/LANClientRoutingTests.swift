@@ -313,7 +313,9 @@ final class LANClientRoutingTests: XCTestCase {
 
     // MARK: - toss
 
-    func testDropKeyEmitsTossIntentAndDecrementsLocalSlotOptimistically() {
+    /// The drop key only asks. The host throws the item from its copy of this inventory and
+    /// its grant takes it out here, so a toss the host does not carry out costs nothing.
+    func testDropKeyEmitsTossIntentAndTheHostsGrantTakesTheItem() {
         let game = makeLANClientGame()
         game.player.selectedSlot = 0
         game.player.inventory[0] = ItemStack(iid("dirt"), 5)
@@ -326,10 +328,16 @@ final class LANClientRoutingTests: XCTestCase {
         XCTAssertEqual(captured.first?.slot, 0)
         XCTAssertEqual(captured.first?.count, 1)
         XCTAssertFalse(captured.first?.all ?? true)
+        XCTAssertEqual(game.player.inventory[0]?.count, 5, "nothing leaves the inventory until the host says so")
+
+        game.applyLANGrant(LANInventoryGrant(playerID: "peer", grantID: 1, items: [], xp: 0, clearAll: false, changes: [
+            LANInventoryStackChange(before: LANInventorySlotSnapshot(slot: 0, itemID: iid("dirt"), count: 5),
+                                    after: LANInventorySlotSnapshot(slot: 0, itemID: iid("dirt"), count: 4)),
+        ]))
         XCTAssertEqual(game.player.inventory[0]?.count, 4)
     }
 
-    func testDropKeyWithAllModifierTossesEntireStackAndClearsSlot() {
+    func testDropKeyWithAllModifierAsksForTheEntireStack() {
         let game = makeLANClientGame()
         game.player.selectedSlot = 2
         game.player.inventory[2] = ItemStack(iid("dirt"), 5)
@@ -340,6 +348,11 @@ final class LANClientRoutingTests: XCTestCase {
 
         XCTAssertEqual(captured.first?.count, 5)
         XCTAssertTrue(captured.first?.all ?? false)
+        XCTAssertEqual(game.player.inventory[2]?.count, 5)
+
+        game.applyLANGrant(LANInventoryGrant(playerID: "peer", grantID: 1, items: [], xp: 0, clearAll: false, changes: [
+            LANInventoryStackChange(before: LANInventorySlotSnapshot(slot: 2, itemID: iid("dirt"), count: 5), after: nil),
+        ]))
         XCTAssertNil(game.player.inventory[2])
     }
 
@@ -392,7 +405,7 @@ final class LANClientRoutingTests: XCTestCase {
         XCTAssertEqual(game.player.countItem(iid("dirt")), 14)
     }
 
-    func testApplyLANGrantPreservesCraftingQualityForAdditiveAndAbsoluteSlots() throws {
+    func testApplyLANGrantPreservesCraftingQualityForGivenAndChangedStacks() throws {
         let game = makeLANClientGame()
         let grant = LANInventoryGrant(
             playerID: "peer",
@@ -406,11 +419,11 @@ final class LANClientRoutingTests: XCTestCase {
             ],
             xp: 0,
             clearAll: false,
-            slots: [
-                LANInventorySlotSnapshot(
+            changes: [
+                LANInventoryStackChange(before: nil, after: LANInventorySlotSnapshot(
                     slot: 3, itemID: iid("iron_pickaxe"), count: 1, damage: 11, craftingQuality: 5,
                     enchantments: [LANItemEnchantmentSnapshot(id: "efficiency", lvl: 4)]
-                ),
+                )),
             ]
         )
 
@@ -519,6 +532,165 @@ final class LANClientRoutingTests: XCTestCase {
 
         game.captureLANContainerEdit(be)
         XCTAssertEqual(captured.count, 2)
+    }
+
+    // MARK: - an open container (LANClientContainers.swift)
+
+    /// A host with a screen: `hasScreen()` is true from the moment the game opens one.
+    private final class ContainerScreenHost: GameHost {
+        var open = false
+        var handBack: (() -> Void)?
+        func hasScreen() -> Bool { open }
+        func openScreen(_ kind: String, _ data: ScreenData?) { open = true }
+        func closeAllScreens() { open = false }
+        func returnStacksHeldByScreens() { handBack?() }
+        func screenPausesGame() -> Bool { false }
+        func openTrading(_ villager: Mob) {}; func openVehicleChest(_ kind: String, _ vehicle: Entity) {}
+        func openChat(_ prefix: String) {}; func openDeathScreen(_ message: String) {}
+        func openPauseScreen() {}; func openTitleScreen() {}
+        func releasePointer() {}; func capturePointer() {}
+        func showActionBar(_ text: String, _ time: Int) {}; func pushChat(_ line: String) {}
+        func pushToast(_ adv: AdvancementDef) {}; func setBossBars(_ bars: [BossBarInfo]) {}
+        func playSound(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double, _ pitch: Double) {}
+        func playUI(_ name: String) {}; func setAudioEnvironment(_ underwater: Bool, _ caveFactor: Double) {}
+        func setAudioListener(_ x: Double, _ y: Double, _ z: Double, _ yaw: Double) {}
+        func tickMusic(_ mood: String, _ enabled: Bool) {}; func stopDisc() {}
+        func addParticles(_ type: String, _ x: Double, _ y: Double, _ z: Double, _ count: Int, _ spread: Double, _ cell: Int) {}
+        func spawnPrecipitation(_ kind: String, _ x: Double, _ y: Double, _ z: Double, _ groundY: Double) {}
+        func uploadMesh(_ cx: Int, _ sy: Int, _ cz: Int, _ minY: Int, _ mesh: MeshOutput) {}
+        func removeChunkMeshes(_ cx: Int, _ cz: Int, _ sections: Int) {}; func clearAllSections() {}
+    }
+
+    /// A guest looking at a chest (in place of the fixture's wall) and right-clicking it.
+    /// The items are named and not built: the registry is filled when the game is made.
+    private func openMirroredChest(holding items: [(slot: Int, item: String, count: Int)] = []) throws
+        -> (game: GameCore, host: ContainerScreenHost, chest: BlockEntityData) {
+        let game = makeLANClientGame()
+        let host = ContainerScreenHost()
+        game.host = host
+        game.world.setBlock(8, 66, 10, Int(cell(B.chest)), SET_SILENT)
+        game.world.setBlock(8, 67, 10, 0, SET_SILENT)                 // a chest under a solid block does not open
+        let chest = makeContainerBE(8, 66, 10, 27)
+        for held in items { chest.items?[held.slot] = ItemStack(iid(held.item), held.count) }
+        game.world.setBlockEntity(chest)
+        game.lanBlockIntentHandler = { _ in }
+        game.mouseDown(2)
+        game.mouseUp(2)
+        XCTAssertTrue(host.open, "the right-click opened the mirrored chest")
+        return (game, host, try XCTUnwrap(game.world.getBlockEntity(8, 66, 10)))
+    }
+
+    private func hostBatch(_ chest: BlockEntityData, holding items: [(Int, ItemStack)]) throws -> LANReplicationBatch {
+        let held = makeContainerBE(chest.x, chest.y, chest.z, 27)
+        for (slot, stack) in items { held.items?[slot] = stack }
+        return LANReplicationBatch(tick: 1, fullSnapshot: false,
+                                   blockEntities: [try XCTUnwrap(makeLANBlockEntitySnapshot(held, dimension: Dim.overworld.rawValue))])
+    }
+
+    private func apply(_ batch: LANReplicationBatch, to game: GameCore) {
+        game.beginLANReplicationApply()
+        _ = game.applyLANHostReplicationBatch(batch)
+        game.endLANReplicationApply()
+    }
+
+    /// While a container is open, the guest's inventory travels with its container edits only.
+    /// The tick's ordinary publish used to go out as well, often ahead of the edit: the host
+    /// then heard that items had left the inventory before the edit said where they went, saw
+    /// the edit create them, and refused it.
+    func testWhileAContainerIsOpenTheInventoryIsNotPublishedOnItsOwn() throws {
+        let (game, host, chest) = try openMirroredChest()
+        var publishes: [LANPlayerInventorySnapshot] = []
+        var edits: [LANContainerEditIntent] = []
+        game.lanInventoryPublishHandler = { snapshot, _ in publishes.append(snapshot) }
+        game.lanContainerEditHandler = { edits.append($0) }
+
+        game.player.inventory[0] = nil
+        chest.items?[3] = ItemStack(iid("dirt"), 5)                  // five dirt into the chest, on the guest's side
+        stepOneTick(game)
+        stepOneTick(game)
+        XCTAssertTrue(publishes.isEmpty, "no publish may overtake the edit")
+        game.captureLANContainerEdit(chest)
+        XCTAssertEqual(edits.count, 1)
+        XCTAssertTrue(edits[0].inventory.slots.isEmpty, "the edit carries the inventory")
+
+        host.open = false
+        game.gameScreenWillClose(be: chest)
+        XCTAssertEqual(edits.count, 2, "closing sends the last edit")
+        game.player.inventory[1] = ItemStack(iid("stick"), 1)
+        stepOneTick(game)
+        XCTAssertEqual(publishes.count, 1, "and the ordinary publish is back")
+        XCTAssertGreaterThan(game.lanLocalInventoryRevision, edits[1].revision)
+    }
+
+    /// The guest publishes when it opens a container, so the host checks the first edit against
+    /// what the guest holds at that moment (a stack moved to the off-hand a moment earlier).
+    func testOpeningAContainerPublishesTheInventoryFirst() throws {
+        let game = makeLANClientGame()
+        let host = ContainerScreenHost()
+        game.host = host
+        game.world.setBlock(8, 66, 10, Int(cell(B.chest)), SET_SILENT)
+        game.world.setBlock(8, 67, 10, 0, SET_SILENT)
+        game.world.setBlockEntity(makeContainerBE(8, 66, 10, 27))
+        game.lanBlockIntentHandler = { _ in }
+        var publishes: [LANPlayerInventorySnapshot] = []
+        game.lanInventoryPublishHandler = { snapshot, _ in publishes.append(snapshot) }
+        game.player.inventory[4] = ItemStack(iid("coal"), 3)           // changed in this very tick
+        game.mouseDown(2)
+        game.mouseUp(2)
+        XCTAssertTrue(host.open)
+        XCTAssertEqual(publishes.map { $0.slots.map(\.count) }, [[3]], "published before the screen opened")
+    }
+
+    /// The host sends every container near a player twice a second. A guest that has taken two
+    /// coal out of the chest (they are on its cursor, or already in its inventory) and not told
+    /// the host yet keeps its own view: written over it, the snapshot would put the coal back
+    /// into the chest while the guest holds it too. The guest's edit then names the chest as
+    /// the host last sent it, so the host can tell whether someone else changed it meanwhile.
+    func testAHostSnapshotIsNotWrittenOverAChangeTheGuestHasNotSentYet() throws {
+        let (game, _, chest) = try openMirroredChest(holding: [(slot: 0, item: "coal", count: 2)])
+        var edits: [LANContainerEditIntent] = []
+        game.lanContainerEditHandler = { edits.append($0) }
+        let asSent = try hostBatch(chest, holding: [(0, ItemStack(iid("coal"), 2))])
+        let sentRevision = lanBlockEntityRevision(asSent.blockEntities)
+        XCTAssertFalse(game.lanHasUnsentContainerEdit)
+
+        chest.items?[0] = nil                                           // picked up: on the cursor
+        XCTAssertTrue(game.lanHasUnsentContainerEdit)
+        apply(asSent, to: game)                                         // the host's twice-a-second snapshot
+        apply(LANReplicationBatch(tick: 2, fullSnapshot: false), to: game)
+        XCTAssertNil(chest.items?[0], "the coal is not put back under the guest's cursor")
+
+        game.player.inventory[0] = ItemStack(iid("coal"), 2)            // put down in the inventory
+        game.captureLANContainerEdit(chest)
+        XCTAssertEqual(edits.last?.blockEntityRevision, sentRevision, "the edit names the chest as the host last sent it")
+        XCTAssertFalse(game.lanHasUnsentContainerEdit, "sent")
+
+        // Once sent, the host's snapshots are applied again: its answer, or another player's change.
+        apply(try hostBatch(chest, holding: [(5, ItemStack(iid("glass"), 1))]), to: game)
+        XCTAssertEqual(chest.items?[5]?.id, iid("glass"))
+        chest.items?[5] = nil
+        game.captureLANContainerEdit(chest)
+        XCTAssertEqual(edits.last?.blockEntityRevision,
+                       lanBlockEntityRevision(try hostBatch(chest, holding: [(5, ItemStack(iid("glass"), 1))]).blockEntities))
+    }
+
+    /// A grant that takes something away first has an open screen hand back what it holds, and
+    /// closing a container screen sends an edit. That edit is built before the grant is applied
+    /// and must not name it: the host would otherwise believe the edit's inventory already
+    /// holds the grant, and what the grant gives or takes would count twice.
+    func testAnEditSentWhileAScreenHandsBackItsStacksDoesNotNameTheGrantBeingApplied() throws {
+        let (game, host, chest) = try openMirroredChest()
+        var edits: [LANContainerEditIntent] = []
+        game.lanContainerEditHandler = { edits.append($0) }
+        game.player.inventory[0] = ItemStack(iid("oak_planks"), 10)
+        host.handBack = { [unowned game] in game.gameScreenWillClose(be: chest) }     // as closing the screen does
+        game.applyLANGrant(LANInventoryGrant(playerID: "peer", grantID: 7, items: [], xp: 0, clearAll: false,
+                                             take: [LANInventorySlotSnapshot(slot: 0, itemID: iid("oak_planks"), count: 6)]))
+        XCTAssertEqual(edits.count, 1)
+        XCTAssertEqual(edits[0].appliedGrantID, 0, "the edit was built before grant 7 was applied")
+        XCTAssertEqual(edits[0].inventory.slots.first?.count, 10, "and its inventory does not hold it")
+        XCTAssertEqual(game.lanLastAppliedGrantID, 7)
+        XCTAssertEqual(game.player.countItem(iid("oak_planks")), 4)
     }
 
     // MARK: - streaming: section-granular in-flight expiry

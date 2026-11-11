@@ -352,8 +352,13 @@ public final class LANMultiplayerHostSession {
         var lastTemplateUndo: TemplatePlacementUndoSnapshot?
         /// The grant that told this guest what its last paste cost; see `LANTemplateIntent.appliedGrantID`.
         var lastPaymentGrantID = 0
-        /// The payment this guest has not yet said it applied; see `lanInventory(_:without:)`.
-        var pendingTake: LANTemplatePendingTake?
+        /// The grants this guest has not yet named as applied; see `LANGuestInventoryCopy.swift`.
+        var unacknowledgedGrants: [LANInventoryGrant] = []
+        /// The newest grant the host stopped keeping before this guest had named it as applied.
+        var forgottenGrantID = 0
+        /// What this guest last said it holds, with every grant since. It is the copy, unless
+        /// the host did not take the guest's last snapshot; nil means the copy.
+        var heardInventory: LANPlayerInventorySnapshot?
         var lastAckTick = 0
         var lastAckSequence: UInt32 = 0
         /// Event-only block strikes have their own semantic sequence. Wire-frame sequencing
@@ -442,7 +447,7 @@ public final class LANMultiplayerHostSession {
     var peers: [String: Peer] = [:]
     private var nextOrdinal = 0
     private let changeLog = LANReplicationChangeLog()
-    private var pendingGrants: [String: [LANInventoryGrant]] = [:]
+    var pendingGrants: [String: [LANInventoryGrant]] = [:]
     private var pendingDeathDrops: [String: PendingDeathDrop] = [:]
     private var dirtyBlockEntityPositions: [LANBlockPosition] = []
     private var dirtyBlockEntitySet: Set<LANBlockPosition> = []
@@ -666,6 +671,9 @@ public final class LANMultiplayerHostSession {
         peer.disconnectedTick = max(0, tick)
         peer.lastTemplateUndo = nil
         peer.bowDraw = nil
+        peer.unacknowledgedGrants = []
+        peer.forgottenGrantID = 0
+        peer.heardInventory = nil
         peers[playerID] = peer
         // abandon-in-place: see removePeer above for rationale.
         templateJobs.removeValue(forKey: playerID)
@@ -766,6 +774,7 @@ public final class LANMultiplayerHostSession {
             // the transport's ground-drop/clearAll decision always observe the same rule value.
             if !keepInventory {
                 peer.inventory = LANPlayerInventorySnapshot(playerID: peer.playerID, selectedHotbarSlot: 0, slots: [])
+                peer.heardInventory = nil
             }
         }
         peer.playerState = sanitized
@@ -799,6 +808,7 @@ public final class LANMultiplayerHostSession {
         guard var peer = peers[playerID],
               let normalized = normalizedLANInventorySnapshot(snapshot)
         else { return }
+        peer.heardInventory = nil
         peer.inventory = LANPlayerInventorySnapshot(
             playerID: peer.playerID,
             selectedHotbarSlot: normalized.selectedHotbarSlot,
@@ -1437,8 +1447,9 @@ public final class LANMultiplayerHostSession {
     /// Validates and applies a block-entity container edit (D-C): authorizes `.container`,
     /// reach-checks every target, verifies the submitted snapshot is compatible with the block
     /// actually at each position, gates the edit by a host content revision, then applies the
-    /// submitted block entities as one transaction. Also stores the peer's published inventory,
-    /// revision-gated. Fails closed on any validation error.
+    /// submitted block entities as one transaction. Also stores the inventory the edit carries,
+    /// as it will be once the guest has applied the grants on their way to it. Fails closed on
+    /// any validation error; an edit that is not newer than the stored inventory is one.
     public func applyContainerEditIntent(
         _ intent: LANContainerEditIntent,
         from rawPlayerID: String,
@@ -1454,8 +1465,11 @@ public final class LANMultiplayerHostSession {
         guard playerState.dimension == world.dim.rawValue else {
             return .rejected("target dimension unavailable")
         }
-        guard let normalizedInventory = normalizedLANInventorySnapshot(intent.inventory) else {
-            return .rejected("invalid inventory payload")
+        // An edit carries the guest's inventory as a publish does and is stored by the same rule.
+        let editedInventory: LANPlayerInventorySnapshot
+        switch guestInventory(intent.inventory, revision: intent.revision, appliedGrantID: intent.appliedGrantID, of: peer) {
+        case .success(let inventory): editedInventory = inventory
+        case .failure(let refusal): return .rejected(refusal.rawValue)
         }
         guard let beforeInventory = peer.inventory else {
             return .rejected("player inventory baseline unavailable")
@@ -1469,40 +1483,25 @@ public final class LANMultiplayerHostSession {
         var afterBlockEntities: [LANBlockEntitySnapshot] = []
         var targets: [BlockEntityData] = []
         for raw in rawBlockEntities {
-            guard let normalized = normalizedLANBlockEntitySnapshot(raw) else {
-                return .rejected("invalid container payload")
+            let container: EditedContainer
+            switch editedContainer(raw, by: playerState, in: world) {
+            case .success(let found): container = found
+            case .failure(let refusal): return .rejected(refusal.rawValue)
             }
-            let key = LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z)
-            guard seenPositions.insert(key).inserted else {
+            let edit = container.edit
+            guard seenPositions.insert(LANBlockPosition(dimension: edit.dimension, x: edit.x, y: edit.y, z: edit.z)).inserted else {
                 return .rejected("duplicate container target")
             }
-            guard isWithinLANReach(playerState, x: normalized.x, y: normalized.y, z: normalized.z) else {
-                return .rejected("target out of reach")
-            }
-            guard normalized.dimension == world.dim.rawValue else {
-                return .rejected("target dimension unavailable")
-            }
-            let targetCell = world.getBlock(normalized.x, normalized.y, normalized.z)
-            guard isLANBlockEntitySnapshotCompatible(normalized, cell: targetCell) else {
-                return .rejected("incompatible container target")
-            }
-            let existing = world.getBlockEntity(normalized.x, normalized.y, normalized.z)
-            let target = existing?.type == normalized.type ? existing! : makeBlockEntity(from: normalized)
-            guard let beforeBlockEntity = makeLANBlockEntitySnapshot(target, dimension: world.dim.rawValue),
-                  beforeBlockEntity.type == normalized.type
-            else {
-                return .rejected("container edit is not host-verifiable")
-            }
-            beforeBlockEntities.append(beforeBlockEntity)
-            afterBlockEntities.append(normalized)
-            targets.append(target)
+            beforeBlockEntities.append(container.held)
+            afterBlockEntities.append(edit)
+            targets.append(container.target)
         }
         guard lanBlockEntityRevision(beforeBlockEntities) == intent.blockEntityRevision else {
             return .rejected("stale container revision")
         }
         guard let craftingTransition = validatedLANContainerEditItemTransition(
             beforeInventory: beforeInventory,
-            afterInventory: normalizedInventory,
+            afterInventory: editedInventory,
             beforeBlockEntities: beforeBlockEntities,
             afterBlockEntities: afterBlockEntities,
             rpg: peer.rpg,
@@ -1522,17 +1521,7 @@ public final class LANMultiplayerHostSession {
             recordDirtyBlockEntity(LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z))
         }
 
-        if intent.revision > peer.inventoryRevision {
-            peer.inventory = LANPlayerInventorySnapshot(
-                playerID: peer.playerID,
-                selectedHotbarSlot: normalizedInventory.selectedHotbarSlot,
-                slots: normalizedInventory.slots,
-                xp: normalizedInventory.xp,
-                xpLevel: normalizedInventory.xpLevel,
-                xpProgress: normalizedInventory.xpProgress
-            )
-            peer.inventoryRevision = intent.revision
-        }
+        storeGuestInventory(editedInventory, revision: intent.revision, appliedGrantID: intent.appliedGrantID, in: &peer)
         // The transform was checked against this exact candidate state and
         // the world/container mutation above has now committed.  Persist the
         // host-owned crafting mastery/XP only at this point, never while
@@ -1553,145 +1542,27 @@ public final class LANMultiplayerHostSession {
     @discardableResult
     public func applyInventoryUpdate(_ update: LANInventoryUpdate, from rawPlayerID: String) -> Bool {
         let playerID = String(rawPlayerID.prefix(128))
-        guard var peer = peers[playerID] else { return false }
-        guard update.revision > peer.inventoryRevision else { return false }
-        guard let normalized = normalizedLANInventorySnapshot(update.snapshot) else { return false }
+        guard var peer = peers[playerID],
+              case .success(let published) = guestInventory(update.snapshot, revision: update.revision,
+                                                            appliedGrantID: update.appliedGrantID, of: peer)
+        else { return false }
         // Ordinary inventory publishes remain guest-owned, but an equipment
         // quality rank is minted only by a host-verified craft (or a host
         // pickup/grant).  Permit an already authoritative quality stack to be
         // rearranged or consumed, never created, upgraded, or copied by an
-        // arbitrary inventory packet.
+        // arbitrary inventory packet.  Both sides of the comparison hold every
+        // grant on its way, so a publish that crosses one is not refused for it.
         guard lanInventoryUpdatePreservesHostCraftingQuality(
             before: peer.inventory,
-            after: normalized
-        ) else { return false }
-        if let pending = peer.pendingTake, pending.grantID <= update.appliedGrantID { peer.pendingTake = nil }
-        peer.inventory = lanInventory(LANPlayerInventorySnapshot(
-            playerID: peer.playerID,
-            selectedHotbarSlot: normalized.selectedHotbarSlot,
-            slots: normalized.slots,
-            xp: normalized.xp,
-            xpLevel: normalized.xpLevel,
-            xpProgress: normalized.xpProgress
-        ), without: peer.pendingTake)
-        peer.inventoryRevision = update.revision
+            after: published
+        ) else {
+            // Not taken as the copy, but still what the guest says it holds (`heardInventory`).
+            peers[playerID]?.heardInventory = published
+            return false
+        }
+        storeGuestInventory(published, revision: update.revision, appliedGrantID: update.appliedGrantID, in: &peer)
         peers[playerID] = peer
         return true
-    }
-
-    /// Applies a host-observed guest pickup as a narrow additive mutation against the peer's
-    /// current inventory baseline, then queues the same mutation as an idempotent owning-client
-    /// grant. No other field from the cosmetic `LANRemotePlayerEntity` is trusted or copied back.
-    @discardableResult
-    func applyAuthoritativePickupMutation(
-        _ mutation: LANAuthoritativePickupMutation,
-        for rawPlayerID: String
-    ) -> LANInventoryGrant? {
-        let playerID = String(rawPlayerID.prefix(128))
-        guard var peer = peers[playerID],
-              mutation.items.count <= LAN_MULTIPLAYER_MAX_GRANT_ITEMS,
-              !mutation.items.isEmpty || mutation.xp > 0,
-              mutation.xp >= 0, mutation.xp <= 1_000_000_000
-        else { return nil }
-
-        let baseline = peer.inventory ?? LANPlayerInventorySnapshot(
-            playerID: peer.playerID,
-            selectedHotbarSlot: peer.playerState?.selectedHotbarSlot ?? 0,
-            slots: []
-        )
-        guard var inventory = makeInventory(from: baseline) else { return nil }
-        for item in mutation.items {
-            guard item.itemID >= 0, item.itemID < itemDefs.count,
-                  item.count > 0, item.damage >= 0 else { return nil }
-            let remaining = ItemStack(
-                item.itemID,
-                item.count,
-                damage: item.damage,
-                ench: item.enchantments.map(\.enchantment),
-                label: item.label,
-                data: makeLANStackData(
-                    craftingQuality: item.craftingQuality,
-                    potion: item.potion
-                )
-            )
-            guard remaining.count <= maxStackOf(remaining) else { return nil }
-            for index in inventory.indices where remaining.count > 0 {
-                guard let existing = inventory[index], canMerge(existing, remaining) else { continue }
-                let take = min(maxStackOf(existing) - existing.count, remaining.count)
-                if take > 0 {
-                    existing.count += take
-                    remaining.count -= take
-                }
-            }
-            if remaining.count > 0,
-               let empty = inventory.firstIndex(where: { $0 == nil }) {
-                inventory[empty] = remaining.copy()
-                remaining.count = 0
-            }
-            guard remaining.count == 0 else { return nil }
-        }
-
-        var nextXP = baseline.xp
-        var nextLevel = baseline.xpLevel
-        var nextProgress = baseline.xpProgress
-        if mutation.xp > 0 {
-            nextXP = max(0, min(1_000_000_000, nextXP + mutation.xp))
-            var needed = Double(lanXPRequiredForLevel(nextLevel))
-            var progressPoints = nextProgress * needed + Double(mutation.xp)
-            while progressPoints >= needed {
-                progressPoints -= needed
-                nextLevel = min(100_000, nextLevel + 1)
-                needed = Double(lanXPRequiredForLevel(nextLevel))
-            }
-            nextProgress = needed > 0 ? max(0, min(1, progressPoints / needed)) : 0
-        }
-
-        peer.inventory = LANPlayerInventorySnapshot(
-            playerID: peer.playerID,
-            selectedHotbarSlot: baseline.selectedHotbarSlot,
-            slots: makeLANInventorySlotSnapshots(inventory),
-            xp: nextXP,
-            xpLevel: nextLevel,
-            xpProgress: nextProgress
-        )
-        peers[playerID] = peer
-        return enqueueGrant(
-            items: mutation.items,
-            xp: mutation.xp,
-            clearAll: false,
-            to: playerID
-        )
-    }
-
-    /// Enqueues a host-originated inventory grant (pickup/correction/death-clear) for delivery to
-    /// the given peer. `items` merge additively; `slots`/`clearedSlots` replace exact slot indices
-    /// (arrangement-preserving corrections). `grantID` is monotone per peer for de-duplication.
-    @discardableResult
-    public func enqueueGrant(
-        items: [LANInventorySlotSnapshot],
-        xp: Int,
-        clearAll: Bool,
-        to rawPlayerID: String,
-        slots: [LANInventorySlotSnapshot] = [],
-        clearedSlots: [Int] = [],
-        take: [LANInventorySlotSnapshot] = []
-    ) -> LANInventoryGrant? {
-        let playerID = String(rawPlayerID.prefix(128))
-        guard var peer = peers[playerID] else { return nil }
-        peer.lastGrantID += 1
-        let grant = LANInventoryGrant(
-            playerID: peer.playerID,
-            grantID: peer.lastGrantID,
-            items: items,
-            xp: xp,
-            clearAll: clearAll,
-            slots: slots,
-            clearedSlots: clearedSlots,
-            take: take
-        )
-        peers[playerID] = peer
-        pendingGrants[playerID, default: []].append(grant)
-        return grant
     }
 
     /// Drains queued grants for one peer, in enqueue order.
@@ -2333,7 +2204,7 @@ public func makeLANBlockEntitySnapshots(
 
 let LAN_PLAYER_INVENTORY_SLOT_COUNT = 36
 
-private func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot) -> LANPlayerInventorySnapshot? {
+func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot) -> LANPlayerInventorySnapshot? {
     var seenSlots = Set<Int>()
     var slots: [LANInventorySlotSnapshot] = []
     slots.reserveCapacity(snapshot.slots.count)
@@ -2370,24 +2241,11 @@ private func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapsh
 func makeInventory(from snapshot: LANPlayerInventorySnapshot) -> [ItemStack?]? {
     guard let snapshot = normalizedLANInventorySnapshot(snapshot) else { return nil }
     var inventory: [ItemStack?] = Array(repeating: nil, count: LAN_PLAYER_INVENTORY_SLOT_COUNT)
-    for slot in snapshot.slots {
-        let stack = ItemStack(
-            slot.itemID,
-            slot.count,
-            damage: slot.damage,
-            ench: slot.enchantments.map(\.enchantment),
-            label: slot.label,
-            data: makeLANStackData(
-                craftingQuality: slot.craftingQuality,
-                potion: slot.potion
-            )
-        )
-        inventory[slot.slot] = stack
-    }
+    for slot in snapshot.slots { inventory[slot.slot] = lanStack(slot) }
     return inventory
 }
 
-private func normalizedLANBlockEntitySnapshot(_ raw: LANBlockEntitySnapshot) -> LANBlockEntitySnapshot? {
+func normalizedLANBlockEntitySnapshot(_ raw: LANBlockEntitySnapshot) -> LANBlockEntitySnapshot? {
     guard LAN_REPLICATED_BLOCK_ENTITY_TYPES.contains(raw.type),
           raw.slotCount > 0,
           raw.slotCount <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS,
@@ -2856,7 +2714,7 @@ private func isLANFurnaceBlockID(_ id: Int) -> Bool {
         id == Int(B.smoker_lit)
 }
 
-private func isLANBlockEntitySnapshotCompatible(_ snapshot: LANBlockEntitySnapshot, cell: Int) -> Bool {
+func isLANBlockEntitySnapshotCompatible(_ snapshot: LANBlockEntitySnapshot, cell: Int) -> Bool {
     guard isValidLANReplicatedCell(cell) else { return false }
     let id = cell >> 4
     guard id > 0 else { return false }
@@ -2880,7 +2738,7 @@ private func isLANBlockEntitySnapshotCompatible(_ snapshot: LANBlockEntitySnapsh
     }
 }
 
-private func makeBlockEntity(from snapshot: LANBlockEntitySnapshot) -> BlockEntityData {
+func makeBlockEntity(from snapshot: LANBlockEntitySnapshot) -> BlockEntityData {
     switch snapshot.type {
     case "container":
         return makeContainerBE(snapshot.x, snapshot.y, snapshot.z, snapshot.slotCount)

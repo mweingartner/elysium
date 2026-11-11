@@ -166,6 +166,9 @@ public protocol GameHost: AnyObject {
     func openPauseScreen()
     func openTitleScreen()
     func closeAllScreens()
+    /// A LAN host is about to take stacks from this guest: an open screen hands back what it
+    /// holds outside the inventory (the cursor, a crafting grid) so that they can be found.
+    func returnStacksHeldByScreens()
     func releasePointer()
     func capturePointer()
     // HUD / chat
@@ -199,6 +202,7 @@ public protocol GameHost: AnyObject {
 }
 
 public extension GameHost {
+    func returnStacksHeldByScreens() {}
     func scriptSoundNames() -> [String] { [] }
     @discardableResult
     func playScriptSound(_ name: String, _ x: Double, _ y: Double, _ z: Double,
@@ -567,8 +571,8 @@ public final class GameCore {
     /// position/type of the mirrored container screen currently open (if any) — used to detect
     /// orphaned screens after a replication batch replaces/removes the underlying block (A9)
     private var lanOpenContainerBE: (dim: Int, x: Int, y: Int, z: Int, type: String)?
-    private var lanOpenContainerPositions: [LANBlockPosition] = []
-    private var lanOpenContainerRevision = 0
+    var lanOpenContainerPositions: [LANBlockPosition] = []
+    var lanOpenContainerRevision = 0
     /// LAN-client-local monotonic tick counter (world.time is frozen for LAN clients since
     /// World.tick(simCenters:) never runs for them) — drives section-request expiry
     private var lanClientTickCounter = 0
@@ -3311,7 +3315,9 @@ public final class GameCore {
             lanClientWorldSummary?.scriptSoundNames = publishedNames
         }
         var deferred = Optional(lanDeferredReplication)
-        let report = applyLANReplicationBatch(batch, to: world, deferred: &deferred)
+        let applied = lanBatchKeepingUnsentContainerEdit(batch)       // LANClientContainers.swift
+        let report = applyLANReplicationBatch(applied, to: world, deferred: &deferred)
+        lanNoteOpenContainerApplied(from: applied)
         let acceptedTick = max(rpgSimulationTick, batch.tick)
         worldRec?.rpgSimulationTick = acceptedTick
         for loadedWorld in worlds.values { loadedWorld.rpgSimulationTick = acceptedTick }
@@ -5300,6 +5306,7 @@ public final class GameCore {
                 LANBlockPosition(dimension: $0.dimension, x: $0.x, y: $0.y, z: $0.z)
             }
             lanOpenContainerRevision = lanBlockEntityRevision(editSnapshots)
+            publishLANInventoryIfChanged()      // an edit is checked against what the host last heard
             openScreen(kind, screenData)
         }
 
@@ -5414,16 +5421,6 @@ public final class GameCore {
             lanOpenContainerRevision = 0
             host?.closeAllScreens()
             host?.showActionBar("§cThat container is no longer available", 60)
-        } else {
-            let snapshots = lanOpenContainerPositions.compactMap { position -> LANBlockEntitySnapshot? in
-                guard position.dimension == dim.rawValue,
-                      let be = world.getBlockEntity(position.x, position.y, position.z)
-                else { return nil }
-                return makeLANBlockEntitySnapshot(be, dimension: position.dimension)
-            }
-            if !snapshots.isEmpty {
-                lanOpenContainerRevision = lanBlockEntityRevision(snapshots)
-            }
         }
     }
 
@@ -5447,7 +5444,8 @@ public final class GameCore {
             inventory: inventory,
             revision: lanLocalInventoryRevision,
             editSeq: lanContainerEditSeq,
-            blockEntityRevision: lanOpenContainerRevision
+            blockEntityRevision: lanOpenContainerRevision,
+            appliedGrantID: lanLastAppliedGrantID
         ))
         lanOpenContainerRevision = lanBlockEntityRevision(snapshots)
     }
@@ -5496,56 +5494,21 @@ public final class GameCore {
         lanLastAppliedGrantID = restore.grantID
     }
 
-    /// merges a host-originated inventory grant (pickups via the host ghost, death clear,
-    /// per-slot corrections). Monotone grantID: duplicates/regressions are ignored so replays
-    /// over an unreliable connection never double-apply. Apply order: clearAll, then absolute
-    /// per-slot empties/sets (arrangement-preserving corrections), then additive item merges.
+    /// applies a host-originated inventory grant (a pickup, a refund, a payment, what the
+    /// host's ghost did for this player, a death clear, the way back from a refused container
+    /// edit). Monotone grantID: duplicates/regressions are ignored so a replay never
+    /// double-applies. The host applies the same function (`lanApply`) to its copy.
     public func applyLANGrant(_ grant: LANInventoryGrant) {
         guard isLANClientWorld, let p = player, grant.grantID > lanLastAppliedGrantID else { return }
+        // First, while this grant is not yet applied: closing a container screen sends an edit,
+        // and that edit must not name a grant its inventory does not hold.
+        if !grant.take.isEmpty || !grant.changes.isEmpty { host?.returnStacksHeldByScreens() }
         lanLastAppliedGrantID = grant.grantID
-        if grant.clearAll {
-            for i in 0..<p.inventory.count { p.inventory[i] = nil }
-        }
-        lanApplyTemplateTake(grant.take, to: &p.inventory)
-        for slot in grant.clearedSlots where slot >= 0 && slot < p.inventory.count {
-            p.inventory[slot] = nil
-        }
-        for slot in grant.slots {
-            guard slot.slot >= 0, slot.slot < p.inventory.count,
-                  slot.itemID >= 0, slot.itemID < itemDefs.count,
-                  slot.count > 0, slot.damage >= 0
-            else { continue }
-            let count = min(slot.count, maxStackOf(ItemStack(slot.itemID, 1)))
-            p.inventory[slot.slot] = ItemStack(
-                slot.itemID,
-                count,
-                damage: slot.damage,
-                ench: slot.enchantments.map(\.enchantment),
-                label: slot.label,
-                data: makeLANStackData(
-                    craftingQuality: slot.craftingQuality,
-                    potion: slot.potion
-                )
-            )
-        }
-        for slot in grant.items {
-            guard slot.itemID >= 0, slot.itemID < itemDefs.count, slot.count > 0 else { continue }
-            _ = p.give(ItemStack(
-                slot.itemID,
-                slot.count,
-                damage: slot.damage,
-                ench: slot.enchantments.map(\.enchantment),
-                label: slot.label,
-                data: makeLANStackData(
-                    craftingQuality: slot.craftingQuality,
-                    potion: slot.potion
-                )
-            ))
-        }
+        lanApply(grant, to: p)
         if grant.xp > 0 { p.addXP(grant.xp) }
         lanLocalInventoryRevision += 1
-        // After a take the host hears the result, so its copy cannot stay behind a late publish.
-        lanLastPublishedInventory = grant.take.isEmpty ? makeLANInventorySnapshot(p, playerID: "") : nil
+        // The next tick publishes: the host hears what the grant left, and that it was applied.
+        lanLastPublishedInventory = nil
     }
 
     /// applies a host-relayed damage event against the local player (the host validated the
@@ -5806,17 +5769,15 @@ public final class GameCore {
         }
     }
 
-    /// LAN-client toss (Q / drop key): emits a LANTossIntent and optimistically decrements the
-    /// local slot (client-authoritative inventory) but never spawns a local ItemEntity — the
-    /// host is the sole authority on the shared world and spawns the dropped item there,
-    /// replicating it back as a mirror entity like any other item drop.
+    /// LAN-client toss (Q / drop key): emits a LANTossIntent and nothing else. The host throws
+    /// the item from its copy of this inventory, spawns it in the shared world, and its grant
+    /// takes it out of this inventory, as for a placed block. A toss the host does not carry
+    /// out therefore costs the player nothing.
     private func performLANClientToss(all: Bool) {
         guard let p = player, let handler = lanTossIntentHandler, let stack = p.mainHand else { return }
         let count = all ? stack.count : 1
         guard count > 0 else { return }
         handler(LANTossIntent(slot: p.selectedSlot, count: count, all: all))
-        stack.count -= count
-        if stack.count <= 0 { p.mainHand = nil }
     }
 
     /// per-tick diff of the local player's inventory/selected-slot/xp against the last published
@@ -5827,6 +5788,8 @@ public final class GameCore {
     private func publishLANInventoryIfChanged() {
         guard let p = player, let handler = lanInventoryPublishHandler else { return }
         if p.dead || p.deathTime > 0 { return }   // D-race: don't overwrite the host's pre-death snapshot
+        // While a mirrored container is open, the inventory travels with its edits only.
+        if lanOpenContainerBE != nil, host?.hasScreen() == true { return }
         let snapshot = makeLANInventorySnapshot(p, playerID: "")
         if snapshot == lanLastPublishedInventory { return }
         lanLastPublishedInventory = snapshot

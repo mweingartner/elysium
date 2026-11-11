@@ -1111,20 +1111,199 @@ In survival a paste costs the items that place its blocks; creative is free. `So
 - Accepted on LAN, none a way for an unmodified client to gain items by choice: a guest that
   disconnects while its paste is still being placed loses the materials for the part not yet
   placed, and one that disconnects during its undo loses the refund for what was already restored; a refund is lost if the guest fills its inventory in the round trip before the grant
-  arrives; a refund that crosses an inventory publish on the wire is missing from the host's copy
-  until the guest's inventory next changes, as a picked-up item already can be; a container edit
-  sent in the round trip between a paste and its payment is refused, because unlike a publish it
-  does not name the last grant applied (the guest's client does not roll a refused edit back,
-  which is an older fault of every refused edit and is tracked on its own); a guest that
+  arrives; a guest that
   places a block by hand in the round trip after its click can be one block
   short when the take arrives; and a guest's inventory stays its own, so a guest can still give
-  itself items with a chat command, as it could before.
+  itself items with a chat command, as it could before. Three more were accepted here and are
+  closed since 1.5.1 (the decision below): a refund that crossed an inventory publish was
+  missing from the host's copy, a container edit sent in the round trip after a paste was
+  refused, and a refused container edit was never rolled back on the guest.
 - Deliberately unchanged: a prepared paste still clears every breakable block in its bounding box
   without dropping it, the player's own included, and undo still removes whatever stands in the
   cells it restores, including what was put into a pasted chest. Chat commands are not gated.
 - Revisit if: a paste should draw on more than crafting's pool, clearing a box should drop or
   refuse the player's own blocks, or a new block stores something a player can take back out
   (the sweeps fail until it is reset or priced).
+
+### Decision: the host's copy of a guest's inventory follows every grant — November 11, 2026
+
+- Status: accepted
+- User outcome and acceptance example: a guest with ten planks places one and drags the stack
+  to another slot before the host has answered: it holds nine, where 1.5.0 left it nineteen. A
+  guest takes two coal out of a chest that another player emptied a moment earlier: the coal
+  leaves its inventory again and its chest shows empty, where 1.5.0 left both players holding
+  the coal. A guest that disconnects while a refund or a pickup is on its way rejoins with it.
+- Fixed constraints: a guest keeps owning its inventory (it publishes, the host keeps a copy);
+  no save-format change; the exact-version handshake is the only compatibility rule, so the
+  wire shapes may change with a version; the large LAN files (`LANReplication.swift`,
+  `LANTransport.swift`, `LANMultiplayer.swift`, `GameCore.swift`) take calls only.
+- Chosen approach and strongest feasible alternative:
+  - One rule (`LANGuestInventoryCopy.swift`): the host's copy is the guest's latest snapshot
+    plus every grant that snapshot does not include. Every change the host makes to a guest's
+    inventory is a grant, and `enqueueGrant` applies it to the copy with `lanApply`, the
+    function the guest's client runs when the grant arrives. The host keeps a grant until a
+    snapshot names it as applied (`appliedGrantID`, which a container edit now carries as a
+    publish does) and applies the grants a snapshot is behind before it checks or stores that
+    snapshot. One function (`guestInventory`) decides for a publish and a container edit alike
+    whether a snapshot is taken: newer than the stored one, well formed, not behind a grant
+    the host has forgotten. 1.5.0 did this for a payment only (`Peer.pendingTake`). The
+    alternative was for the guest to publish back after every grant and for the host to store
+    what comes. A publish that crosses a second grant then drops a host-crafted quality item
+    out of the copy, and the publish that brings it back is refused as a forged quality
+    (`lanInventoryUpdatePreservesHostCraftingQuality`). The guest does publish after every
+    grant now, but only so that the host hears the grant was applied and can stop keeping it.
+  - A grant follows stacks and no grant writes a slot. What the host's ghost did for a guest (a
+    block placed, a tool worn, an arrow shot, an item thrown) went out as slots to write,
+    worked out from the host's copy. A guest that had moved the stack in the meantime kept its
+    own stack and got the written one as well. It now goes out as stack changes
+    (`LANInventoryStackChange`: the stack before and after, the slot as a hint), and the guest
+    makes each change to that stack wherever it sits. A change removes only what is there, adds
+    only what the host added, and replaces a stack that became another one (a worn tool) only
+    where the guest still holds the old one. A slot that holds another item afterwards (a
+    bucket filled) is two changes, the old stack gone and the new one added: as one change it
+    was all or nothing, so a guest holding part of the old stack kept that part and never got
+    the new one; the second security review found it. A grant carries at most 72 changes, two
+    for each slot (`LAN_MULTIPLAYER_MAX_GRANT_CHANGES`). The grant's `slots` and `clearedSlots`
+    are gone from the wire. The alternative, a slot write that applies only when the slot still
+    holds what the host saw, drops the change whenever the guest moved anything, and the two
+    sides then disagree until something resyncs them.
+  - A grant gives the copy only what the copy has room for: a pickup is made whole or not at
+    all, a refund gives what fits and drops the rest beside the guest. A stack the copy could
+    not take is one the guest may still find room for; the copy would then lack it, and if it
+    is a quality item the guest's next publish would be refused for it.
+  - A stack is the stack the host can see. The host knows a stack by what travels on the wire
+    (item, damage, label, quality, enchantments in one order, potion). A guest's own stack can
+    hold more: the work an anvil did on it, a rocket's flight. The guest compares as the host
+    sees (`lanIsKind`) and keeps what only it knows when the host changes the stack
+    (`lanStack(_:became:)`). The first version compared every field, so a renamed sword thrown
+    by a guest was never found in its inventory and existed twice, and an anvil-worked tool
+    never wore; the independent test pass found both.
+  - A grant reaches what a guest carries outside its inventory. The copy shows 36 slots; the
+    off-hand and the armor are the guest's own, and one key moves the stack in the hand into
+    the off-hand. What a grant takes away or replaces is looked for in the inventory and then
+    there (`pockets`), and before such a grant is applied an open screen hands back what it
+    holds on the cursor or in slots of its own (`GameHost.returnStacksHeldByScreens`). Without
+    that, the swap-hands key pressed before a payment, a placement's charge or a toss's grant
+    arrived saved the stack from it; the security review found it. The screen hands back
+    before the grant counts as applied: closing a container screen sends an edit, and an edit
+    that named a grant its inventory does not hold yet had the host count that grant twice
+    (second review). The alternative, carrying
+    off-hand and armor in the snapshot, is the fuller answer and touches every reader of the
+    36 slots (the ghost, the proxy, death drops, payments); it was not taken here.
+  - The host throws an item, not the guest. The client used to take a thrown item out of its
+    inventory at the key press, and the host corrected by slot. With stack changes that would
+    remove it twice, so the client now only asks, as it does for a placed block, and the grant
+    removes the item. A throw the host does not carry out used to cost the item.
+  - A refused container edit is handed back (`correctRefusedContainerEdit`). A guest edits its
+    own view of a container first and tells the host afterwards. On every refusal, and when
+    the host drops an edit while it catches up, the host sends the containers the edit named
+    as it holds them (those the guest could have edited from where it stands, and no others)
+    and a grant with the way back: the stack changes that lead from the inventory the edit
+    carried to what the guest last told the host it holds (`Peer.heardInventory`: its last
+    snapshot the host heard, taken or not, and every grant since). The guest undoes its own
+    move wherever those stacks are by then, and nothing else it carries is touched. The grant
+    is kept for snapshots that are behind it but not applied to the copy, which never took the
+    refused edit. Two earlier versions were wrong, and a security review found each. The first
+    sent the host's whole copy of the inventory: that writes back a stack the guest has moved
+    to its off-hand in the meantime and wipes one it has taken out of its armor. The second
+    led back to the copy: when the host had refused or dropped the guest's last publish, the
+    copy is older than what the guest holds, and the way back handed the guest again what it
+    had stored or placed since. When the edit's own inventory cannot be taken (stale,
+    malformed, behind a forgotten grant) there is no way back to work out, and the host sends
+    nothing, the containers neither: a container put right under an inventory left as the
+    guest made it has the moved stack in both places.
+  - While a container is open, a guest's inventory travels with its container edits only
+    (`LANClientContainers.swift`). Three faults of the client, all in 1.5.0 and all found by
+    running a host and a guest as two processes, made the host refuse honest edits. The
+    tick's ordinary publish went out as well, often ahead of the edit, so the host heard that
+    items had left the inventory before the edit said where they went and refused the edit
+    as creating them: there is no ordinary publish now while a mirrored container is open,
+    and one right before it opens. The host sends every container near a player twice a
+    second, and such a snapshot was written over a change the guest had not sent yet (a stack
+    on the cursor was back in the chest as well): it now waits until the change is sent. And
+    the container revision the next edit names was moved on every batch from the host,
+    whether or not it carried that container, so the host could not tell a stale edit from a
+    current one: it now moves only when a snapshot of that container was applied. A container
+    screen sends an edit only while the cursor is empty (it used to send one with a stack on
+    the cursor, which the host could never add up; every later edit of that screen was then
+    refused as stale).
+  - A container edit that is not newer than the stored inventory is refused. It used to change
+    the container while its inventory was left out of the copy.
+  - Bounded: the host keeps at most 128 grants for a guest, naming at most 256 stacks between
+    them. Past either it forgets the oldest and takes no snapshot that is behind a forgotten
+    grant, so the copy is never stored short of what the guest will hold. An unmodified client
+    names every grant within a tick. The second bound is there because the host applies every
+    kept grant to each snapshot that is behind it, and a way back can name a whole inventory:
+    a modified client that had edit after edit refused held 128 of them, and each snapshot it
+    then sent cost the host 263 ms in a debug build. It costs 9 ms now. The third security
+    review found it; `testAFloodOfRefusedEditsDoesNotMakeEverySnapshotExpensive` measures it.
+- Reason and accepted downside: the reviews of 1.5.0 found the copy drifting in three ways and
+  the record above listed them as accepted; the slot writes were found by reading the code and
+  reproduced in a test before anything changed. The downsides: a thrown item leaves the hand
+  one round trip later; a grant that takes something away closes an inventory screen that is
+  open at that moment (one round trip after the player acted); for a guest that never
+  acknowledges, each snapshot costs the host up to 128 grants and 256 stack changes to apply,
+  and a refused edit costs that twice (once to check it, once for the way back).
+- Evidence or probe result: the placement case fails on the 1.5.0 code (nineteen planks held
+  and one standing, from ten) and passes now. Two seeded suites run a guest that behaves like
+  the shipped client against the host session while everything the host sends arrives late:
+  120 rounds of pastes, undos, pickups, container edits and another player emptying the chest
+  (`LANTemplatePaymentTests`), and 150 rounds of hand placements, throws, pickups and container
+  edits (`LANGuestInventoryCopyTests`). At every step the planks the guest will hold, plus
+  those standing, on the ground and in the chest, stay within what it started with and picked
+  up; at the end none is missing and the host's copy equals the guest's inventory slot for
+  slot. Each of four deliberate breaks (snapshots stored as they come, no way back after a
+  refusal, slots written as in 1.5.0, the off-hand not searched) made those suites fail; the
+  breaks were run on the version before the second review's fixes and not repeated. The
+  two expected failures 1.5.0 pinned are removed. An independent test pass added 26 tests
+  (`LANGuestInventoryCopyDepthTests`, `LANGuestInventoryCopyRegressionTests`): the host's copy
+  against a real client after 300 seeded grants, the changes between any two inventories
+  leading from one to the other over 600 pairs, a walk through every refusal a container edit
+  can get, and codec fuzz. Four reviews by sessions that did not write the code: a security
+  review and that test pass each found a way for an unmodified client to duplicate a stack in
+  the first version (the off-hand, and stacks the wire does not fully describe); a second
+  security review, of those fixes, found two more in the way back and the all-or-nothing item
+  change; a third found no way to gain or lose items in six named conditions and one cost
+  (the flood of ways back); a fourth checked that bound and passed. Every finding is fixed as
+  described above and has its own test. A host and a guest then ran as two apps on one Mac on
+  the final code: the guest took stacks out of a chest and put them in with the cursor (six
+  edits, the stack held on the cursor for longer than the host waits between refreshes, all
+  accepted), had one
+  deposit refused (its planks were back in its inventory, and its chest showed what the host
+  held), placed a block (12 planks to 11, the block standing on both sides), threw one (11 to
+  10, the item lying on the host) and left; it rejoined holding slot for slot what it held.
+  An earlier such run is what found the three client faults above: before they were fixed,
+  the same cursor moves were refused.
+- Unverified assumption: 128 kept grants naming 256 stacks are far more than an unmodified
+  client leaves unacknowledged, including through a host stall; not measured on a slow link.
+  A container edit that this many grants cross is refused with no way back, and what it moved
+  can then be lost or exist twice. The two-process run was on one Mac
+  with nothing drawn, so a container screen sent its edit when it closed and never from its
+  five-times-a-second flush; that flush is covered by `LANContainerScreenEditTests` only. The
+  cost of a snapshot was measured in a debug build, not in a release build.
+- Deliberately unchanged: the host still places a block that its copy of the guest's inventory
+  cannot pay for, and charges nothing (`LANHostGhostRegistry.applyPlace`). A guest with one
+  plank that clicks twice inside one round trip has two planks standing; it is pinned as an
+  expected failure (`testAPlacementTheHostsCopyCannotPayForIsStillFree`). Refusing such a
+  placement needs the held item matched to the block it places (seeds place wheat), which the
+  host does not do today. A granted item that finds no room when it arrives is lost. Granted
+  experience mends a tool on the guest only, until its next publish (pinned as an expected
+  failure). A join or a reconnect still writes the host's copy over the guest's 36 slots and
+  leaves its off-hand and armor alone. A death clears the 36 slots; what happens to a guest's
+  off-hand and armor is its client's own, as before. An edit refused because the guest is out
+  of reach of the container, or in another dimension, gets the way back but not the container,
+  so the guest's view of that container stays wrong until the host next sends it. A container
+  screen still decides when to send from item ids and counts alone, so two stacks of one item
+  that differ in wear or name, swapped between chest and inventory, are sent only when the
+  screen closes (and the host's refreshes of that chest wait until then); the client holds
+  "has this container a change not yet sent" twice, there and in `LANClientContainers.swift`.
+  When the publish a guest sends on opening a container is dropped by the host, every edit of
+  that screen is refused, and handed back, until the guest closes it. A publish the host drops over its rate
+  limit is not asked for again; one it drops while catching up is (an empty grant). A modified
+  client can still publish any inventory except a host-crafted quality item, and chat commands
+  are not gated.
+- Revisit if: the host should own a guest's inventory outright or see its off-hand and armor,
+  a guest's client should predict its throws again, or the placement above is to be charged.
 
 ## Audio
 

@@ -1973,8 +1973,8 @@ final class LANReplicationTests: XCTestCase {
         ])
         XCTAssertEqual(grant.xp, 10)
         XCTAssertFalse(grant.clearAll)
-        XCTAssertTrue(grant.slots.isEmpty)
-        XCTAssertTrue(grant.clearedSlots.isEmpty)
+        XCTAssertTrue(grant.take.isEmpty)
+        XCTAssertTrue(grant.changes.isEmpty)
         XCTAssertEqual(drainLANAuthoritativePickupMutations(in: hostWorld, into: session), 0)
         XCTAssertTrue(session.drainGrants(for: "peer-a").isEmpty, "a drained pickup must not grant twice")
 

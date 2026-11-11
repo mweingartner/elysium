@@ -86,6 +86,9 @@ private let LAN_MULTIPLAYER_MAX_REPLICATED_XP_AMOUNT = 4096
 public let LAN_MULTIPLAYER_MAX_RLE_RUNS = LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
 public let LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES = LAN_MULTIPLAYER_MAX_RLE_RUNS * 4
 public let LAN_MULTIPLAYER_MAX_GRANT_ITEMS = 64
+/// Every inventory slot can lose one stack and gain another, so the changes between any two
+/// inventories fit one grant.
+public let LAN_MULTIPLAYER_MAX_GRANT_CHANGES = 2 * LAN_PLAYER_INVENTORY_SLOT_COUNT
 public let LAN_MULTIPLAYER_MAX_DAMAGE_AMOUNT = 2048.0
 public let LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES = 2
 /// A guest must release an authoritative bow draw within this many host simulation ticks.
@@ -2115,6 +2118,7 @@ public struct LANContainerEditIntent: Codable, Equatable {
         case revision
         case editSeq
         case blockEntityRevision
+        case appliedGrantID
     }
 
     public var blockEntity: LANBlockEntitySnapshot
@@ -2123,6 +2127,8 @@ public struct LANContainerEditIntent: Codable, Equatable {
     public var revision: Int
     public var editSeq: Int
     public var blockEntityRevision: Int
+    /// The last grant the guest had applied when it built `inventory`, as in `LANInventoryUpdate`.
+    public var appliedGrantID: Int
 
     public init(
         blockEntity: LANBlockEntitySnapshot,
@@ -2130,7 +2136,8 @@ public struct LANContainerEditIntent: Codable, Equatable {
         inventory: LANPlayerInventorySnapshot,
         revision: Int,
         editSeq: Int,
-        blockEntityRevision: Int = 0
+        blockEntityRevision: Int = 0,
+        appliedGrantID: Int = 0
     ) {
         self.blockEntity = blockEntity
         self.additionalBlockEntities = Array(additionalBlockEntities.prefix(max(0, LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES - 1)))
@@ -2138,6 +2145,7 @@ public struct LANContainerEditIntent: Codable, Equatable {
         self.revision = max(0, revision)
         self.editSeq = max(0, editSeq)
         self.blockEntityRevision = max(0, blockEntityRevision)
+        self.appliedGrantID = max(0, appliedGrantID)
     }
 
     public init(from decoder: Decoder) throws {
@@ -2148,7 +2156,8 @@ public struct LANContainerEditIntent: Codable, Equatable {
             inventory: try c.decode(LANPlayerInventorySnapshot.self, forKey: .inventory),
             revision: try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0,
             editSeq: try c.decodeIfPresent(Int.self, forKey: .editSeq) ?? 0,
-            blockEntityRevision: try c.decodeIfPresent(Int.self, forKey: .blockEntityRevision) ?? 0
+            blockEntityRevision: try c.decodeIfPresent(Int.self, forKey: .blockEntityRevision) ?? 0,
+            appliedGrantID: try c.decodeIfPresent(Int.self, forKey: .appliedGrantID) ?? 0
         )
     }
 }
@@ -2164,8 +2173,8 @@ public struct LANInventoryUpdate: Codable, Equatable {
     public var playerID: String
     public var revision: Int
     public var snapshot: LANPlayerInventorySnapshot
-    /// The last grant the guest had applied when it built this snapshot. A take the host sent
-    /// after that is not in the snapshot yet, and the host takes it out again before storing it.
+    /// The last grant the guest had applied when it built this snapshot. A grant the host sent
+    /// after that is not in the snapshot yet, and the host applies it before storing the snapshot.
     public var appliedGrantID: Int
 
     public init(playerID: String, revision: Int, snapshot: LANPlayerInventorySnapshot, appliedGrantID: Int = 0) {
@@ -2193,24 +2202,23 @@ public struct LANInventoryGrant: Codable, Equatable {
         case items
         case xp
         case clearAll
-        case slots
-        case clearedSlots
         case take
+        case changes
     }
 
     public var playerID: String
     public var grantID: Int
-    /// Plain items the guest removes wherever they sit now (a paste it paid for), applied first.
+    /// Plain items the guest removes wherever they sit now (a paste it paid for).
     public var take: [LANInventorySlotSnapshot]
+    /// Stacks the host changed for the guest (a block placed, a tool worn, an item thrown): the
+    /// guest makes each change to that stack wherever it sits now. See `LANInventoryStackChange`.
+    public var changes: [LANInventoryStackChange]
     /// Additive merge (host-side pickups): merged into the client inventory via `give` semantics.
     public var items: [LANInventorySlotSnapshot]
     public var xp: Int
+    /// The guest empties its inventory first (it died). No grant writes a slot: a slot written
+    /// from the host's copy creates or destroys items once the guest has moved a stack.
     public var clearAll: Bool
-    /// Absolute per-slot corrections (ghost durability/consumption): each entry replaces exactly
-    /// its `slot` index, preserving the client's arrangement. Idempotent by construction.
-    public var slots: [LANInventorySlotSnapshot]
-    /// Absolute per-slot empties (tool broke, stack fully consumed).
-    public var clearedSlots: [Int]
 
     public init(
         playerID: String,
@@ -2218,27 +2226,16 @@ public struct LANInventoryGrant: Codable, Equatable {
         items: [LANInventorySlotSnapshot],
         xp: Int,
         clearAll: Bool,
-        slots: [LANInventorySlotSnapshot] = [],
-        clearedSlots: [Int] = [],
-        take: [LANInventorySlotSnapshot] = []
+        take: [LANInventorySlotSnapshot] = [],
+        changes: [LANInventoryStackChange] = []
     ) {
         self.playerID = String(playerID.prefix(128))
         self.grantID = max(0, grantID)
         self.take = Array(take.prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS))
+        self.changes = Array(changes.prefix(LAN_MULTIPLAYER_MAX_GRANT_CHANGES))
         self.items = Array(items.prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS))
         self.xp = max(0, min(1_000_000_000, xp))
         self.clearAll = clearAll
-        self.slots = Array(
-            slots.lazy
-                .filter { $0.slot >= 0 && $0.slot < LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS }
-                .prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS)
-        )
-        var seenCleared = Set<Int>()
-        self.clearedSlots = Array(
-            clearedSlots.lazy
-                .filter { $0 >= 0 && $0 < LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS && seenCleared.insert($0).inserted }
-                .prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS)
-        )
     }
 
     public init(from decoder: Decoder) throws {
@@ -2249,9 +2246,8 @@ public struct LANInventoryGrant: Codable, Equatable {
             items: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .items) ?? [],
             xp: try c.decodeIfPresent(Int.self, forKey: .xp) ?? 0,
             clearAll: try c.decodeIfPresent(Bool.self, forKey: .clearAll) ?? false,
-            slots: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .slots) ?? [],
-            clearedSlots: try c.decodeIfPresent([Int].self, forKey: .clearedSlots) ?? [],
-            take: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .take) ?? []
+            take: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .take) ?? [],
+            changes: try c.decodeIfPresent([LANInventoryStackChange].self, forKey: .changes) ?? []
         )
     }
 }

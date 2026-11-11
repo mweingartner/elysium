@@ -5,6 +5,27 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **A LAN guest's items no longer end up in two places, or in none.** The host keeps a copy of
+  what each guest carries, and the two could drift apart when messages crossed on the way.
+  - Placing a block, wearing a tool or shooting an arrow and then moving that stack before the
+    host had answered left the guest with the stack twice. The host now tells the guest what
+    changed, and the guest changes that stack wherever it is.
+  - A container change the host refuses is now undone on the guest. Taking items out of a chest
+    that another player had just emptied used to leave both players holding them, and items
+    put into a chest the host refused were in neither place.
+  - Moving stacks in and out of a chest with the mouse works for a guest. The host used to
+    refuse such a change, and every later change made in that chest, for three reasons: the
+    change was sent while the stack was still on the cursor, the inventory was reported ahead
+    of the chest, and the host's twice-a-second refresh of the chest put a picked-up stack
+    back under the cursor.
+  - Swapping a stack into the off-hand just after placing an object template, placing a block
+    or throwing an item no longer keeps it from being charged.
+  - A thrown item leaves your hand when the host has thrown it. A throw the host does not carry
+    out no longer costs the item.
+  - A refund or a picked-up item that was on its way when you disconnected or died is no
+    longer missing afterwards.
+  - Moving items into a chest right after placing an object template is no longer refused.
+
 - Bumped the release and exact-LAN-compatibility version to 1.5.0 for the survival template cost
   and the fixes below. The template intent, the inventory update and the inventory grant changed
   shape, so older binaries are rejected during the exact-version handshake.
