@@ -11,7 +11,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   inventory first and then from containers within 50 blocks, the ones crafting already uses.
   Creative is still free. If anything is missing, nothing is placed, chat lists what is missing,
   and the wireframe stays so you can fetch it and click again; chat tells you the cost as soon as
-  you pick a template. Only ordinary stacks are taken, never an enchanted, renamed or filled item.
+  you pick a template. In the placement browser, the line under a template's name says whether
+  you can pay for it, and the Materials button (or `M`) lists what it needs and what you have.
+  Only ordinary stacks are taken, never an enchanted, renamed or filled item.
   A survival placement puts every block down as placing it by hand would: containers and furnaces
   empty, a jukebox without its disc, crops freshly planted, composters, cauldrons and respawn
   anchors empty. The ground filled in under the object is dirt and is part of the cost. An object

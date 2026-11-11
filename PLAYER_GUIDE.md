@@ -580,7 +580,9 @@ and a poppy. Creative mode places for free. The materials come from your invento
 from containers within 50 blocks of you, the same ones crafting already draws on. Only ordinary
 stacks are taken, never an enchanted, renamed or filled item. If anything is missing, nothing is
 placed, chat says what is missing, and the wireframe stays so you can fetch it and click again.
-Chat tells you the cost as soon as you pick a template.
+Chat tells you the cost as soon as you pick a template. In the placement browser, the line under
+a template's name says whether you have everything for it, and the **Materials** button (or `M`)
+swaps the 3D model for a list of what the object needs and what you have, missing materials first.
 
 A survival placement puts every block down the way placing it by hand would: chests, furnaces and
 other containers are empty, a jukebox has no disc, crops are freshly planted, and a composter,

@@ -3256,6 +3256,7 @@ final class TemplateBrowserScreen: Screen {
     private var pendingDelete: TemplateDeleteConfirmationRequest?
     private var deleteConfirmFocus = 0 // Cancel is the safe initial action.
     private var listHasKeyboardFocus = true
+    private let materials = TemplateMaterialsPanel()
 
     override convenience init() {
         self.init(mode: .browse)
@@ -3293,7 +3294,7 @@ final class TemplateBrowserScreen: Screen {
         rightButton = right
         closeButton = close
         if mode == .place {
-            buttons.append(contentsOf: [delete, place, left, right, close])
+            buttons.append(contentsOf: [delete, place, left, right, close, materials.toggle])
         } else {
             buttons.append(contentsOf: [delete, left, right, close])
         }
@@ -3346,14 +3347,15 @@ final class TemplateBrowserScreen: Screen {
         placeButton?.x = l.x + deleteW + 4
         placeButton?.y = f.y + f.h - 28
         placeButton?.w = max(52, l.w - deleteW - 4)
-        placeButton?.enabled = selectedEntry?.summary != nil
+        placeButton?.enabled = selectedEntry?.summary != nil && materials.canPlace
+        materials.layout(x: p.x + 60, y: f.y + f.h - 28)
         closeButton?.x = f.x + f.w - 66
         closeButton?.y = f.y + 6
         leftButton?.x = p.x + 4
         leftButton?.y = f.y + f.h - 28
         rightButton?.x = p.x + 32
         rightButton?.y = f.y + f.h - 28
-        let hasPreview = selectedEntry?.summary != nil
+        let hasPreview = selectedEntry?.summary != nil && !materials.showsList
         leftButton?.enabled = hasPreview
         rightButton?.enabled = hasPreview
     }
@@ -3392,6 +3394,7 @@ final class TemplateBrowserScreen: Screen {
 
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ensureSelectedTemplateLoaded(game)
+        materials.update(name: mode == .place ? selectedEntry?.name : nil, template: selectedEntry?.template, game: game)
         layoutButtons(ui)
         let f = frame(ui)
         let l = listRect(ui)
@@ -3467,8 +3470,10 @@ final class TemplateBrowserScreen: Screen {
             cv.drawText(fitTemplateText(summary.name, maxWidth: Int(rect.w - 12)), rect.x + 6, rect.y + 6, 1)
             cv.drawText("\(summary.blockCount) blocks  \(summary.blockEntityCount) data blocks  \(summary.sizeX)x\(summary.sizeY)x\(summary.sizeZ)",
                         rect.x + 6, rect.y + 16, 1, "#c8c8c8", shadow: false)
-            cv.drawText(fitTemplateText(summary.dominantBlockDisplayName, maxWidth: Int(rect.w - 12)),
-                        rect.x + 6, rect.y + 26, 1, "#a8c8ff", shadow: false)
+            if !materials.drawStatus(ui, x: rect.x + 6, y: rect.y + 26, maxWidth: Int(rect.w - 12)) {
+                cv.drawText(fitTemplateText(summary.dominantBlockDisplayName, maxWidth: Int(rect.w - 12)),
+                            rect.x + 6, rect.y + 26, 1, "#a8c8ff", shadow: false)
+            }
         } else {
             cv.drawText(fitTemplateText(entry.name, maxWidth: Int(rect.w - 12)), rect.x + 6, rect.y + 6, 1)
             cv.drawText("Corrupt template", rect.x + 6, rect.y + 16, 1, "#ff8080", shadow: false)
@@ -3480,7 +3485,8 @@ final class TemplateBrowserScreen: Screen {
         cv.fillRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
         cv.setStroke("#3f4654")
         cv.strokeRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
-        if let template = entry.template, let boxes = entry.previewBoxes {
+        if materials.drawList(ui, rect: modelRect) {
+        } else if let template = entry.template, let boxes = entry.previewBoxes {
             drawTemplatePreview(ui, template, boxes: boxes, rect: modelRect)
         } else {
             cv.drawTextCentered("No preview", modelRect.x + modelRect.w / 2, modelRect.y + modelRect.h / 2 - 4, 1, "#a8a8a8", shadow: false)
@@ -3727,6 +3733,7 @@ final class TemplateBrowserScreen: Screen {
             label: "Saved templates", value: selectedEntry?.name ?? "No template selected", help: "",
             frame: (list.x, list.y, list.w, list.h), enabled: true, focused: listHasKeyboardFocus,
             insertionUTF16Offset: nil, focusable: true, actionable: true)]
+            + materials.accessibilityDescriptors(frame: previewRect(ui))
     }
 
     override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
@@ -3773,7 +3780,7 @@ final class TemplateBrowserScreen: Screen {
             }
         }
         let p = previewRect(ui)
-        if selectedEntry?.template != nil, mx >= p.x && mx < p.x + p.w && my >= p.y && my < p.y + p.h {
+        if selectedEntry?.template != nil, !materials.showsList, mx >= p.x && mx < p.x + p.w && my >= p.y && my < p.y + p.h {
             draggingPreview = true
             lastDragX = mx
             lastDragY = my
@@ -3795,6 +3802,7 @@ final class TemplateBrowserScreen: Screen {
     }
 
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        if materials.onWheel(ui, dy, over: previewRect(ui)) { return true }
         let maxS = maxScroll(lastVisibleRows)
         guard maxS > 0 else { return false }
         scroll = max(0, min(maxS, scroll + (dy > 0 ? 1 : -1)))
@@ -3812,6 +3820,7 @@ final class TemplateBrowserScreen: Screen {
             }
             return true
         }
+        if materials.onKey(key) { return true }
         switch key {
         case "Delete", "Backspace":
             if listHasKeyboardFocus { beginDelete(game) }
