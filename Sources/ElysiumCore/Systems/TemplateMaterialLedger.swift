@@ -241,7 +241,7 @@ func templateUnwrittenMaterials(unplacedBlocks: [TemplateBlock], unplacedBlockEn
         }
     }
     for blockEntity in unplacedBlockEntities {
-        if let plant = blockEntity.plant, let itemID = iidOpt(plant) { counts[itemID, default: 0] += 1 }
+        if let plant = templateBlockEntityCharge(blockEntity) { counts[plant.itemID, default: 0] += plant.count }
     }
     if unfilledSupportCells > 0 { counts[iid("dirt"), default: 0] += unfilledSupportCells }
     return counts

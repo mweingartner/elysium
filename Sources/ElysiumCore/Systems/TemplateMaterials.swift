@@ -233,9 +233,17 @@ func templateMaterialBill(_ template: ObjectTemplate) throws -> TemplateMaterial
         }
     }
     for blockEntity in template.blockEntities {
-        if let plant = blockEntity.plant, let itemID = iidOpt(plant) { counts[itemID, default: 0] += 1 }
+        if let plant = templateBlockEntityCharge(blockEntity) { counts[plant.itemID, default: 0] += plant.count }
     }
     return TemplateMaterialBill(counts)
+}
+
+/// What a block entity adds to the cost of its block: the plant standing in a flower pot, which
+/// is an item of its own. The bill charges it here, and so do the refund for a pot the paste
+/// could not write and the count of what still stands when a paste is undone.
+func templateBlockEntityCharge(_ blockEntity: BlockEntityData) -> TemplateMaterialLine? {
+    guard let plant = blockEntity.plant, let itemID = iidOpt(plant) else { return nil }
+    return TemplateMaterialLine(itemID: itemID, count: 1)
 }
 
 /// What stands at `x, y, z` now, as the items a survival paste would have been charged for it.
@@ -244,9 +252,9 @@ func templateStandingMaterials(in world: World, _ x: Int, _ y: Int, _ z: Int) ->
     let cellValue = world.getBlock(x, y, z)
     guard case .item(let itemID, let count) = templateCellCharge(cellValue) else { return [] }
     var lines = [TemplateMaterialLine(itemID: itemID, count: count)]
-    if cellValue >> 4 == Int(B.flower_pot), let plant = world.getBlockEntity(x, y, z)?.plant,
-       let plantID = iidOpt(plant) {
-        lines.append(TemplateMaterialLine(itemID: plantID, count: 1))
+    if cellValue >> 4 == Int(B.flower_pot),
+       let plant = world.getBlockEntity(x, y, z).flatMap(templateBlockEntityCharge) {
+        lines.append(plant)
     }
     return lines
 }
