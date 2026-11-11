@@ -251,9 +251,7 @@ extension LANMultiplayerHostSession {
     private func settleTemplatePayment(of job: ObjectTemplatePlacementJob, result: TemplatePlacementResult,
                                        for playerID: String, in world: World) -> String {
         guard var receipt = job.materials else { return "" }
-        let unwritten = templateUnwrittenMaterials(
-            unplacedBlocks: job.unplacedBlocks,
-            unfilledSupportCells: job.plannedSupportCellCount - result.supportBlocksFilled)
+        let unwritten = templateUnwrittenMaterials(of: job, result: result)
         if !unwritten.isEmpty {
             _ = returnTemplateMaterials(unwritten, against: &receipt, to: playerID, in: world,
                                         near: (result.originX, result.originY, result.originZ))

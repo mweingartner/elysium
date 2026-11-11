@@ -198,9 +198,7 @@ extension GameCore {
     /// record is read. Returns what the paste used, for the chat.
     func settleTemplateMaterials(of job: ObjectTemplatePlacementJob) -> String? {
         guard var receipt = job.materials, let result = job.result else { return nil }
-        let unwritten = templateUnwrittenMaterials(
-            unplacedBlocks: job.unplacedBlocks,
-            unfilledSupportCells: job.plannedSupportCellCount - result.supportBlocksFilled)
+        let unwritten = templateUnwrittenMaterials(of: job, result: result)
         if !unwritten.isEmpty {
             var access = templateMaterialStores(excluding: job.plans)
             let refund = refundTemplateMaterials(unwritten, against: &receipt, into: &access.stores)

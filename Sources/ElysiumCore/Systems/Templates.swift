@@ -1422,8 +1422,10 @@ public final class ObjectTemplatePlacementJob {
     private let plainDirtSupport: Bool
     /// What this paste was paid, set by whoever charged for it (`TemplateMaterialLedger.swift`).
     public var materials: TemplateMaterialReceipt?
-    /// Template blocks the job could not write because their chunk was not loaded.
+    /// Template blocks the job could not write because their chunk was not loaded, and the
+    /// block entities it therefore did not attach.
     public private(set) var unplacedBlocks: [TemplateBlock] = []
+    public private(set) var unplacedBlockEntities: [BlockEntityData] = []
     private var undoLedger: TemplateUndoLedger
     private var phase: Phase = .clearing
     private var clearanceIndex = 0
@@ -1558,7 +1560,7 @@ public final class ObjectTemplatePlacementJob {
                     copy.z = p.z
                     world.setBlockEntity(copy)
                     blockEntitiesPlaced += 1
-                }
+                } else { unplacedBlockEntities.append(be) }
                 completedOperationCount += 1
                 budget -= 1
             case .notifying:

@@ -451,6 +451,37 @@ final class LANTemplatePaymentTests: XCTestCase {
                 case 0:
                     publish()
                 case 1:
+    /// Review finding: a potted plant is charged as a pot and a plant, and the plant is read
+    /// from the pot's block entity. When the job could not place the pot, only the pot was
+    /// paid back.
+    func testAPotThePasteCouldNotPlaceIsPaidBackWithItsPlant() throws {
+        let world = loadedWorld()
+        let session = hostSession(carrying: [("flower_pot", 2), ("poppy", 2)])
+        func potted(_ dx: Int) -> BlockEntityData {
+            let pot = BlockEntityData(type: "lectern", x: dx, y: 0, z: 0)
+            pot.plant = "poppy"
+            return pot
+        }
+        // Two potted poppies at x 14 and x 17: one in chunk (0,0), one in chunk (1,0).
+        let pots = ObjectTemplate(name: "Pots", anchorX: 0, anchorY: 0, anchorZ: 0, sizeX: 4, sizeY: 1, sizeZ: 1,
+                                  blocks: [0, 3].map { TemplateBlock(dx: $0, dy: 0, dz: 0, cell: cell(B.flower_pot, 0)) },
+                                  blockEntities: [potted(0), potted(3)])
+        XCTAssertEqual(session.applyTemplateIntent(try placeIntent(pots, x: 14), from: "guest", world: world),
+                       .accepted(action: .placeTemplate, name: "Pots"))
+        let paid = session.drainGrants(for: "guest")
+        XCTAssertEqual(takeCount(paid, "flower_pot"), 2)
+        XCTAssertEqual(takeCount(paid, "poppy"), 2)
+        world.removeChunk(1, 0)                             // unloads before the job reaches it
+        let results = finish(session, in: world)
+        guard case .placed(_, _, _, _, _, let payment)? = results.last else { return XCTFail("\(results)") }
+        XCTAssertEqual(payment, "Used 2 materials.")
+        let back = session.drainGrants(for: "guest")
+        XCTAssertEqual(itemCount(back, "flower_pot"), 1)
+        XCTAssertEqual(itemCount(back, "poppy"), 1, "the plant of the pot that was never placed")
+        XCTAssertEqual(hostCopy(session), ["flower_pot": 1, "poppy": 1])
+        XCTAssertEqual(world.getBlockEntity(14, 64, 4)?.plant, "poppy")
+    }
+
                     let a = random.int(36), b = random.int(36)
                     inventory.swapAt(a, b)
                 case 2:
