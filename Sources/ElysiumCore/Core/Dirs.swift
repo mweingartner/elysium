@@ -16,11 +16,17 @@ public let DIR_Y = [-1, 1, 0, 0, 0, 0]
 public let DIR_Z = [0, 0, -1, 1, 0, 0]
 public let DIR_OPPOSITE = [1, 0, 3, 2, 5, 4]
 
-/// The step toward direction `dir`. Block metadata holds a facing in three or four bits, so a
-/// cell that was pasted, imported or sent by a LAN guest can name a direction outside 0...5.
-/// That is no step at all here, never a read past the end of the tables.
+/// Whether `dir` names one of the six directions. Block metadata holds a facing in three or
+/// four bits, so a cell that was pasted, imported or sent by a LAN guest can name a direction
+/// outside 0...5: a facing no block has. Whatever reads the tables above by a facing asks here.
+public func isDir(_ dir: Int) -> Bool {
+    dir >= 0 && dir < 6
+}
+
+/// The step toward direction `dir`. A facing no block has (`isDir`) is no step at all here,
+/// never a read past the end of the tables.
 public func dirStep(_ dir: Int) -> (x: Int, y: Int, z: Int) {
-    dir >= 0 && dir < 6 ? (DIR_X[dir], DIR_Y[dir], DIR_Z[dir]) : (0, 0, 0)
+    isDir(dir) ? (DIR_X[dir], DIR_Y[dir], DIR_Z[dir]) : (0, 0, 0)
 }
 public let HORIZONTALS = [Dir.north, Dir.south, Dir.west, Dir.east]
 public let DIR_NAMES = ["down", "up", "north", "south", "west", "east"]

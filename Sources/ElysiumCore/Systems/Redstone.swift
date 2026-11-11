@@ -840,7 +840,7 @@ private func dispense(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ c: Int, _ 
         return
     }
     let facing = c & 7
-    if facing > 5 { return } // a facing no block has; see `dirStep`
+    if !isDir(facing) { return } // a facing no block has
     let slot = slots[redstoneRng.nextInt(slots.count)]
     let stack = items[slot]!
     let name = itemDef(stack.id).name
@@ -1113,7 +1113,7 @@ private func pistonPowered(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ facin
 
 private func gatherPushSet(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ facing: Int) -> [(Int, Int, Int)]? {
     struct K: Hashable { let x: Int, y: Int, z: Int }
-    guard facing >= 0, facing < 6 else { return nil }
+    guard isDir(facing) else { return nil }
     let dx = DIR_X[facing], dy = DIR_Y[facing], dz = DIR_Z[facing]
     var set: [(Int, Int, Int)] = []
     var seen = Set<K>()
@@ -1155,7 +1155,7 @@ private func gatherPushSet(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ facin
 private func pistonTick(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ c: Int) {
     let id = c >> 4
     let facing = c & 7
-    if facing > 5 { return } // a facing no block has; see `dirStep`
+    if !isDir(facing) { return } // a facing no block has
     let extended = (c & 8) != 0
     let powered = pistonPowered(world, x, y, z, facing)
     let dx = DIR_X[facing], dy = DIR_Y[facing], dz = DIR_Z[facing]
@@ -1276,7 +1276,7 @@ public func registerRedstoneHandlers() {
         let facing = meta & 7
         // only triggers when the WATCHED block (in facing dir) changed
         let watched = dirStep(facing)
-        if facing < 6 && fx == x + watched.x && fy == y + watched.y && fz == z + watched.z {
+        if isDir(facing) && fx == x + watched.x && fy == y + watched.y && fz == z + watched.z {
             if (meta & 8) == 0 && !world.hasScheduledTick(x, y, z, Int(B.observer)) {
                 world.scheduleTick(x, y, z, Int(B.observer), 2)
             }

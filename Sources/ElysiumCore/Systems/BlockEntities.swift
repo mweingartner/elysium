@@ -221,7 +221,7 @@ public func registerBlockEntityHandlers() {
         if (c >> 4) != Int(B.hopper) { return }
         if (c & 8) != 0 { return } // locked by redstone
         let facing = c & 7
-        if facing > 5 { return } // no hopper faces a seventh way; such a cell came from outside
+        if !isDir(facing) { return } // no hopper faces a seventh way; such a cell came from outside
         var acted = false
 
         // push: into the container we face
