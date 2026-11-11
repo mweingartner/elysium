@@ -92,3 +92,20 @@ func twoCellPartnerCell(of cell: Int, _ x: Int, _ y: Int, _ z: Int,
     if blockDefs[cell >> 4].shape == .bed, partner & 3 != cell & 3 { return nil }
     return partner
 }
+
+/// Opens or closes the door one of whose halves, `door`, stands at `x, y, z`. The lower half
+/// carries the open bit, whichever half was used. Half a door does not open: a half that has
+/// lost its other half is no door, and opening it would write a door into whatever stands above
+/// or below it. Returns where the lower half stands and the cell it now holds, or nil when
+/// nothing was changed. The player at the keyboard and a LAN guest both open a door here.
+func toggleDoor(in world: World, _ door: Int, _ x: Int, _ y: Int, _ z: Int) -> (y: Int, cell: Int)? {
+    guard twoCellPartnerCell(in: world, of: door, x, y, z) != nil,
+          let partner = twoCellPartnerPosition(of: door, x, y, z) else { return nil }
+    let lowerY = min(y, partner.y)
+    let lower = world.getBlock(x, lowerY, z)
+    let toggled = Int(cell(UInt16(door >> 4), (lower & 15) ^ 4))
+    world.setBlock(x, lowerY, z, toggled)
+    world.hooks.playSound((lower & 4) != 0 ? "block.wooden_door.close" : "block.wooden_door.open",
+                          Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 1, 1)
+    return (lowerY, toggled)
+}

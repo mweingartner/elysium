@@ -1071,19 +1071,12 @@ public final class LANMultiplayerHostSession {
 
         if shape == .door {
             guard id != Int(B.iron_door) else { return .ignored("unsupported use target") }
-            // Half a door does not open: the same rule as `useBlock` for the player at the keyboard.
-            guard twoCellPartnerCell(in: world, of: targetCell, intent.x, intent.y, intent.z) != nil else {
+            // Half a door does not open: `toggleDoor` is the rule `useBlock` follows for the
+            // player at the keyboard.
+            guard let lower = toggleDoor(in: world, targetCell, intent.x, intent.y, intent.z) else {
                 return .ignored("missing door half")
             }
-            let lowerY = (meta & 8) != 0 ? intent.y - 1 : intent.y
-            let lowerCell = world.getBlock(intent.x, lowerY, intent.z)
-            guard isValidLANReplicatedCell(lowerCell), (lowerCell >> 4) == id else {
-                return .ignored("missing door base")
-            }
-            let updatedCell = Int(cell(UInt16(id), (lowerCell & 15) ^ 4))
-            _ = world.setBlock(intent.x, lowerY, intent.z, updatedCell)
-            world.hooks.playSound((lowerCell & 4) != 0 ? "block.wooden_door.close" : "block.wooden_door.open", Double(intent.x) + 0.5, Double(intent.y) + 0.5, Double(intent.z) + 0.5, 1, 1)
-            let change = LANBlockChange(dimension: world.dim.rawValue, x: intent.x, y: lowerY, z: intent.z, cell: updatedCell)
+            let change = LANBlockChange(dimension: world.dim.rawValue, x: intent.x, y: lower.y, z: intent.z, cell: lower.cell)
             changeLog.record(change)
             return .applied([change])
         }
