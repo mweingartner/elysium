@@ -5,6 +5,11 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **A lever, button or redstone torch with a broken facing no longer stops the game.** These
+  blocks keep the face they hang on in their data. A block that came from a template could name a
+  face that does not exist, and clicking it, or the torch's next update, read past the end of a
+  table and ended the game.
+
 - **Doors, beds and tall flowers drop exactly one item.** Each of them stands on two cells but is
   one item, and the two halves were handled separately. Breaking a door or a tall flower by its
   upper half dropped nothing; a bed caught in an explosion could drop two beds; and breaking a

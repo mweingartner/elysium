@@ -156,8 +156,8 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
     if id == Int(B.lever) {
         world.setBlock(x, y, z, Int(cell(B.lever, meta ^ 8)))
         world.hooks.playSound("block.lever.click", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 0.5, (meta & 8) != 0 ? 0.6 : 0.7)
-        let attach = meta & 7
-        world.updateNeighbors(x + DIR_X[attach], y + DIR_Y[attach], z + DIR_Z[attach])
+        let attach = dirStep(meta & 7)
+        world.updateNeighbors(x + attach.x, y + attach.y, z + attach.z)
         world.emitVibration(Double(x), Double(y), Double(z), 10, player)
         return true
     }
@@ -165,8 +165,8 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
         if (meta & 8) == 0 {
             world.setBlock(x, y, z, Int(cell(UInt16(id), meta | 8)))
             world.hooks.playSound("block.stone_button.click_on", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 0.5, 0.9)
-            let attach = meta & 7
-            world.updateNeighbors(x + DIR_X[attach], y + DIR_Y[attach], z + DIR_Z[attach])
+            let attach = dirStep(meta & 7)
+            world.updateNeighbors(x + attach.x, y + attach.y, z + attach.z)
             world.scheduleTick(x, y, z, id, def.sound == "wood" ? 30 : 20)
         }
         return true

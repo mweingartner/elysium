@@ -567,7 +567,8 @@ private func torchKey(_ x: Int, _ y: Int, _ z: Int) -> Int64 {
 }
 private func torchSupportPos(_ x: Int, _ y: Int, _ z: Int, _ meta: Int) -> (Int, Int, Int) {
     if meta == 0 { return (x, y - 1, z) }
-    return (x + DIR_X[meta], y + DIR_Y[meta], z + DIR_Z[meta])
+    let step = dirStep(meta)
+    return (x + step.x, y + step.y, z + step.z)
 }
 private func torchShouldBeOff(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ meta: Int) -> Bool {
     let (sx, sy, sz) = torchSupportPos(x, y, z, meta)
@@ -1294,8 +1295,8 @@ public func registerRedstoneHandlers() {
             if (c & 8) != 0 {
                 world.setBlock(x, y, z, Int(cell(UInt16(btn), c & 7)))
                 world.hooks.playSound("block.stone_button.click_off", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 0.5, 0.8)
-                let attach = c & 7
-                world.updateNeighbors(x + DIR_X[attach], y + DIR_Y[attach], z + DIR_Z[attach])
+                let attach = dirStep(c & 7)
+                world.updateNeighbors(x + attach.x, y + attach.y, z + attach.z)
             }
         }
     }
