@@ -140,18 +140,14 @@ public func lanGuestTemplatePayload(for template: ObjectTemplate) throws -> Data
 
 /// Decodes a template a guest sent. The result has passed the same validation as a template read
 /// from the host's own library, and the host does not take the guest's word for a single block
-/// entity: every block gets the entity that placing it by hand would create
-/// (`placementBlockEntity`), so containers, jukeboxes and furnaces arrive empty and idle, and a
-/// block that gets no entity when placed (a spawner, an end gateway) arrives without one. Of the
-/// guest's own block-entity data only what a player could have typed or planted survives, and
-/// only after the game's own checks: a sign's text and the plant in a flower pot.
+/// entity: every block arrives as placing it by hand would leave it (`templateAsPlacedByHand`).
 public func lanHostTemplate(fromGuestPayload payload: Data) throws -> ObjectTemplate {
     let data = Data(payload) // the binary reader indexes from zero; a slice may not start there
     guard data.count <= LAN_MULTIPLAYER_MAX_TEMPLATE_PAYLOAD_BYTES,
           data.prefix(OBJECT_TEMPLATE_BINARY_MAGIC.count) == OBJECT_TEMPLATE_BINARY_MAGIC else {
         throw TemplateError.corruptTemplate("not a template the host can read")
     }
-    var template: ObjectTemplate
+    let template: ObjectTemplate
     do {
         template = try decodeObjectTemplate(data)
     } catch let error as TemplateError {
@@ -159,43 +155,7 @@ public func lanHostTemplate(fromGuestPayload payload: Data) throws -> ObjectTemp
     } catch {
         throw TemplateError.corruptTemplate("unreadable block entity data")
     }
-    var sent: [TemplatePos: BlockEntityData] = [:]
-    for blockEntity in template.blockEntities { sent[templatePos(blockEntity)] = blockEntity }
-    var rebuilt: [BlockEntityData] = []
-    template.blocks = template.blocks.map { block in
-        let cell = templateCellWithoutContainedItemState(block.cell)
-        let position = templatePos(block)
-        if let blockEntity = lanHostBlockEntity(blockId: Int(cell >> 4), at: position, sent: sent[position]) {
-            rebuilt.append(blockEntity)
-        }
-        return TemplateBlock(dx: block.dx, dy: block.dy, dz: block.dz, cell: cell)
-    }
-    template.blockEntities = rebuilt
-    return template
-}
-
-/// The block entity the host gives one block of a guest's template. `sent` is what the guest
-/// supplied for that position, if anything; it is read for a sign's lines and a pot's plant only.
-private func lanHostBlockEntity(blockId: Int, at position: TemplatePos, sent: BlockEntityData?) -> BlockEntityData? {
-    if blockId == Int(B.flower_pot) {
-        // A potted plant must be a plant block as well as a pottable item: the pot hands its plant
-        // back as an item, and "mushroom_stew" also contains a pottable word.
-        guard let plant = sent?.plant, isPottablePlantName(plant), iidOpt(plant) != nil,
-              bidOpt(plant) != nil else { return nil }
-        let pot = BlockEntityData(type: "lectern", x: position.x, y: position.y, z: position.z)
-        pot.plant = plant
-        return pot
-    }
-    guard let fresh = placementBlockEntity(blockId, position.x, position.y, position.z) else { return nil }
-    if fresh.type == "sign", sent?.type == "sign" {
-        // The sign editor's own repair: four lines, valid characters only. The width rule is the
-        // widest the editor could ever accept (one unit a character), since the host has no font.
-        fresh.lines = elysiumRepairSignLines(sent?.lines, makeWidthStep: {
-            var width = 0
-            return { _ in width += 1; return width }
-        }).lines.array
-    }
-    return fresh
+    return templateAsPlacedByHand(template)
 }
 
 /// The host's reach rule for a guest's paste. The ordinary block reach cannot apply: the preview

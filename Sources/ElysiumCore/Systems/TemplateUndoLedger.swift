@@ -37,10 +37,16 @@ struct TemplateUndoLedger {
     }
 
     /// The cells recorded so far, ascending.
-    var snapshot: TemplatePlacementUndoSnapshot {
+    var snapshot: TemplatePlacementUndoSnapshot { snapshot(materials: nil) }
+
+    /// The cells recorded so far, ascending, with what the placement was paid.
+    func snapshot(materials: TemplateMaterialReceipt?) -> TemplatePlacementUndoSnapshot {
         TemplatePlacementUndoSnapshot(templateName: templateName, dimension: dimension,
-                                      cells: taken.compactMap { $0 })
+                                      cells: taken.compactMap { $0 }, materials: materials)
     }
+
+    /// Whether the placement may change the cell at `pos`.
+    func plans(_ pos: TemplatePos) -> Bool { index(of: pos) != nil }
 
     /// Records the cell at `pos` as it stands now, unless it is already recorded, and returns
     /// whether the job may write it. The answer is no for a cell whose chunk is not loaded

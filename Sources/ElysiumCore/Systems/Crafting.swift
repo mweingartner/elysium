@@ -549,7 +549,7 @@ public func populateCraftingGrid(_ plan: CraftingRecipePlan, grid: inout [ItemSt
     return true
 }
 
-private enum CraftingResourceOwner {
+enum CraftingResourceOwner {
     case blockEntity(BlockEntityData, Int)
     case boat(Boat, Int)
     case minecart(Minecart, Int)
@@ -604,7 +604,7 @@ private enum CraftingResourceOwner {
     }
 }
 
-private struct CraftingResourceSlot {
+struct CraftingResourceSlot {
     let owner: CraftingResourceOwner
     let distanceKey: Int
     let x: Int
@@ -659,7 +659,7 @@ public func nearbyCraftingContainers(in world: World, centerX: Int, centerY: Int
     return out
 }
 
-private func nearbyCraftingResourceSlots(in world: World, centerX: Int, centerY: Int, centerZ: Int,
+func nearbyCraftingResourceSlots(in world: World, centerX: Int, centerY: Int, centerZ: Int,
                                          radius: Int) -> [CraftingResourceSlot] {
     let r2 = radius * radius
     var slots: [CraftingResourceSlot] = []

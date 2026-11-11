@@ -96,6 +96,8 @@ public struct TemplatePlacementUndoSnapshot {
     public let templateName: String
     public let dimension: Int
     public let cells: [TemplatePlacementUndoCell]
+    /// What a survival paste was paid; nil for a free one. Undo pays back from this.
+    public var materials: TemplateMaterialReceipt? = nil
 }
 
 public struct TemplatePlacementTarget: Equatable {
@@ -229,6 +231,8 @@ public struct TemplatePlacementOptions {
     /// operation; gameplay placements prepare terrain instead.
     public var replaceExisting: Bool
     public var prepareTerrain: Bool
+    /// A survival paste fills under its footprint with dirt, which the player pays for.
+    public var plainDirtSupport = false
 
     public init(replaceExisting: Bool = false, prepareTerrain: Bool = false) {
         self.replaceExisting = replaceExisting
@@ -250,9 +254,11 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
     case foundationTooDeep(Int, Int, Int)
     case tooManyBlockEntities(Int)
     case tooLargeForLANGuest(Int)
+    case materials(String)
 
     public var description: String {
         switch self {
+        case .materials(let sentence): return sentence
         case .invalidName:
             return "Template names must be 1-\(OBJECT_TEMPLATE_NAME_MAX) characters and use letters, numbers, spaces, underscores, or hyphens."
         case .missingTarget:
@@ -1413,6 +1419,11 @@ public final class ObjectTemplatePlacementJob {
     private let originY: Int
     private let originZ: Int
     private let preparationPlan: TemplatePlacementPreparationPlan
+    private let plainDirtSupport: Bool
+    /// What this paste was paid, set by whoever charged for it (`TemplateMaterialLedger.swift`).
+    public var materials: TemplateMaterialReceipt?
+    /// Template blocks the job could not write because their chunk was not loaded.
+    public private(set) var unplacedBlocks: [TemplateBlock] = []
     private var undoLedger: TemplateUndoLedger
     private var phase: Phase = .clearing
     private var clearanceIndex = 0
@@ -1445,6 +1456,7 @@ public final class ObjectTemplatePlacementJob {
         self.originY = originY
         self.originZ = originZ
         self.preparationPlan = preparationPlan
+        plainDirtSupport = options.plainDirtSupport
         undoLedger = TemplateUndoLedger(templateName: template.name, dimension: world.dim.rawValue,
                                         positions: objectTemplatePlacementPositions(destinations, preparationPlan))
         totalOperationCount = max(1, preparationPlan.clearance.count
@@ -1456,7 +1468,9 @@ public final class ObjectTemplatePlacementJob {
 
     public var isDone: Bool { phase == .done }
     public var result: TemplatePlacementResult? { resultValue }
-    public var undoSnapshot: TemplatePlacementUndoSnapshot { undoLedger.snapshot }
+    public var undoSnapshot: TemplatePlacementUndoSnapshot { undoLedger.snapshot(materials: materials) }
+    public var plannedSupportCellCount: Int { preparationPlan.support.count }
+    func plans(_ pos: TemplatePos) -> Bool { undoLedger.plans(pos) }
 
     public var progress: TemplatePlacementProgress {
         TemplatePlacementProgress(
@@ -1504,7 +1518,7 @@ public final class ObjectTemplatePlacementJob {
                 let p = preparationPlan.support[supportIndex]
                 supportIndex += 1
                 if take(p) {
-                    let fillCell = templateSupportFillCell(in: world, p.x, p.y, p.z)
+                    let fillCell = plainDirtSupport ? Int(cell(B.dirt)) : templateSupportFillCell(in: world, p.x, p.y, p.z)
                     if world.getBlock(p.x, p.y, p.z) != fillCell {
                         world.setBlock(p.x, p.y, p.z, fillCell, SET_NO_NEIGHBORS)
                         supportBlocksFilled += 1
@@ -1523,7 +1537,7 @@ public final class ObjectTemplatePlacementJob {
                 if take(p) {
                     // A pasted resource block is player-placed; undo restores the raw captured cells.
                     _ = world.setBlock(p.x, p.y, p.z, skillTreePlayerPlacedCell(Int(block.cell)), SET_NO_NEIGHBORS)
-                }
+                } else { unplacedBlocks.append(block) }
                 completedOperationCount += 1
                 budget -= 1
             case .placingBlockEntities:

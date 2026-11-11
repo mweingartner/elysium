@@ -5,6 +5,21 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **In survival, placing an object template costs materials.** Until now a paste created its
+  blocks from nothing in every game mode. In survival each block now costs the item that places
+  it (a door one door, a double slab two slabs, a potted poppy a pot and a poppy), taken from your
+  inventory first and then from containers within 50 blocks, the ones crafting already uses.
+  Creative is still free. If anything is missing, nothing is placed, chat lists what is missing,
+  and the wireframe stays so you can fetch it and click again; chat tells you the cost as soon as
+  you pick a template. Only ordinary stacks are taken, never an enchanted, renamed or filled item.
+  A survival placement puts every block down as placing it by hand would: containers and furnaces
+  empty, a jukebox without its disc, crops freshly planted, composters, cauldrons and respawn
+  anchors empty. The ground filled in under the object is dirt and is part of the cost. An object
+  holding a block no item places (water, lava, fire, a portal, bedrock) cannot be placed in
+  survival. `Command-Z` pays back every block of the placement that still stands, to where it came
+  from; a block you mined or replaced is not paid back, and without room for the refund undo
+  changes nothing and says how much room it needs.
+
 - **A lever, button or redstone torch with a broken facing no longer stops the game.** These
   blocks keep the face they hang on in their data. A block that came from a template could name a
   face that does not exist, and clicking it, or the torch's next update, read past the end of a

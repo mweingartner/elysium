@@ -567,11 +567,31 @@ Object templates let you reuse a connected build:
 5. Press `Command-Z` to undo the most recent template placement.
 
 Template placement is previewed and validated before it changes the world. Where the ground under the
-object is uneven, the gaps are filled with plain ground: the stone, dirt, sand or similar terrain beside
-the gap, or dirt. The fill never copies a nearby building block. Undo applies to the most recent
+object is uneven, the gaps are filled with plain ground: in creative mode the stone, dirt, sand or
+similar terrain beside the gap, and in survival always dirt. The fill never copies a nearby building
+block. Undo applies to the most recent
 template placement, not to every ordinary building action, and puts back what the placement replaced.
 A large placement takes a few seconds, and other players in a LAN session keep playing meanwhile; a
 block they mine or a chest they empty inside its footprint during that time stays that way after undo.
+
+**In survival, placing a template costs materials.** Each block costs the item that places it: a
+door costs one door, a double slab two slabs, three candles three candles, and a potted poppy a pot
+and a poppy. Creative mode places for free. The materials come from your inventory first and then
+from containers within 50 blocks of you, the same ones crafting already draws on. Only ordinary
+stacks are taken, never an enchanted, renamed or filled item. If anything is missing, nothing is
+placed, chat says what is missing, and the wireframe stays so you can fetch it and click again.
+Chat tells you the cost as soon as you pick a template.
+
+A survival placement puts every block down the way placing it by hand would: chests, furnaces and
+other containers are empty, a jukebox has no disc, crops are freshly planted, and a composter,
+cauldron or respawn anchor is empty. Signs keep their text and flower pots their plants. The dirt
+filled in under the object is part of the cost. An object that holds a block no item can place
+(water, lava, fire, a portal, bedrock) cannot be placed in survival, and chat names the block.
+
+`Command-Z` pays you back for every block of the placement that still stands. A block you mined or
+replaced in the meantime is not paid back. What came from your inventory returns there and the
+rest goes back into nearby containers. If there is no room for it, undo changes nothing and says
+how many stacks it needs room for.
 
 In a LAN world you joined, templates work the same way with your own library. `Command-C` saves to
 your Mac and `Command-V` shows your templates, including ones you made in your own worlds. When you

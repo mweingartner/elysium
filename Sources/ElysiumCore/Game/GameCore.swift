@@ -4209,6 +4209,7 @@ public final class GameCore {
     /// matter which caller drove the job to completion.
     private func finishTemplatePlacementJob(_ job: ObjectTemplatePlacementJob) {
         guard let result = job.result else { return }
+        let materialsUsed = settleTemplateMaterials(of: job)
         let progress = job.progress
         let undo = job.undoSnapshot
         lastTemplatePlacementUndo = undo
@@ -4223,6 +4224,7 @@ public final class GameCore {
         host?.pushChat("§7" + templatePlacementCompletionText(
             name: progress.templateName, blocks: result.blocksPlaced, blockEntities: result.blockEntitiesPlaced,
             cleared: result.blocksCleared, filled: result.supportBlocksFilled))
+        if let materialsUsed { host?.pushChat("§7" + materialsUsed) }
         host?.showActionBar("Placed \"\(progress.templateName)\"", 60)
     }
 
@@ -5954,6 +5956,7 @@ public final class GameCore {
     // ===========================================================================
     public func beginTemplatePlacement(_ template: ObjectTemplate) throws {
         let session = try TemplatePlacementSession(template: template)
+        try checkTemplateMaterialsOnArm(session)
         if isLANClientWorld { try armLANClientTemplate(session) }
         templatePlacement = session
         leftDown = false
@@ -6018,11 +6021,13 @@ public final class GameCore {
         guard templatePlacementJob == nil else { return nil }
         guard let session = templatePlacement else { return nil }
         guard let target = templatePlacementTarget() else { throw TemplateError.missingTarget }
-        let job = try ObjectTemplatePlacementJob(rawTemplate: session.rotatedTemplate, in: world,
+        let paste = try templatePaste(for: session)
+        let job = try ObjectTemplatePlacementJob(rawTemplate: paste.template, in: world,
                                                  targetX: target.targetX,
                                                  targetY: target.targetY,
                                                  targetZ: target.targetZ,
-                                                 options: TemplatePlacementOptions(prepareTerrain: true))
+                                                 options: paste.options)
+        try chargeTemplateMaterials(paste, to: job)
         templatePlacementJob = job
         templatePlacementProgressTick = 0
         templatePlacement = nil
@@ -6055,6 +6060,7 @@ public final class GameCore {
             host?.showActionBar(LANTemplateRefusal.undoNotLoaded, 60)
             return false
         }
+        guard let payBack = templateUndoRefund(for: undo) else { return false }
         if templatePlacement != nil {
             cancelTemplatePlacement(showMessage: false)
         }
@@ -6066,6 +6072,7 @@ public final class GameCore {
         targetedBlock = nil
         lastCursorHit = nil
         host?.pushChat("§7" + templateUndoCompletionText(name: undo.templateName, restored: restored))
+        payBack()
         host?.showActionBar("Undid \"\(undo.templateName)\"", 60)
         return true
     }
