@@ -206,7 +206,7 @@ public final class ArrowEntity: Projectile {
         stuckTime += 1
         // pickup
         if pickupable && stuckTime > 10 {
-            for e in world.getEntitiesNear(x, y, z, 1.2, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+            for e in world.getPlayersNear(x, y, z, 1.2) {
                 guard let p = e as? LivingEntity else { continue }
                 let s = ItemStack(iid(potionId != nil ? "tipped_arrow" : spectral ? "spectral_arrow" : "arrow"), 1)
                 if let potionId { s.data.potion = potionId }
@@ -504,7 +504,7 @@ public final class TridentEntity: Projectile {
     }
     public override func onStuckTick() {
         // pickup
-        for e in world.getEntitiesNear(x, y, z, 1.4, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+        for e in world.getPlayersNear(x, y, z, 1.4) {
             if (e as? LivingEntity)?.give(stack) == true {
                 world.hooks.playSound("entity.item.pickup", x, y, z, 0.4, 1.2)
                 remove()

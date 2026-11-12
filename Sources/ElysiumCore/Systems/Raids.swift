@@ -100,7 +100,7 @@ public final class RaidManager {
                     // VICTORY
                     raid.victory = true
                     world.hooks.playSound("ui.toast.challenge_complete", Double(raid.cx), Double(raid.cy), Double(raid.cz), 4, 1)
-                    for p in world.getEntitiesNear(Double(raid.cx), Double(raid.cy), Double(raid.cz), 64, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+                    for p in world.getPlayersNear(Double(raid.cx), Double(raid.cy), Double(raid.cz), 64) {
                         (p as? LivingEntity)?.addEffect("hero_of_the_village", 48000, 0)
                     }
                     continue

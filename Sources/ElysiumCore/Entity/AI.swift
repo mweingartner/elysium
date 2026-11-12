@@ -330,11 +330,10 @@ open class Mob: LivingEntity {
         // despawn rules
         if !persistent && category == "monster" {
             var nearestPlayer = Double.infinity
-            for e in world.entities {
-                if let ent = e as? Entity, ent.isPlayer {
-                    let d = (ent.x - x) * (ent.x - x) + (ent.y - y) * (ent.y - y) + (ent.z - z) * (ent.z - z)
-                    nearestPlayer = min(nearestPlayer, d)
-                }
+            // Dead players count here too, as they always have: the index is not filtered by liveness.
+            for ent in world.playerEntities {
+                let d = (ent.x - x) * (ent.x - x) + (ent.y - y) * (ent.y - y) + (ent.z - z) * (ent.z - z)
+                nearestPlayer = min(nearestPlayer, d)
             }
             if nearestPlayer > 128 * 128 { remove(); return }
             if nearestPlayer > 32 * 32 && rng.nextFloat() < 1.0 / 800 { remove(); return }
@@ -664,7 +663,7 @@ public final class LookAtPlayerGoal: Goal {
     }
     public override func canUse() -> Bool {
         if mob.rng.nextFloat() > chance { return false }
-        let players = mob.world.getEntitiesNear(mob.x, mob.y, mob.z, range) { ($0 as? Entity)?.isPlayer ?? false }
+        let players = mob.world.getPlayersNear(mob.x, mob.y, mob.z, range)
         if players.isEmpty { return false }
         targetE = players[0] as? Entity
         return true
@@ -854,7 +853,7 @@ public final class TemptGoal: Goal {
         super.init(mob, priority)
     }
     public override func canUse() -> Bool {
-        let players = mob.world.getEntitiesNear(mob.x, mob.y, mob.z, 10) { ($0 as? Entity)?.isPlayer ?? false }
+        let players = mob.world.getPlayersNear(mob.x, mob.y, mob.z, 10)
         for p in players {
             guard let pl = p as? LivingEntity else { continue }
             if let held = pl.mainHand, items.contains(itemDef(held.id).name) {

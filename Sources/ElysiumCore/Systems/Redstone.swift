@@ -1081,7 +1081,7 @@ public func shriek(_ world: World, _ x: Int, _ y: Int, _ z: Int) {
     world.hooks.addParticles("sculk_soul", Double(x) + 0.5, Double(y) + 1, Double(z) + 0.5, 10, 0.3, 0)
     if world.getBlockEntity(x, y, z)?.canSummon == true {
         wardenWarnings += 1
-        for p in world.getEntitiesNear(Double(x), Double(y), Double(z), 16, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+        for p in world.getPlayersNear(Double(x), Double(y), Double(z), 16) {
             (p as? LivingEntity)?.addEffect("darkness", 200, 0)
         }
         if wardenWarnings >= 4 {

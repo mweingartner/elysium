@@ -780,8 +780,9 @@ open class LivingEntity: Entity {
     func pushEntities() {
         if dead || vehicle != nil { return }
         if let p = self as? Player, p.flying { return }
-        for e in world.entities {
-            guard let other = e as? LivingEntity, other !== self, !other.dead,
+        // Same candidates in the same order as walking `world.entities`, without a cast per pair.
+        for other in world.livingEntities {
+            guard other !== self, !other.dead,
                   other.deathTime == 0, other.vehicle !== self else { continue }
             let rx = (width + other.width) * 0.5
             if abs(other.x - x) >= rx || abs(other.z - z) >= rx { continue }

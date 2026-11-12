@@ -342,7 +342,7 @@ public func registerBlockEntityHandlers() {
         }
         guard levels > 0, skyOK, let primary = be.primary else { return }
         let range = Double(10 + levels * 10)
-        for e in world.getEntitiesNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, range, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+        for e in world.getPlayersNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, range) {
             guard let p = e as? LivingEntity else { continue }
             p.addEffect(primary, 260, levels >= 4 && be.secondary == primary ? 1 : 0, ambient: true)
             if levels >= 4 && be.secondary == "regeneration" { p.addEffect("regeneration", 260, 0, ambient: true) }
@@ -365,7 +365,7 @@ public func registerBlockEntityHandlers() {
         be.active = frame >= 16
         if be.active == true {
             let range = Double((frame / 7) * 16)
-            for e in world.getEntitiesNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, range, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+            for e in world.getPlayersNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, range) {
                 guard let p = e as? LivingEntity else { continue }
                 if p.inWater || world.rainLevel > 0.5 { p.addEffect("conduit_power", 260, 0, ambient: true) }
             }

@@ -83,7 +83,7 @@ public final class Warden: Monster {
         super.tick()
         // darkness pulse
         if age % 120 == 0 {
-            for p in world.getEntitiesNear(x, y, z, 20, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+            for p in world.getPlayersNear(x, y, z, 20) {
                 (p as? LivingEntity)?.addEffect("darkness", 260, 0)
             }
             world.hooks.playSound("entity.warden.heartbeat", x, y, z, 3, 0.8)
@@ -254,7 +254,7 @@ public final class EnderDragon: LivingEntity {
                     let px = x + dx / d * 6
                     let pz = z + dz / d * 6
                     world.hooks.addParticles("dragon_breath", px, 65, pz, 6, 1.2, 0)
-                    for pp in world.getEntitiesNear(px, 64, pz, 3, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+                    for pp in world.getPlayersNear(px, 64, pz, 3) {
                         (pp as? Entity)?.hurt(3, "magic", self)
                     }
                 }
@@ -269,7 +269,7 @@ public final class EnderDragon: LivingEntity {
             guard let p = nearestPlayer else { setPhase("circling"); break }
             flyToward(p.x, p.y, p.z, 0.12)
             // damage players hit
-            for pp in world.getEntitiesNear(x, y, z, 5, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+            for pp in world.getPlayersNear(x, y, z, 5) {
                 guard let pe = pp as? Entity else { continue }
                 pe.hurt(10, "mob", self)
                 pe.vx += vx * 2

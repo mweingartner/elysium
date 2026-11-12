@@ -868,7 +868,7 @@ public final class Dolphin: Animal {
         }
         // grace aura to nearby swimming players
         if age % 40 == 0 {
-            for p in world.getEntitiesNear(x, y, z, 9, filter: { ($0 as? Entity)?.isPlayer ?? false }) {
+            for p in world.getPlayersNear(x, y, z, 9) {
                 if let pl = p as? LivingEntity, pl.inWater { pl.addEffect("dolphins_grace", 100, 0) }
             }
         }

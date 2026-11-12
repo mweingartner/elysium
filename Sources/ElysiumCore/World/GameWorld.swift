@@ -118,7 +118,12 @@ public final class World {
     public let seed: UInt32
     public let generationSettings: WorldGenerationSettings
     public var chunks: [Int64: Chunk] = [:]
-    public var entities: [EntityRef] = []
+    public var entities: [EntityRef] = [] {
+        // Every gain, loss or reorder lands here (no `oldValue`, so mutation stays in place).
+        didSet { entityIndex.membershipChanged() }
+    }
+    /// Typed views of `entities` for per-tick readers; see WorldEntityIndex.swift.
+    var entityIndex = WorldEntityIndex()
     public var entityById: [Int: EntityRef] = [:]
     public let info: DimInfo
     public var time = 0            // total ticks elapsed (world age)

@@ -2,7 +2,7 @@
 // Existing surface spawning and dinosaur dawn populations keep their own rules.
 import Foundation
 
-private func eligibleMonsterSpawnPlayer(_ entity: Entity, in world: World) -> Bool {
+func eligibleMonsterSpawnPlayer(_ entity: Entity, in world: World) -> Bool {
     entity.world === world && entity.isPlayer && !entity.dead && !entity.lanReplicatedMirror
         && ((entity as? LivingEntity)?.health ?? 0) > 0
         && entity.x.isFinite && entity.y.isFinite && entity.z.isFinite
@@ -39,14 +39,22 @@ func monsterSpawnBodyFits(_ world: World, _ entity: Entity) -> Bool {
     }
 }
 
+/// Whether a player who can wake a spawner stands within `radius` of the point. Every loaded
+/// spawner asks this every tick, so it reads the world's player index (`World.getPlayersNear`);
+/// walking all entities for each spawner was most of a tick in a populated world.
+func eligibleMonsterSpawnPlayerIsNear(_ world: World, _ x: Double, _ y: Double, _ z: Double,
+                                      radius: Double) -> Bool {
+    world.getPlayersNear(x, y, z, radius).contains {
+        guard let player = $0 as? Entity else { return false }
+        return eligibleMonsterSpawnPlayer(player, in: world)
+    }
+}
+
 func tickMonsterSpawner(_ world: World, _ be: BlockEntityData) {
     guard !world.isTransientLANClient, world.difficulty > 0, world.rule("doMobSpawning"),
           world.getBlockId(be.x, be.y, be.z) == Int(B.spawner) else { return }
-    let near = world.getEntitiesNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 16) {
-        guard let entity = $0 as? Entity else { return false }
-        return eligibleMonsterSpawnPlayer(entity, in: world)
-    }
-    guard !near.isEmpty else { return }
+    guard eligibleMonsterSpawnPlayerIsNear(world, Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5,
+                                           radius: 16) else { return }
     if world.time % 10 == 0 {
         world.hooks.addParticles("flame", Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 1, 0.4, 0)
         world.hooks.addParticles("smoke", Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 1, 0.4, 0)
