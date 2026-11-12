@@ -5,6 +5,20 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.5.3 for the LAN container fix
+  below. Nothing on the wire or in a save changed; as always, both sides of a LAN game need
+  the same version.
+
+- **LAN guests see what the host takes from a chest.** When the host crafted from the containers
+  around it, or paid for a survival object placement from them, was paid back when the placement
+  finished, or undid it, guests were not told that those containers had changed. The regular
+  update only refreshes the eight containers nearest to a player, twice a second, so in a storage
+  room a guest could keep seeing a chest as it was before, and moving an item in it was refused.
+  The host now sends every container it changes this way with its next update.
+- Nothing else changes in play. Four rules that were written in several places are now written
+  once: what the plant in a flower pot costs, which facings a block can have, where a bed's head
+  lies from its foot, and how a door opens (for the player at the keyboard and for a LAN guest).
+
 - Bumped the release and exact-LAN-compatibility version to 1.5.2 for the frame-rate work
   below. Nothing on the wire or in a save changed; as always, both sides of a LAN game need
   the same version.
@@ -77,13 +91,6 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
   the same pays for them again, and undo does not return those. LAN guests pay too, from what they carry: the
   host takes the materials when it accepts a placement and pays them back on undo, and a guest
   places for free only in creative mode the host has granted.
-
-- **LAN guests see what the host takes from a chest.** When the host crafted from the containers
-  around it, or paid for a survival object placement from them, was paid back when the placement
-  finished, or undid it, guests were not told that those containers had changed. The regular
-  update only refreshes the eight containers nearest to a player, twice a second, so in a storage
-  room a guest could keep seeing a chest as it was before, and moving an item in it was refused.
-  The host now sends every container it changes this way with its next update.
 
 - **A block with a broken facing no longer stops the game.** Levers, buttons, redstone torches,
   hoppers, dispensers, droppers, pistons and observers keep the face they point at in their data.

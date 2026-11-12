@@ -289,7 +289,8 @@ EXPECTED_STORAGE_OBJECT_SHA256='7dd3d8314e6bd3067b1e3779d6ae52d63d009cb952175f5a
 # 1.5.0: only ELYSIUM_VERSION changes; was 267afa1690f7387c38184e8afeee40f296d2286f28429afa23988e7d762edc0a.
 # 1.5.1: only ELYSIUM_VERSION changes; was 5efb59a68a9e3272f07d2f55cd74a206790418884b0976399e08c13446589f0a.
 # 1.5.2: only ELYSIUM_VERSION changes; was ad5b30230fc26f5ce560d6f4f19b194af653b333c9a7d196f0f2c1ad1f4a3c8b.
-EXPECTED_SAVES_SOURCE_SHA256='d57fe19db18af945117e6d930b536bbc99685d410af2a21824d530d19101631e'
+# 1.5.3: only ELYSIUM_VERSION changes; was d57fe19db18af945117e6d930b536bbc99685d410af2a21824d530d19101631e.
+EXPECTED_SAVES_SOURCE_SHA256='15ba0f0f32c3352369627d4ea7082e024d514cd3789bb410dbb43c001561b328'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
 # 1.4.0: only the Saves.swift compiler-AST inventory entry moves (version literal); was
 # 377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb.
@@ -311,7 +312,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd
 # a2ada9b26583ce9e779d7474ae28967838c8d178ee109e90615287fd31637e21.
 # 1.5.2: only the Saves.swift compiler-AST entry moves (version literal); was
 # d7460949f9196af124019393d8e659f6e1cf4d542f27e1f8ae86cd0627a30848.
-EXPECTED_CORE_CAPABILITY_SHA256='91e68257872e272379e73546d4135b2b06003f9b2d15789001e2bb80f424d5ef'
+# 1.5.3: only the Saves.swift compiler-AST entry moves (version literal); was
+# 91e68257872e272379e73546d4135b2b06003f9b2d15789001e2bb80f424d5ef.
+EXPECTED_CORE_CAPABILITY_SHA256='5b9fd9b16ce9c7d1f40c7a07cdea00464068f8e57ee2de3f1e69a42eba63c8b6'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
 # Swift 6.4.2 toolchain (unchanged source): was d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444.
@@ -420,7 +423,12 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='8bc5318f0aceb95d67d92db8771b8fa1e0690a1fcd795
 # fewer (28 added, 65 removed). No checked-player caller changes: the getter/CAS counts and
 # spans below are as before.
 # Was cd7c28d5708ae39d826c7ee6e87923c9fe3d2e15a74f148d70565d4aa7f30bdb. See docs/release-1.5.1-build.md.
-EXPECTED_GAME_CORE_SOURCE_SHA256='26842de4ba112155857c4581680002d97e6634b33acce82681c314f91c5c9952'
+# 1.5.3 (LAN guests are told about containers the host's paste or crafting changed): GameCore
+# gains onWorldContainerItemsChanged, and hookWorld forwards WorldHooks.onContainerItemsChanged
+# to it unless the world is a LAN client's mirror. 7 lines added, none removed. No checked-player
+# caller changes: the getter/CAS counts and spans below are as before.
+# Was 26842de4ba112155857c4581680002d97e6634b33acce82681c314f91c5c9952. See docs/release-1.5.3-build.md.
+EXPECTED_GAME_CORE_SOURCE_SHA256='cc9d46a31f4b7f6deebdcbfb3ea0536ba34ec2c258fa2175e63660fc854d2b86'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -548,7 +556,18 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='26842de4ba112155857c4581680002d97e6634b33acce8
 # touched: GameCore.swift, Player.swift, the storage and text-input sources and objects are
 # byte-identical. Was
 # 71f838aa12382af6e221157f1db1adc18602f939ba688233891c840dc6f0ce26. See docs/release-1.5.2-build.md.
-EXPECTED_CORE_OBJECT_SHA256='fb78dfd681a47a6dea407497a6fb2270202478eb2a3707cd20c3f083e0d16917'
+# 1.5.3 (containers the host's paste or crafting changed reach LAN guests; one owner for four
+# rules): the Core object moves for WorldHooks.onContainerItemsChanged (GameWorld.swift) and its
+# call from CraftingResourceOwner.markDirty (Crafting.swift), the GameCore capture above, the
+# bounded drain of dirty block entities and drainDirtyBlockEntitySnapshots (LANReplication.swift),
+# isDir and the six facing guards that ask it (Dirs.swift, BlockEntities.swift, Redstone.swift),
+# templateBlockEntityCharge and its three readers (TemplateMaterials.swift,
+# TemplateMaterialLedger.swift), the bed compass read from FACE_DX and FACE_DZ and toggleDoor
+# (TwoCellBlocks.swift) with its two callers (Interact.swift, LANReplication.swift), and the
+# version literal. No save format, wire shape or storage call changes: Player.swift, the storage
+# and text-input sources and objects are byte-identical. Was
+# fb78dfd681a47a6dea407497a6fb2270202478eb2a3707cd20c3f083e0d16917. See docs/release-1.5.3-build.md.
+EXPECTED_CORE_OBJECT_SHA256='10569fc33fc719c54c1584fd4c4795ee7b0f9127b32ca3c0083fca377d532a9b'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -650,8 +669,14 @@ EXPECTED_CORE_OBJECT_SHA256='fb78dfd681a47a6dea407497a6fb2270202478eb2a3707cd20c
 # still 19eb940. Were
 # 1204aac25fa10e5c4124da7deeb15a8fbd5b8cad57989ef515251785874b9845 (Elysium) and
 # 57df2019305dfc044293edf0f88606e7895714c334e66a60dc414c92b2ff83e2 (elysmoke).
-EXPECTED_ELYSIUM_PRODUCT_SHA256='93151337a9dd55527ba0aa86362f830c4b3d85059ad60a03d5f6c0135b19fab6'
-EXPECTED_SMOKE_PRODUCT_SHA256='8802e8102430d8e432617909f0684f49b115549937e21960104af17125bb34b9'
+# 1.5.3: the Elysium product relinks the Core changes above and changes LANTransport.swift (the
+# host marks a container the game rewrote as dirty for its guests, a delta takes its dirty block
+# entities from the session's bounded drain, and the hook is cleared for a client and on reset);
+# elysmoke only relinks Core. Atrium still 19eb940. Were
+# 93151337a9dd55527ba0aa86362f830c4b3d85059ad60a03d5f6c0135b19fab6 (Elysium) and
+# 8802e8102430d8e432617909f0684f49b115549937e21960104af17125bb34b9 (elysmoke).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='6b859a7a8381282f0d86263eba423e2e89b373cf783fe4e9500aa70bc76ffb4d'
+EXPECTED_SMOKE_PRODUCT_SHA256='5c11aac9ac5705b33172f7b082215edd895ea0cb0cc2896b4fdc8be2c4d2c4c2'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
