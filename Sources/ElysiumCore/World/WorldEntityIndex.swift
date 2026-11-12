@@ -50,12 +50,21 @@ extension World {
     /// `getEntitiesNear` returns when filtered to `Entity.isPlayer`, found without visiting
     /// anything that is not a player.
     public func getPlayersNear(_ x: Double, _ y: Double, _ z: Double, _ radius: Double) -> [EntityRef] {
+        World.liveMembers(of: playerEntities, within: radius, x, y, z, filter: nil)
+    }
+
+    /// The one statement of what "near" means for `getEntitiesNear` and `getPlayersNear`: not
+    /// dead, and no farther than `radius` from the point, measured to the entity's position.
+    /// Candidates keep their order; `filter` is asked only about those in range.
+    static func liveMembers(of candidates: [EntityRef], within radius: Double,
+                            _ x: Double, _ y: Double, _ z: Double,
+                            filter: ((EntityRef) -> Bool)?) -> [EntityRef] {
         let r2 = radius * radius
         var out: [EntityRef] = []
-        for player in playerEntities {
-            if player.dead { continue }
-            let dx = player.x - x, dy = player.y - y, dz = player.z - z
-            if dx * dx + dy * dy + dz * dz <= r2 { out.append(player) }
+        for e in candidates {
+            if e.dead { continue }
+            let dx = e.x - x, dy = e.y - y, dz = e.z - z
+            if dx * dx + dy * dy + dz * dz <= r2 && (filter?(e) ?? true) { out.append(e) }
         }
         return out
     }

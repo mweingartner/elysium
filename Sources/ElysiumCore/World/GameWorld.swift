@@ -797,14 +797,7 @@ public final class World {
         return out
     }
     public func getEntitiesNear(_ x: Double, _ y: Double, _ z: Double, _ radius: Double, filter: ((EntityRef) -> Bool)? = nil) -> [EntityRef] {
-        let r2 = radius * radius
-        var out: [EntityRef] = []
-        for e in entities {
-            if e.dead { continue }
-            let dx = e.x - x, dy = e.y - y, dz = e.z - z
-            if dx * dx + dy * dy + dz * dz <= r2 && (filter?(e) ?? true) { out.append(e) }
-        }
-        return out
+        World.liveMembers(of: entities, within: radius, x, y, z, filter: filter)
     }
 
     // MARK: - vibrations (sculk)
