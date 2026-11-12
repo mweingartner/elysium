@@ -218,6 +218,9 @@ final class WorldRendererIntegrationTests: XCTestCase {
             _ = try game.persistAndPublishSettingsCandidate(settings, expectedLiveRevision: game.settingsRevision).get()
             try render(renderer, game: game, device: device, width: 64, height: 64)
             XCTAssertEqual(renderer.rayTracingActive, mode == .rayTraced, renderer.rayTracingDiagnostics.status)
+            // Raster frames cull the uploaded section into view; a ray-traced frame skips that walk.
+            XCTAssertEqual(renderer.cullingStats.totalSections, 1)
+            XCTAssertEqual(renderer.cullingStats.visibleSections, renderer.rayTracingActive ? 0 : 1, "\(mode)")
             // Odd dimensions catch reciprocal viewport/depth-copy and half-resolution edge bugs.
             try render(renderer, game: game, device: device, width: 96, height: 55)
             XCTAssertEqual(renderer.rayTracingActive, mode == .rayTraced, renderer.rayTracingDiagnostics.status)

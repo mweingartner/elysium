@@ -1722,5 +1722,133 @@ final class RayTracedWorldRendererTests: XCTestCase {
         XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
         XCTAssertEqual(f.renderer.diagnostics.historySamples, 1)
     }
+
+    // MARK: - Selection stamp (independent review)
+
+    /// The renderer's selection as it holds it: the ordered keys, which sections carry the current
+    /// stamp, and every loaded key. Read by reflection, so nothing is added to production code.
+    private func selectionState(_ renderer: RayTracedWorldRenderer)
+        -> (ordered: [SectionKey], stamped: Set<SectionKey>, loaded: Set<SectionKey>) {
+        let children = Mirror(reflecting: renderer).children
+        func field<T>(_ object: Any, _ label: String, as: T.Type) -> T? {
+            Mirror(reflecting: object).children.first { $0.label == label }?.value as? T
+        }
+        let stamp = children.first { $0.label == "selectionStamp" }?.value as? UInt64
+        XCTAssertNotNil(stamp, "the renderer's current selection stamp")
+        let cache = children.first { $0.label == "selectionCache" }?.value
+        let ordered = cache.map { Mirror(reflecting: $0).children.compactMap { field($0.value, "key", as: SectionKey.self) } } ?? []
+        var stamped = Set<SectionKey>(), loaded = Set<SectionKey>()
+        if let sections = children.first(where: { $0.label == "sections" })?.value {
+            for entry in Mirror(reflecting: sections).children {
+                let pair = Mirror(reflecting: entry.value).children.map(\.value)
+                guard pair.count == 2, let key = pair[0] as? SectionKey,
+                      let sectionStamp = field(pair[1], "selectionStamp", as: UInt64.self) else {
+                    XCTFail("unexpected section dictionary layout"); continue
+                }
+                loaded.insert(key)
+                if sectionStamp == stamp { stamped.insert(key) }
+            }
+        }
+        return (ordered, stamped, loaded)
+    }
+
+    /// The selection the renderer computed before the stamp: filter by horizontal distance, sort
+    /// by (distance, cx, cz, sy), and a key set for membership.
+    private func referenceSelection(_ keys: Set<SectionKey>, camera: SIMD3<Double>, range: Double) -> [SectionKey] {
+        keys.filter {
+            let dx = Double($0.cx * 16 + 8) - camera.x, dz = Double($0.cz * 16 + 8) - camera.z
+            return dx * dx + dz * dz <= range * range
+        }.map { key -> (distance: Double, key: SectionKey) in
+            let dx = Double(key.cx * 16 + 8) - camera.x, dz = Double(key.cz * 16 + 8) - camera.z
+            return (dx * dx + dz * dz, key)
+        }.sorted { a, b in
+            if a.distance != b.distance { return a.distance < b.distance }
+            if a.key.cx != b.key.cx { return a.key.cx < b.key.cx }
+            if a.key.cz != b.key.cz { return a.key.cz < b.key.cz }
+            return a.key.sy < b.key.sy
+        }.map(\.key)
+    }
+
+    private func renderDiscarding(_ f: Fixture, frame: RayTracingFrame) throws {
+        let command = try XCTUnwrap(f.queue.makeCommandBuffer())
+        _ = f.renderer.render(command: command, frame: frame, atlas: f.atlas, entities: [])
+        command.commit(); command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed, String(describing: command.error))
+    }
+
+    func testSelectionOrderAndStampMatchTheKeySetSelectionAcrossUploadsRemovalsAndClear() throws {
+        let f = try fixture(memoryBudgetOverride: 256 * 1_024 * 1_024)
+        var seed: UInt64 = 0x5E1EC7
+        func next(_ bound: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(bound))
+        }
+        let tiny = mesh(opaque: plane(distance: 4, halfSize: 0.5))
+        var compared = 0, partial = 0
+        for round in 0..<10 {
+            f.renderer.clear()
+            var loaded = Set<SectionKey>()
+            for _ in 0..<(40 + next(160)) {
+                let key = SectionKey(cx: next(25) - 12, sy: next(4), cz: next(25) - 12)
+                f.renderer.uploadSection(key: key, minY: 0, mesh: tiny); loaded.insert(key)
+            }
+            XCTAssertTrue(selectionState(f.renderer).stamped.isEmpty,
+                          "round \(round): after clear nothing is selected until the next selection")
+            var view = frame()
+            for step in 0..<4 {
+                // Camera on chunk-centre-aligned and fractional positions, so distance ties occur.
+                let cx = Double(next(9) - 4) * 16 + (step % 2 == 0 ? 8 : Double(next(1_000)) / 100)
+                let cz = Double(next(9) - 4) * 16 + (step % 2 == 0 ? 8 : Double(next(1_000)) / 100)
+                view.camera = SIMD3<Double>(cx, 0, cz)
+                view.atmosphere.cameraTime.x = Float(cx)
+                view.renderDistance = [16, 40, 72, 136][next(4)]
+                try renderDiscarding(f, frame: view)
+                let state = selectionState(f.renderer)
+                let expected = referenceSelection(loaded, camera: view.camera, range: Double(view.renderDistance + 24))
+                XCTAssertEqual(state.loaded, loaded, "round \(round) step \(step)")
+                XCTAssertEqual(state.ordered, expected, "round \(round) step \(step): same order as the old sort")
+                XCTAssertEqual(state.stamped, Set(expected), "round \(round) step \(step): stamp == old key set")
+                compared += 1
+                if !expected.isEmpty && expected.count < loaded.count { partial += 1 }
+                // Between frames: replace some selected sections, empty some, unload a column.
+                for key in expected.prefix(3) { f.renderer.uploadSection(key: key, minY: 0, mesh: tiny) }
+                if let key = expected.dropFirst(3).first {
+                    f.renderer.uploadSection(key: key, minY: 0, mesh: mesh()); loaded.remove(key)
+                }
+                if let key = loaded.first(where: { $0.cx == expected.last?.cx && $0.cz == expected.last?.cz }) {
+                    f.renderer.removeChunk(cx: key.cx, cz: key.cz, sectionCount: 4)
+                    loaded = loaded.filter { $0.cx != key.cx || $0.cz != key.cz }
+                }
+            }
+        }
+        XCTAssertEqual(compared, 40)
+        XCTAssertGreaterThan(partial, 20, "the radius must split the loaded set, not include or exclude all of it")
+    }
+
+    func testRemeshedSelectedFarSectionKeepsItsPresentedBLASWhenPressureShedsTheCache() throws {
+        let f = try fixture(memoryBudgetOverride: 64 * 1_024 * 1_024), view = frame()
+        // 56.6 blocks away: beyond the near radius, so its rebuild may be deferred.
+        let far = SectionKey(cx: 0, sy: 0, cz: -4)
+        f.renderer.uploadSection(key: far, minY: 0, mesh: mesh(opaque: plane(distance: 2, halfSize: 40)))
+        _ = try render(f, frame: view)
+        let steady = try render(f, frame: view)
+        XCTAssertEqual(steady.depthAt(16, 16), expectedDepth(distance: 66, frame: view), accuracy: 0.00001)
+        let noOpPeak = f.renderer.diagnostics.geometryBytes
+
+        // No slack for a new BLAS: admission sheds every unselected section's geometry and then
+        // defers the rebuild. The replacement Section is selected, so its previous BLAS stays.
+        f.renderer.memoryBudgetOverride = noOpPeak
+        f.renderer.uploadSection(key: far, minY: 0, mesh: mesh(opaque: bigPlaneLayer(quads: 4_096, distanceOffset: 6)))
+        let stale = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.deferredSections, 0)
+        XCTAssertEqual(f.renderer.diagnostics.staleSections, 1)
+        XCTAssertEqual(stale.depthAt(16, 16), expectedDepth(distance: 66, frame: view), accuracy: 0.00001,
+                       "the selected, remeshed section keeps presenting its previous BLAS")
+
+        f.renderer.memoryBudgetOverride = 64 * 1_024 * 1_024
+        let rebuilt = try render(f, frame: view)
+        XCTAssertEqual(f.renderer.diagnostics.staleSections, 0)
+        XCTAssertEqual(rebuilt.depthAt(16, 16), expectedDepth(distance: 74, frame: view), accuracy: 0.001)
+    }
 #endif
 }

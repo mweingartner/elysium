@@ -679,9 +679,14 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   model, GPU tests) inflates GPU time two to four times. Compare builds by the tenth percentile
   and record the load. The harness and its numbers are in
   [the 1.5.2 record](docs/release-1.5.2-build.md).
-- Revisit if a tick grows with entity count again (profile `World.tick` first; the remaining
-  whole-list readers are `getEntitiesNear` and `getEntitiesInBox`, each called by code that is
-  itself rare or interval-gated), or if flight has to hold 120 fps.
+- Not converted, on purpose: the readers whose question is not exactly "players near a
+  point". `NearestTargetGoal` (every tenth tick per hunting mob), the XP-orb magnet, the Warden's
+  sniff and the Wither's target search still walk `entities`, and `CreatureRespawn` has its own
+  definition of a player who can make things spawn (without the mirror and height checks of
+  `eligibleMonsterSpawnPlayer`). None showed in the profile; each can move to `playerEntities`
+  or `livingEntities` with an oracle test like the ones here.
+- Revisit if a tick grows with entity count again (profile `World.tick` first), or if flight
+  has to hold 120 fps.
 
 ### Release test impact selection — September 25, 2026
 
