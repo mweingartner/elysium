@@ -115,16 +115,27 @@ private struct MapColorGridKey: Equatable {
     let step: Double
     let referenceY: Int
 }
-private var mapColorGridCache: (key: MapColorGridKey, colors: [SIMD4<Float>], age: Int)?
+private var mapColorGridCache: (key: MapColorGridKey, colors: [SIMD4<Float>], age: Int, generation: UInt64)?
 private let mapColorGridRefreshFrames = 10
+private var mapColorGridGeneration: UInt64 = 0
+
+/// The quads of one drawn colour grid, replayed while the grid and where it is drawn stay the
+/// same. A still minimap is thousands of cells; emitting them again every frame was the largest
+/// part of drawing the HUD.
+private struct MapGridQuadsKey: Equatable {
+    let generation: UInt64
+    let samples: Int
+    let x: Double, y: Double, cellSize: Double
+}
+private var mapGridQuads: (key: MapGridQuadsKey, quads: UICanvas.RecordedQuads)?
 
 private func mapColorGrid(world: World, samples: Int, worldMinX: Double, worldMinZ: Double,
-                          step: Double, referenceY: Int) -> [SIMD4<Float>] {
+                          step: Double, referenceY: Int) -> (colors: [SIMD4<Float>], generation: UInt64) {
     let key = MapColorGridKey(world: ObjectIdentifier(world), samples: samples, worldMinX: worldMinX,
                               worldMinZ: worldMinZ, step: step, referenceY: referenceY)
     if let cached = mapColorGridCache, cached.key == key, cached.age < mapColorGridRefreshFrames {
-        mapColorGridCache = (key, cached.colors, cached.age + 1)
-        return cached.colors
+        mapColorGridCache = (key, cached.colors, cached.age + 1, cached.generation)
+        return (cached.colors, cached.generation)
     }
     let rules = mapColorRules()
     var colors = [SIMD4<Float>]()
@@ -136,8 +147,9 @@ private func mapColorGrid(world: World, samples: Int, worldMinX: Double, worldMi
             colors.append(mapColorForBlock(world, x, z, referenceY: referenceY, rules: rules))
         }
     }
-    mapColorGridCache = (key, colors, 0)
-    return colors
+    mapColorGridGeneration &+= 1
+    mapColorGridCache = (key, colors, 0, mapColorGridGeneration)
+    return (colors, mapColorGridGeneration)
 }
 
 func drawMapOverlay(_ ui: UIManager, _ game: GameCore,
@@ -172,20 +184,29 @@ func drawMapOverlay(_ ui: UIManager, _ game: GameCore,
     let referenceY = Int(boundedPlayerY.rounded(.down))
 
     let world = game.world
-    let colors = mapColorGrid(world: world, samples: samples, worldMinX: worldMinX, worldMinZ: worldMinZ,
-                              step: step, referenceY: referenceY)
-    for row in 0..<samples {
-        let y = innerY + Double(row) * cellSize
-        // Adjacent cells with an identical colour are one quad: same pixels, far fewer vertices.
-        var col = 0
-        while col < samples {
-            let color = colors[row * samples + col]
-            var end = col + 1
-            while end < samples, colors[row * samples + end] == color { end += 1 }
-            cv.fillStyle = color
-            cv.fillRect(innerX + Double(col) * cellSize, y, Double(end - col) * cellSize + 0.15, cellSize + 0.15)
-            col = end
+    let (colors, generation) = mapColorGrid(world: world, samples: samples, worldMinX: worldMinX,
+                                            worldMinZ: worldMinZ, step: step, referenceY: referenceY)
+    let quadsKey = MapGridQuadsKey(generation: generation, samples: samples, x: innerX, y: innerY,
+                                   cellSize: cellSize)
+    if let cached = mapGridQuads, cached.key == quadsKey, cv.replay(cached.quads) {
+        // Same colours in the same place under the same canvas state: the same quads.
+    } else {
+        let recorded = cv.record {
+            for row in 0..<samples {
+                let y = innerY + Double(row) * cellSize
+                // Adjacent cells with an identical colour are one quad: same pixels, far fewer vertices.
+                var col = 0
+                while col < samples {
+                    let color = colors[row * samples + col]
+                    var end = col + 1
+                    while end < samples, colors[row * samples + end] == color { end += 1 }
+                    cv.fillStyle = color
+                    cv.fillRect(innerX + Double(col) * cellSize, y, Double(end - col) * cellSize + 0.15, cellSize + 0.15)
+                    col = end
+                }
+            }
         }
+        mapGridQuads = recorded.map { (quadsKey, $0) }
     }
 
     cv.setStroke(expanded ? "rgba(255,255,255,0.78)" : "rgba(255,255,255,0.55)")

@@ -563,6 +563,34 @@ ordering. The shadow pass also applies a conservative light-frustum AABB test af
 check. GPU occlusion/HZB is intentionally not enabled without movement/teleport/chunk-invalidation
 grace logic and measured frame-time evidence; false occlusion is a correctness failure.
 
+Those section counters describe the raster layers. A ray-traced frame draws none of them, so the
+renderer skips that walk and the counters read zero while `rayTracing.active` is true.
+
+The same scope carries `frameTiming`, the frame-rate evidence for world frames (title and menu
+frames are not recorded). It has two windows, `trailing10Seconds` and `trailing30Seconds`, each
+with:
+
+| Field | Meaning |
+|---|---|
+| `frames`, `seconds` | Frames in the window and the time they took. |
+| `averageFPS` | Frames divided by that time. |
+| `onePercentLowFPS` | Frame rate of the slowest 1% of frames (at least one frame). |
+| `shareOver60FPSFrame`, `shareOver30FPSFrame` | Share of frames (0...1) longer than 16.7 ms and than 33.3 ms. |
+| `intervalMilliseconds` | Time from one frame's draw call to the next: what the player sees. |
+| `cpuMilliseconds` | Main-thread work in the draw call, without the wait for a drawable. |
+| `drawableWaitMilliseconds` | Time blocked waiting for a free drawable. Large means the GPU or the display is the limit; near zero means the main thread is. |
+| `simulationMilliseconds`, `worldMilliseconds`, `interfaceMilliseconds` | Parts of the main-thread work: `GameCore.frame`, `WorldRenderer.render`, and the first-person view, HUD and open screen. |
+| `gpuMilliseconds`, `gpuFrames` | GPU execution time of the frame's command buffer, over the frames the GPU has reported. |
+| `slowestFrames` | The eight slowest frames with the same parts, for seeing what a stutter was made of. |
+
+Each `...Milliseconds` distribution has `p10`, `median`, `p95`, `p99` and `maximum`. On a machine
+that is doing other work, compare builds by `p10` (close to the undisturbed cost) and state the
+load next to any average. `rayTracing.gpuStageMedianMilliseconds` is the median of the last 64
+sampled frames per GPU stage; `gpuStageMilliseconds` remains the single latest sample, which
+other GPU work on the machine can double. A debug app draws only while it is the active app, so a
+measurement needs its window in front for the whole window of time. The F3 overlay shows the
+ten-second figures on one line (`Frames: 1% low ... CPU ... GPU ...`) in every build.
+
 Load-bearing request bounds include:
 
 | Resource | Bound |

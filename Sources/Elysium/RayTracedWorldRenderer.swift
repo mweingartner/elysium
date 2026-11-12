@@ -65,6 +65,8 @@ final class RayTracedWorldRenderer {
         /// rebuilt in the same frame, and farther ones rebuild nearest-first within the budget.
         var staleGeometry: Geometry?
         var presented: Geometry? { geometry ?? staleGeometry }
+        /// The selection that last included this section; see `selectionStamp`.
+        var selectionStamp: UInt64 = 0
         init(key: SectionKey,minY: Int,mesh: MeshOutput,revision: UInt64) {
             self.key=key; self.minY=minY; self.mesh=mesh; self.revision=revision
             triangleEstimate=(mesh.opaque.idx.count+mesh.cutout.idx.count+mesh.translucent.idx.count)/3
@@ -123,7 +125,10 @@ final class RayTracedWorldRenderer {
     private let whiteTexture: MTLTexture
     private let emptyLocalLightTexture: MTLTexture
     private var sections: [SectionKey: Section] = [:]
-    private var requiredSectionKeys: Set<SectionKey> = []
+    /// Identifies the current selection. A section is in it when its own stamp matches: the
+    /// same question a set of ~8k keys used to answer, without hashing them on every refresh.
+    private var selectionStamp: UInt64 = 1
+    private func isSelected(_ section: Section) -> Bool { section.selectionStamp == selectionStamp }
     private var entities: [String: Geometry] = [:]
     private var sectionsRevision: UInt64 = 1
     /// Distance-ordered selection reused across frames. Sorting ~8k sections every frame cost
@@ -298,7 +303,7 @@ final class RayTracedWorldRenderer {
             // complete selected scene that would otherwise fit. Drop those BLAS references
             // before retrying admission. Submitted frames retain their own references, so
             // their bytes remain charged until real GPU completion and cannot be overspent.
-            for section in sections.values where !requiredSectionKeys.contains(section.key) {
+            for section in sections.values where !isSelected(section) {
                 section.geometry=nil; section.staleGeometry=nil
             }
             refreshMemoryDiagnostics()
@@ -326,7 +331,7 @@ final class RayTracedWorldRenderer {
     }
     func clear() {
         sections.removeAll(); entities.removeAll(); previousTransforms.removeAll(); compactionQueue.removeAll()
-        requiredSectionKeys.removeAll(); selectionCache.removeAll(); selectionCacheRange = -1
+        selectionStamp &+= 1; selectionCache.removeAll(); selectionCacheRange = -1
         hasPresentedScene=false; consecutiveFallbackFrames=0
         sectionsRevision &+= 1; historyFrames=0; sampleIndex=0; allocationFailure=nil
         memoryPressureReason=nil
@@ -408,7 +413,7 @@ final class RayTracedWorldRenderer {
             guard sections[section.key] === section,let geometry=section.geometry,
                   let ticket=geometry.compaction else { continue }
             // Out-of-selection margin sections are left to ordinary eviction, not compacted.
-            guard requiredSectionKeys.contains(section.key) else { remaining.append(section); continue }
+            guard isSelected(section) else { remaining.append(section); continue }
             guard let outcome=ticket.batch.outcome else { remaining.append(section); continue }
             guard outcome else { geometry.compaction=nil; continue }
             guard compacted<Self.compactionsPerFrame else { remaining.append(section); continue }
@@ -586,20 +591,26 @@ final class RayTracedWorldRenderer {
         let cameraShift=cameraXZ-selectionCacheCamera
         if selectionCacheRevision != sectionsRevision || selectionCacheRange != range
             || !(simd_length_squared(cameraShift) < Self.selectionRefreshDistance*Self.selectionRefreshDistance) {
-            selectionCache=sections.values.filter {
-                let dx=Double($0.key.cx*16+8)-frame.camera.x, dz=Double($0.key.cz*16+8)-frame.camera.z
-                return dx*dx+dz*dz <= range*range
-            }.map { section -> (distance: Double,section: Section) in
+            // One pass and one sort over plain values: the order key sits beside each section,
+            // so comparing never follows a reference. Same order as before: distance, then
+            // (cx, cz, sy), which also separates the stacked sections of one chunk column.
+            var ordered: [(distance: Double,key: SectionKey,section: Section)]=[]
+            ordered.reserveCapacity(sections.count)
+            for section in sections.values {
                 let dx=Double(section.key.cx*16+8)-frame.camera.x, dz=Double(section.key.cz*16+8)-frame.camera.z
-                return (dx*dx+dz*dz,section)
-            }.sorted { a,b in
+                let distance=dx*dx+dz*dz
+                if distance <= range*range { ordered.append((distance,section.key,section)) }
+            }
+            ordered.sort { a,b in
                 if a.distance != b.distance { return a.distance<b.distance }
-                if a.section.key.cx != b.section.key.cx { return a.section.key.cx<b.section.key.cx }
-                if a.section.key.cz != b.section.key.cz { return a.section.key.cz<b.section.key.cz }
-                return a.section.key.sy<b.section.key.sy
-            }.map(\.section)
+                if a.key.cx != b.key.cx { return a.key.cx<b.key.cx }
+                if a.key.cz != b.key.cz { return a.key.cz<b.key.cz }
+                return a.key.sy<b.key.sy
+            }
+            selectionCache=ordered.map(\.section)
             selectionCacheRevision=sectionsRevision; selectionCacheRange=range; selectionCacheCamera=cameraXZ
-            requiredSectionKeys=Set(selectionCache.map(\.key))
+            selectionStamp &+= 1
+            for section in selectionCache { section.selectionStamp=selectionStamp }
             // Retain a narrow margin beyond selection: walking back across a chunk/radius boundary
             // should not continually destroy and rebuild the same BLAS. Only admitted geometry
             // enters the scene.
@@ -783,11 +794,17 @@ final class RayTracedWorldRenderer {
         structures.reserveCapacity(instances.count)
         sceneResources.reserveCapacity(instances.count+RayTracingLimits.maximumTextures+1)
         for instance in instances {
-            let geometry=instance.geometry,identity=ObjectIdentifier(geometry)
+            let geometry=instance.geometry
             let structureIndex: Int
-            if let existing=structureSlots[identity] { structureIndex=existing }
+            // A terrain section owns its BLAS, so its slot is always new. Only entity and block
+            // instances share one BLAS per model and need the lookup; hashing every section
+            // into a fresh dictionary each frame cost more than the rest of this loop.
+            if !instance.dynamic {
+                structureIndex=structures.count
+                structures.append(geometry.structure); sceneResources.append(geometry.structure)
+            } else if let existing=structureSlots[ObjectIdentifier(geometry)] { structureIndex=existing }
             else {
-                structureIndex=structures.count; structureSlots[identity]=structureIndex
+                structureIndex=structures.count; structureSlots[ObjectIdentifier(geometry)]=structureIndex
                 structures.append(geometry.structure); sceneResources.append(geometry.structure)
             }
             var descriptor=MTLAccelerationStructureInstanceDescriptor()

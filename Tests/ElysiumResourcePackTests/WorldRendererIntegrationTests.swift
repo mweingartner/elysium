@@ -55,6 +55,7 @@ final class WorldRendererIntegrationTests: XCTestCase {
         XCTAssertEqual(staged.texture.mipmapLevelCount, 3)
         renderer.installStagedWorldAtlas(staged)
         renderer.tickTileAnimations(dtMs: 50)
+        renderer.waitForStagedTileAnimations()      // tiles are built off the main thread
         let command = try XCTUnwrap(renderer.queue.makeCommandBuffer())
         renderer.flushAtlasUploads(command)
         if staged.texture.storageMode == .managed {

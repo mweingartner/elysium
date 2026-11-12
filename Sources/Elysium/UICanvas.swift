@@ -206,6 +206,38 @@ final class UICanvas {
         push(p0, u0, v0, ct); push(p2, u1, v1, cb); push(p3, u0, v1, cb)
     }
 
+    /// The plain quads one drawing pass emitted, with the canvas state that shaped them.
+    struct RecordedQuads {
+        fileprivate let vertices: [Float]
+        fileprivate let transform: simd_float3x3
+        fileprivate let alpha: Float
+        fileprivate let fillAfter: SIMD4<Float>
+    }
+
+    /// Runs `draw` and returns what it emitted, so a picture that has not changed can be replayed
+    /// next frame instead of being worked out again. Nil when `draw` switched texture or left the
+    /// transform or alpha changed: such a pass cannot be replayed as one run of plain quads.
+    func record(_ draw: () -> Void) -> RecordedQuads? {
+        mark(.atlas)
+        let start = verts.count, segmentCount = segments.count
+        let transformBefore = transform, alphaBefore = globalAlpha
+        draw()
+        guard segments.count == segmentCount, currentTextureSource == .atlas,
+              simd_equal(transform, transformBefore), globalAlpha == alphaBefore else { return nil }
+        return RecordedQuads(vertices: Array(verts[start...]), transform: transformBefore,
+                             alpha: alphaBefore, fillAfter: fillStyle)
+    }
+
+    /// Emits a recording again: the same vertices and the same fill colour left behind. False
+    /// (nothing emitted) when the transform or alpha differ from the recording's.
+    func replay(_ recorded: RecordedQuads) -> Bool {
+        guard simd_equal(recorded.transform, transform), recorded.alpha == globalAlpha else { return false }
+        mark(.atlas)
+        verts.append(contentsOf: recorded.vertices)
+        fillStyle = recorded.fillAfter
+        return true
+    }
+
     private let whiteUV: (Float, Float, Float, Float) = (4.0 / 1024, 4.0 / 1024, 8.0 / 1024, 8.0 / 1024)
 
     func fillRect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) {

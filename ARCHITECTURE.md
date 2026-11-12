@@ -623,6 +623,66 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   establishes the conversion supplied by an sRGB format, which our existing
   BGRA8Unorm drawable does not perform automatically.
 
+### Frame rate: per-tick entity walks and main-thread frame work — November 11, 2026
+
+- User report: "the frame rate is pretty bad", right after 1.5.0. Measured in the player's own
+  worlds (clones of the real profile, never the profile itself) with their settings: Ray Traced,
+  16 chunks, 120 fps cap, 2880 x 1620 drawable, M5 Max. Standing at the saved spot of a Rich
+  Resources world gave 46 fps with a 1% low of 21; flying over it gave 21 fps with a 1% low
+  of 10. A Jurassic world gave 64 and 20. 1.4.6 measured the same as 1.5.0, so 1.5.0 did not
+  cause it.
+- Cause established by sampling the main thread: the GPU needed about 6 ms a frame, but one
+  simulation tick took about 30 ms. `tickMonsterSpawner` asked whether a player stood within 16
+  blocks by walking every entity in the world, for every loaded spawner, every tick (since 1.3.0).
+  With 1,100 entities and 1,225 loaded chunks that walk was 73% of the main thread. Flying fell
+  further behind because each slow frame owed more ticks.
+- One concept, held in one place: fourteen call sites and two loops found "the players" or "the
+  living entities" by walking and casting `World.entities` (mob goals, projectiles, bosses,
+  beacons, conduits, raids, sculk, the monster despawn rule, the crowd push). `World` now owns
+  `playerEntities`, `livingEntities` and `getPlayersNear` (`WorldEntityIndex.swift`). The lists
+  are rebuilt only after `entities` itself changes (its `didSet` moves a revision), keep
+  `entities` order, and never cache liveness, position or eligibility, so every reader gets the
+  members the walk gave in the same order. `getEntitiesNear` is unchanged for queries about
+  other entities.
+- Proof of equivalence: `WorldEntityIndexTests` compares each new reader with the walk it
+  replaces over random worlds (dead, zero-health, mirrored, out-of-world and NaN players, LAN
+  guests, non-`Entity` members), compares `pushEntities` bit for bit with the old loop on
+  crowded pens, and asserts that a sleeping spawner reads no non-player entity and draws no
+  random number. elysmoke stays at 491 with no golden regenerated.
+- Main-thread work that every frame carried, removed without changing the picture:
+  animated atlas tiles (blend, mip chain, staging buffer) are built on a private queue and
+  blitted at the start of a later frame, as before but one frame later
+  (`AtlasAnimationStager`); the ray scene's distance-ordered selection sorts plain values and
+  marks membership with a stamp on each section instead of hashing 8k keys into a set; a
+  terrain section no longer goes through the BLAS-sharing dictionary that only entity models
+  need; a ray-traced frame skips the raster section culling whose result it never read; the
+  minimap replays the quads of an unchanged colour grid instead of emitting thousands of cells
+  again (`UICanvas.record`/`replay`).
+- Result, same scenes and settings: standing 120 fps with a 1% low of 85 (Rich Resources) and
+  117 with a 1% low near 60 (Jurassic, rain); walking 117 to 120; flying about 90 with a 1% low
+  near 42. Captures of the same frozen scene before and after differ by path-tracing noise only
+  (mean difference under 0.3 of 255 per channel).
+- What still limits flight: the GPU. From altitude the frame needs 8.5 to 10 ms (path 3.7,
+  full-resolution surfaces 2.5 to 3.3, cloud and fog composition 1.0, the per-frame TLAS build
+  0.6), above the 8.3 ms a 120 Hz frame allows, and about 6% of frames take more than 16.7 ms.
+  Nothing found here lowers that without changing the picture. The candidates that would are a
+  product decision: dynamic resolution for the surface pass, or cheaper water from altitude.
+  Picture-neutral candidates not taken because they restructure the ray scene: one BLAS per
+  chunk column (a sixth of the instances, so a cheaper TLAS on CPU and GPU), or indirect
+  instance descriptors with a residency set (about 1.2 ms less main-thread work per frame).
+- Rejected probe: refreshing the sky-radiance texture every fourth frame saved about 0.4 ms of
+  GPU, inside the run-to-run noise, for a small temporal staleness of bounce light. Not kept.
+- Instrument: `FrameTimingRecorder` keeps the last 16,384 world frames (interval, main-thread
+  parts, wait for a drawable, GPU time). The debug-control `renderer` scope reports it and the
+  F3 overlay shows one line, so a frame-rate claim can be checked in the installed app.
+  Measurement on this machine is easily disturbed: another process using the GPU (a local
+  model, GPU tests) inflates GPU time two to four times. Compare builds by the tenth percentile
+  and record the load. The harness and its numbers are in
+  [the 1.5.2 record](docs/release-1.5.2-build.md).
+- Revisit if a tick grows with entity count again (profile `World.tick` first; the remaining
+  whole-list readers are `getEntitiesNear` and `getEntitiesInBox`, each called by code that is
+  itself rare or interval-gated), or if flight has to hold 120 fps.
+
 ### Release test impact selection — September 25, 2026
 
 - User outcome: contained renderer work must not repeatedly run unrelated simulation,

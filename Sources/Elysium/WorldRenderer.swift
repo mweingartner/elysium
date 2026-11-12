@@ -312,7 +312,8 @@ final class WorldRenderer {
     var tileAnimations: [TileAnimation] = []
     private var animState: [(Int, Int)] = []   // (order position, ticks into frame)
     private var animAccumMs = 0.0
-    private var animScratch: [UInt8] = []
+    /// Builds animated tiles' blends and mip chains off the main thread.
+    private lazy var atlasAnimations = AtlasAnimationStager(device: device)
     var packFluidDamp: Float = 0               // 1 = pack animates fluids, damp UV scroll
     private var shaderPackFailed: Set<String> = []
     private var frameCounter: Int32 = 0
@@ -630,6 +631,7 @@ final class WorldRenderer {
     func installStagedWorldAtlas(_ staged: StagedWorldAtlas) {
         rayTracingAtlasGeneration &+= 1
         pendingAtlasUploads.removeAll()
+        atlasAnimations.reset()
         atlasTexture = staged.texture
         atlasRes = staged.res
         tileAnimations = staged.animations
@@ -786,7 +788,8 @@ final class WorldRenderer {
         encodeCapture(cmd, from: texture, request: request)
     }
 
-    /// advance .mcmeta frame animations at 20Hz, blitting changed slices
+    /// advance .mcmeta frame animations at 20Hz; the changed slices are built off the main
+    /// thread and blitted by `flushAtlasUploads` at the start of a later frame
     func tickTileAnimations(dtMs: Double) {
         guard !tileAnimations.isEmpty, atlasTexture != nil else { return }
         animAccumMs += dtMs
@@ -797,6 +800,7 @@ final class WorldRenderer {
             advanceAnimationTick()
         }
         if animAccumMs >= 50 { animAccumMs = 0 }   // stalled frame: drop the backlog
+        atlasAnimations.pump(tileSize: atlasRes)
     }
 
     private func advanceAnimationTick() {
@@ -813,16 +817,13 @@ final class WorldRenderer {
             animState[k] = (pos, t)
             if anim.interpolate {
                 // vanilla-style blend toward the next frame, every tick
-                let cur = anim.frames[anim.order[pos].0]
                 let nxt = anim.frames[anim.order[(pos + 1) % anim.order.count].0]
                 let f = Double(t) / Double(anim.order[pos].1)
-                if animScratch.count != cur.count { animScratch = [UInt8](repeating: 0, count: cur.count) }
-                for i in 0..<cur.count {
-                    animScratch[i] = UInt8(Double(cur[i]) + (Double(nxt[i]) - Double(cur[i])) * f)
-                }
-                uploadAtlasSlice(animScratch, anim.slice)
+                atlasAnimations.request(.init(slice: anim.slice, current: anim.frames[anim.order[pos].0],
+                                              blend: (nxt, f)))
             } else if frameChanged {
-                uploadAtlasSlice(anim.frames[anim.order[pos].0], anim.slice)
+                atlasAnimations.request(.init(slice: anim.slice, current: anim.frames[anim.order[pos].0],
+                                              blend: nil))
             }
         }
     }
@@ -830,46 +831,32 @@ final class WorldRenderer {
     // animated-tile uploads are staged and blitted at frame start —
     // texture.replace() writes CPU-side while 1-2 in-flight frames may still
     // sample the slice (frame tearing on animated water/lava)
-    private struct AtlasMipUpload {
-        let level: Int, size: Int, offset: Int, rowBytes: Int
-    }
-    private var pendingAtlasUploads: [(buf: MTLBuffer, slice: Int, levels: [AtlasMipUpload])] = []
+    private var pendingAtlasUploads: [AtlasAnimationStager.Staged] = []
 
-    private func uploadAtlasSlice(_ px: [UInt8], _ slice: Int) {
-        guard slice >= 0, slice < atlasTexture.arrayLength,
-              let images = WorldAtlasMipChain.make(pixels: px, size: atlasRes) else { return }
-        var bytes: [UInt8] = [], levels: [AtlasMipUpload] = []
-        for (level, image) in images.enumerated() {
-            let rowBytes = ((image.size * 4 + 255) / 256) * 256
-            let offset = bytes.count
-            levels.append(AtlasMipUpload(level: level, size: image.size, offset: offset, rowBytes: rowBytes))
-            bytes.append(contentsOf: repeatElement(0, count: rowBytes * image.size))
-            for row in 0..<image.size {
-                bytes.replaceSubrange((offset + row * rowBytes)..<(offset + row * rowBytes + image.size * 4),
-                                      with: image.pixels[(row * image.size * 4)..<((row + 1) * image.size * 4)])
-            }
-        }
-        let buf = bytes.withUnsafeBytes { raw in
-            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
-        }
-        if let buf {
-            // Several simulation ticks may precede one rendered frame; only upload
-            // the newest immutable chain for a slice, bounding pending staging work.
-            pendingAtlasUploads.removeAll { $0.slice == slice }
-            pendingAtlasUploads.append((buf, slice, levels))
-        }
-    }
+    /// Blocks until the animated tiles asked for so far are built, so the next
+    /// `flushAtlasUploads` carries them. Tests and deterministic captures only.
+    func waitForStagedTileAnimations() { atlasAnimations.waitUntilIdle() }
 
     /// encode the staged slice updates as a blit BEFORE the frame's render
     /// passes — GPU-ordered, so in-flight frames finish sampling first
     func flushAtlasUploads(_ cmd: MTLCommandBuffer) {
+        for staged in atlasAnimations.takeFinished()
+        where staged.slice >= 0 && staged.slice < atlasTexture.arrayLength
+            && staged.levels.count <= atlasTexture.mipmapLevelCount
+            // A blit of the wrong size is a GPU fault, so every level must match the atlas mip.
+            && staged.levels.allSatisfy({ $0.size == max(1, atlasTexture.width >> $0.level) }) {
+            // Several animation ticks may precede one rendered frame; only upload
+            // the newest immutable chain for a slice, bounding pending staging work.
+            pendingAtlasUploads.removeAll { $0.slice == staged.slice }
+            pendingAtlasUploads.append(staged)
+        }
         guard !pendingAtlasUploads.isEmpty, let blit = cmd.makeBlitCommandEncoder() else { return }
-        for (buf, slice, levels) in pendingAtlasUploads {
-            for image in levels {
-                blit.copy(from: buf, sourceOffset: image.offset, sourceBytesPerRow: image.rowBytes,
+        for staged in pendingAtlasUploads {
+            for image in staged.levels {
+                blit.copy(from: staged.buffer, sourceOffset: image.offset, sourceBytesPerRow: image.rowBytes,
                           sourceBytesPerImage: image.rowBytes * image.size,
                           sourceSize: MTLSize(width: image.size, height: image.size, depth: 1),
-                          to: atlasTexture, destinationSlice: slice, destinationLevel: image.level,
+                          to: atlasTexture, destinationSlice: staged.slice, destinationLevel: image.level,
                           destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
             }
         }
@@ -1355,7 +1342,10 @@ final class WorldRenderer {
         let rd = Float(settings.renderDistance) * 16
         visibleSections.removeAll(keepingCapacity: true)
         visibleSections.reserveCapacity(sections.count)
-        for gpu in sections.values {
+        // Only raster layers read this list. A ray-traced frame draws none of them, so walking,
+        // culling and sorting every section would be work for nothing (its culling counters
+        // then stay at zero).
+        for gpu in rayTracingActive ? [:].values : sections.values {
             guard gpu.opaque != nil || gpu.cutout != nil || gpu.translucent != nil || gpu.water != nil else {
                 cullingStats.emptySections += 1
                 continue
