@@ -76,6 +76,35 @@ final class RayTracingGPUProfilerTests: XCTestCase {
                        "an even count takes the lower middle sample, never an average of two frames")
     }
 
+    func testRecentMediansAreThePerStageLowerMiddleOverRandomSamples() {
+        var seed: UInt64 = 0x51A6E
+        func next() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Double(seed >> 11) / Double(1 << 53)
+        }
+        let stages = ["path", "surface", "denoise", "media", "tlas"]
+        var evenCounts = 0, missingStages = 0
+        for round in 0..<200 {
+            let samples: [[String: Double]] = (0..<(1 + Int(next() * Double(RayTracingGPUProfiler.historyLength)))).map { _ in
+                var sample: [String: Double] = [:]
+                for stage in stages where next() < 0.8 && !(stage == "tlas" && round % 5 == 0) {
+                    sample[stage] = (next() * 40).rounded() / 4
+                }
+                return sample
+            }
+            let medians = RayTracingGPUProfiler.medians(samples)
+            for stage in stages {
+                let values = samples.compactMap { $0[stage] }.sorted()
+                if values.isEmpty { XCTAssertNil(medians[stage]); missingStages += 1; continue }
+                if values.count % 2 == 0 { evenCounts += 1 }
+                XCTAssertEqual(medians[stage], values[(values.count - 1) / 2], "round \(round) stage \(stage)")
+            }
+            XCTAssertEqual(Set(medians.keys), Set(samples.flatMap(\.keys)))
+        }
+        XCTAssertGreaterThan(evenCounts, 100)
+        XCTAssertGreaterThan(missingStages, 0)
+    }
+
     func testSamplingCadenceAndCompletedGPUStagesUseIndependentBuffers() throws {
         try verifyCompletedGPUStages(includeSurface: false)
     }

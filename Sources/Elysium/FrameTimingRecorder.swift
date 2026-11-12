@@ -56,9 +56,13 @@ struct FrameTimingSummary: Equatable {
     var averageFPS = 0.0
     /// Frame rate of the slowest one percent of frames (at least one frame), the usual "1% low".
     var onePercentLowFPS = 0.0
-    /// Share of frames (0...1) that took longer than a 60 fps frame, and than a 30 fps frame.
+    /// Share of frames (0...1) that took longer than a 60 fps frame, and than a 30 fps frame,
+    /// each by more than 5% (17.5 and 35 ms): at exactly 60 Hz half of all on-time frames land a
+    /// hair over 16.7 ms, and those are not slow frames.
     var shareOver60FPSFrame = 0.0
     var shareOver30FPSFrame = 0.0
+    static let over60FPSFrameMs = 1000.0 / 60 * 1.05
+    static let over30FPSFrameMs = 1000.0 / 30 * 1.05
     var interval = FrameTimingDistribution([])
     var cpu = FrameTimingDistribution([])
     var drawableWait = FrameTimingDistribution([])
@@ -91,6 +95,22 @@ final class FrameTimingRecorder {
     private var ring = [FrameTimingSample?](repeating: nil, count: FrameTimingRecorder.capacity)
     private var sequences = [UInt64](repeating: 0, count: FrameTimingRecorder.capacity)
     private var nextSequence: UInt64 = 1
+    private var interrupted = false
+
+    /// Says that frames stopped being drawn (the app went to the background, the window was
+    /// hidden, no drawable came). The time until drawing resumes is not a frame time.
+    func noteInterruption() {
+        lock.lock(); interrupted = true; lock.unlock()
+    }
+
+    /// Whether drawing stopped since the last call. The first frame afterwards measures the
+    /// pause in its interval, so the draw loop leaves that one frame out of the record.
+    func takeInterruption() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let was = interrupted
+        interrupted = false
+        return was
+    }
 
     /// Opens a frame and returns the ticket under which its costs are added. The GPU time can
     /// arrive before or after `end`, so the frame exists from here on.
@@ -167,8 +187,10 @@ final class FrameTimingRecorder {
         let slowest = intervals.sorted(by: >).prefix(slowestCount)
         let slowestMean = slowest.reduce(0, +) / Double(slowestCount)
         summary.onePercentLowFPS = slowestMean > 0 ? 1000 / slowestMean : 0
-        summary.shareOver60FPSFrame = Double(intervals.filter { $0 > 1000.0 / 60 }.count) / Double(samples.count)
-        summary.shareOver30FPSFrame = Double(intervals.filter { $0 > 1000.0 / 30 }.count) / Double(samples.count)
+        summary.shareOver60FPSFrame = Double(intervals.filter { $0 > FrameTimingSummary.over60FPSFrameMs }.count)
+            / Double(samples.count)
+        summary.shareOver30FPSFrame = Double(intervals.filter { $0 > FrameTimingSummary.over30FPSFrameMs }.count)
+            / Double(samples.count)
         summary.interval = FrameTimingDistribution(intervals)
         summary.cpu = FrameTimingDistribution(samples.map(\.cpuMs))
         summary.drawableWait = FrameTimingDistribution(samples.map(\.drawableWaitMs))

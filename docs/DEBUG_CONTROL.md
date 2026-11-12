@@ -575,7 +575,7 @@ with:
 | `frames`, `seconds` | Frames in the window and the time they took. |
 | `averageFPS` | Frames divided by that time. |
 | `onePercentLowFPS` | Frame rate of the slowest 1% of frames (at least one frame). |
-| `shareOver60FPSFrame`, `shareOver30FPSFrame` | Share of frames (0...1) longer than 16.7 ms and than 33.3 ms. |
+| `shareOver60FPSFrame`, `shareOver30FPSFrame` | Share of frames (0...1) longer than 17.5 ms and than 35 ms: a 60 fps and a 30 fps frame plus 5%, so vsync jitter at exactly 60 Hz does not count. |
 | `intervalMilliseconds` | Time from one frame's draw call to the next: what the player sees. |
 | `cpuMilliseconds` | Main-thread work in the draw call, without the wait for a drawable. |
 | `drawableWaitMilliseconds` | Time blocked waiting for a free drawable. Large means the GPU or the display is the limit; near zero means the main thread is. |
@@ -588,7 +588,9 @@ that is doing other work, compare builds by `p10` (close to the undisturbed cost
 load next to any average. `rayTracing.gpuStageMedianMilliseconds` is the median of the last 64
 sampled frames per GPU stage; `gpuStageMilliseconds` remains the single latest sample, which
 other GPU work on the machine can double. A debug app draws only while it is the active app, so a
-measurement needs its window in front for the whole window of time. The F3 overlay shows the
+measurement needs its window in front for the whole window of time. When drawing stops (the app
+in the background, a hidden window) the pause is not recorded as a frame; frames resume with the
+second one drawn afterwards. The F3 overlay shows the
 ten-second figures on one line (`Frames: 1% low ... CPU ... GPU ...`) in every build.
 
 Load-bearing request bounds include:

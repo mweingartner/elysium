@@ -1095,10 +1095,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let pendingDebugCapture = elysiumDebugControlRequested && renderer.hasPendingCapture
         guard window.isVisible,
               pendingDebugCapture || (NSApp.isActive && window.occlusionState.contains(.visible))
-        else { return }
+        else { frameTiming.noteInterruption(); return }
 #else
         guard NSApp.isActive, window.isVisible,
-              window.occlusionState.contains(.visible) else { return }
+              window.occlusionState.contains(.visible) else { frameTiming.noteInterruption(); return }
 #endif
         rpgControllerAdapter?.synchronizeContext()
         let now = CACurrentMediaTime()
@@ -1143,12 +1143,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
 #if ELYSIUM_DEBUG_CONTROL
             if pendingDebugCapture { scheduleDebugCaptureDraw() }
 #endif
+            frameTiming.noteInterruption()
             return
         }
         lastDrawableTime = now
         let drawableWaitMs = (CACurrentMediaTime() - drawableWaitStart) * 1000
-        // Only frames that draw a world are frame-rate evidence; title and menu frames are not.
-        let timingTicket: UInt64? = game.hasWorld()
+        // Only frames that draw a world are frame-rate evidence; title and menu frames are not,
+        // and neither is the first frame after a pause in drawing, whose interval is the pause.
+        let resumedAfterPause = frameTiming.takeInterruption()
+        let timingTicket: UInt64? = game.hasWorld() && !resumedAfterPause
             ? frameTiming.begin(startTime: now, intervalMs: dt) : nil
         var simulationMs = 0.0, worldMs = 0.0, interfaceStart = now
 
