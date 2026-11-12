@@ -5,6 +5,28 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.5.2 for the frame-rate work
+  below. Nothing on the wire or in a save changed; as always, both sides of a LAN game need
+  the same version.
+
+- **The frame rate no longer collapses in a populated world.** In a world with many animals the
+  game ran at 46 fps standing still and about 21 fps while flying (1% lows of 21 and 10), on an
+  M5 Max in Ray Traced mode at 16 chunks. The same places now run at 120 fps standing or
+  walking and about 90 fps flying. The picture is unchanged.
+  - The cause was not the graphics. Every dungeon spawner in every loaded chunk looked at every
+    creature in the world twenty times a second to see whether a player was near, which took
+    about 30 ms of each tick. Spawners, mob behaviour, projectiles, bosses, beacons, conduits
+    and raids now look only at players. This has been slow since 1.3.0; 1.5.0 did not cause
+    it.
+  - Animated textures (water, lava, fire) are prepared off the main thread, the minimap is not
+    redrawn cell by cell while it has not changed, and the ray tracer does less bookkeeping
+    per frame.
+  - Flying fast over open terrain is still limited by the graphics card at about 90 fps, with
+    occasional frames longer than 1/60 s. Closing that gap would need a change to the picture
+    (for example a resolution that adapts while flying), which this release does not make.
+- F3 has a new line, `Frames:`, with the 1% low frame rate and the milliseconds a frame costs
+  on the main thread (simulation, world, interface) and on the GPU, over the last ten seconds.
+
 - Bumped the release and exact-LAN-compatibility version to 1.5.1 for the LAN inventory fixes
   below. The inventory grant and the container edit changed shape, so older binaries are
   rejected during the exact-version handshake.

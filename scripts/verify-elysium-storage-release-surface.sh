@@ -288,7 +288,8 @@ EXPECTED_STORAGE_OBJECT_SHA256='7dd3d8314e6bd3067b1e3779d6ae52d63d009cb952175f5a
 # 1.4.6: only ELYSIUM_VERSION changes; was 6c92e7d66ea3f889f5b708a4afb65a0ca53145de3099104a3609e768ab24e7b9.
 # 1.5.0: only ELYSIUM_VERSION changes; was 267afa1690f7387c38184e8afeee40f296d2286f28429afa23988e7d762edc0a.
 # 1.5.1: only ELYSIUM_VERSION changes; was 5efb59a68a9e3272f07d2f55cd74a206790418884b0976399e08c13446589f0a.
-EXPECTED_SAVES_SOURCE_SHA256='ad5b30230fc26f5ce560d6f4f19b194af653b333c9a7d196f0f2c1ad1f4a3c8b'
+# 1.5.2: only ELYSIUM_VERSION changes; was ad5b30230fc26f5ce560d6f4f19b194af653b333c9a7d196f0f2c1ad1f4a3c8b.
+EXPECTED_SAVES_SOURCE_SHA256='d57fe19db18af945117e6d930b536bbc99685d410af2a21824d530d19101631e'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
 # 1.4.0: only the Saves.swift compiler-AST inventory entry moves (version literal); was
 # 377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb.
@@ -308,7 +309,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd
 # ca9c270932ba8854d9fc6ac652a5fe3ce616b30086cfb4cb3efb27f6e761be20.
 # 1.5.1: only the Saves.swift compiler-AST entry moves (version literal); was
 # a2ada9b26583ce9e779d7474ae28967838c8d178ee109e90615287fd31637e21.
-EXPECTED_CORE_CAPABILITY_SHA256='d7460949f9196af124019393d8e659f6e1cf4d542f27e1f8ae86cd0627a30848'
+# 1.5.2: only the Saves.swift compiler-AST entry moves (version literal); was
+# d7460949f9196af124019393d8e659f6e1cf4d542f27e1f8ae86cd0627a30848.
+EXPECTED_CORE_CAPABILITY_SHA256='91e68257872e272379e73546d4135b2b06003f9b2d15789001e2bb80f424d5ef'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
 # Swift 6.4.2 toolchain (unchanged source): was d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444.
@@ -536,7 +539,16 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='26842de4ba112155857c4581680002d97e6634b33acce8
 # capture above and the version literal. Player.swift, the storage and text-input sources and
 # objects are byte-identical. Was
 # 89c980f228a61f51c6fec5f9d754cb0aaef333da2fa05719c6dfc8509f02e073. See docs/release-1.5.1-build.md.
-EXPECTED_CORE_OBJECT_SHA256='71f838aa12382af6e221157f1db1adc18602f939ba688233891c840dc6f0ce26'
+# 1.5.2 (frame rate: per-tick entity walks): the Core object moves for the world's entity index
+# (WorldEntityIndex.swift, new: playerEntities, livingEntities, getPlayersNear and the one radius
+# predicate getEntitiesNear now shares), the didSet on World.entities that keeps it exact, the
+# fourteen players-near call sites that read it (AI, Animals, Bosses, Monsters, Projectiles,
+# BlockEntities, Raids, Redstone), the monster despawn loop, the crowd push and the spawner's
+# wake test (MonsterSpawning.swift), and the version literal. No save, wire or storage code is
+# touched: GameCore.swift, Player.swift, the storage and text-input sources and objects are
+# byte-identical. Was
+# 71f838aa12382af6e221157f1db1adc18602f939ba688233891c840dc6f0ce26. See docs/release-1.5.2-build.md.
+EXPECTED_CORE_OBJECT_SHA256='fb78dfd681a47a6dea407497a6fb2270202478eb2a3707cd20c3f083e0d16917'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -629,8 +641,17 @@ EXPECTED_CORE_OBJECT_SHA256='71f838aa12382af6e221157f1db1adc18602f939ba688233891
 # only relinks Core. Atrium still 19eb940. Were
 # 2497582c4b572f414da1ce017d26c47a254f999b6df324a2b9712658b7f5d737 (Elysium) and
 # a106464b5597d6e24e59cdaf8526cebeb00e41bfcc7df98a3974f661ed3450d7 (elysmoke).
-EXPECTED_ELYSIUM_PRODUCT_SHA256='1204aac25fa10e5c4124da7deeb15a8fbd5b8cad57989ef515251785874b9845'
-EXPECTED_SMOKE_PRODUCT_SHA256='57df2019305dfc044293edf0f88606e7895714c334e66a60dc414c92b2ff83e2'
+# 1.5.2: the Elysium product relinks the Core changes above and adds the frame timing record
+# (FrameTimingRecorder.swift, its F3 line in HudM.swift and the draw-loop measurements in
+# main.swift), animated atlas tiles built off the main thread (AtlasAnimationStager.swift,
+# WorldRenderer.swift), the ray scene's stamped selection and GPU stage medians
+# (RayTracedWorldRenderer.swift, RayTracingGPUProfiler.swift, RayTracingTypes.swift) and the
+# replayed minimap quads (UICanvas.swift, MapOverlayM.swift); elysmoke only relinks Core. Atrium
+# still 19eb940. Were
+# 1204aac25fa10e5c4124da7deeb15a8fbd5b8cad57989ef515251785874b9845 (Elysium) and
+# 57df2019305dfc044293edf0f88606e7895714c334e66a60dc414c92b2ff83e2 (elysmoke).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='93151337a9dd55527ba0aa86362f830c4b3d85059ad60a03d5f6c0135b19fab6'
+EXPECTED_SMOKE_PRODUCT_SHA256='8802e8102430d8e432617909f0684f49b115549937e21960104af17125bb34b9'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

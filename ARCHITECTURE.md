@@ -658,10 +658,11 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   need; a ray-traced frame skips the raster section culling whose result it never read; the
   minimap replays the quads of an unchanged colour grid instead of emitting thousands of cells
   again (`UICanvas.record`/`replay`).
-- Result, same scenes and settings: standing 120 fps with a 1% low of 85 (Rich Resources) and
-  117 with a 1% low near 60 (Jurassic, rain); walking 117 to 120; flying about 90 with a 1% low
-  near 42. Captures of the same frozen scene before and after differ by path-tracing noise only
-  (mean difference under 0.3 of 255 per channel).
+- Result, same scenes and settings: standing 120 fps with a 1% low of 92 (Rich Resources) and
+  119 with a 1% low of 67 (Jurassic, rain); walking 117 to 120; flying about 90 with a 1% low
+  near 42. A tick now costs under 3 ms and the draw call about 3 ms of main thread. Captures of
+  the same frozen scene before and after differ by path-tracing noise only (mean difference
+  under 0.3 of 255 per channel).
 - What still limits flight: the GPU. From altitude the frame needs 8.5 to 10 ms (path 3.7,
   full-resolution surfaces 2.5 to 3.3, cloud and fog composition 1.0, the per-frame TLAS build
   0.6), above the 8.3 ms a 120 Hz frame allows, and about 6% of frames take more than 16.7 ms.
