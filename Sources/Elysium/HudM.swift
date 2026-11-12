@@ -555,6 +555,7 @@ final class HUD {
             "Graphics: \(debugInfo["graphics"] ?? "Standard")",
         ]
         if let memory = debugInfo["graphicsMemory"] { lines.append(memory) }
+        if let frames = debugInfo["frames"] { lines.append(frames) }
         // scripting-ui-and-replication (change 3), design.md §12: "F3 summary" — script counts,
         // event/tick stats, budget trips, one line, only while a script runtime actually exists
         // this session (§15's zero-cost invariant: no line at all for a world with scripting

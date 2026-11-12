@@ -99,10 +99,31 @@ final class RayTracingGPUProfiler {
     private let timestampSet: MTLCounterSet?
     private let lock = NSLock()
     private var latestValue: Timings?
+    /// The most recent samples, oldest first. One sample is a single frame and other GPU work
+    /// on the machine can double it, so comparisons read the median of these, not `latest`.
+    private var recent: [Timings] = []
+    static let historyLength = 64
 
     var latest: Timings? {
         lock.lock(); defer { lock.unlock() }
         return latestValue
+    }
+
+    /// Median milliseconds per stage over the recent samples; a stage no sample measured is absent.
+    var recentMedians: [String: Double] {
+        lock.lock(); let samples = recent; lock.unlock()
+        return Self.medians(samples.map(\.milliseconds))
+    }
+
+    static func medians(_ samples: [[String: Double]]) -> [String: Double] {
+        var byStage: [String: [Double]] = [:]
+        for sample in samples {
+            for (stage, value) in sample { byStage[stage, default: []].append(value) }
+        }
+        return byStage.mapValues { values in
+            let sorted = values.sorted()
+            return sorted[(sorted.count - 1) / 2]
+        }
     }
 
     init(device: MTLDevice, sampleInterval: UInt64 = 60) {
@@ -136,6 +157,8 @@ final class RayTracingGPUProfiler {
             if self.latestValue == nil || frameIndex >= self.latestValue!.sampleFrameIndex {
                 self.latestValue = timings
             }
+            self.recent.append(timings)
+            if self.recent.count > Self.historyLength { self.recent.removeFirst(self.recent.count - Self.historyLength) }
             self.lock.unlock()
         }
         return frame

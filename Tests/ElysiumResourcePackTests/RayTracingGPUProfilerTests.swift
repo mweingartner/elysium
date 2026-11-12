@@ -60,6 +60,22 @@ final class RayTracingGPUProfilerTests: XCTestCase {
         XCTAssertEqual(invalidCalibration.milliseconds.count, 1)
     }
 
+    func testRecentMediansIgnoreOutliersAndStagesNoSampleMeasured() {
+        XCTAssertEqual(RayTracingGPUProfiler.medians([]), [:])
+        // One frame doubled by other GPU work must not move the reported cost of a stage.
+        let samples: [[String: Double]] = [
+            ["path": 3.0, "surface": 1.2], ["path": 3.1, "surface": 1.3], ["path": 9.9],
+            ["path": 2.9, "surface": 1.1, "media": 0.1], ["path": 3.2],
+        ]
+        let medians = RayTracingGPUProfiler.medians(samples)
+        XCTAssertEqual(medians["path"], 3.1)
+        XCTAssertEqual(medians["surface"], 1.2)
+        XCTAssertEqual(medians["media"], 0.1)
+        XCTAssertNil(medians["denoise"])
+        XCTAssertEqual(RayTracingGPUProfiler.medians([["path": 4], ["path": 2]])["path"], 2,
+                       "an even count takes the lower middle sample, never an average of two frames")
+    }
+
     func testSamplingCadenceAndCompletedGPUStagesUseIndependentBuffers() throws {
         try verifyCompletedGPUStages(includeSurface: false)
     }

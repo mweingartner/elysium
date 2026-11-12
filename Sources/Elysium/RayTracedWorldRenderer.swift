@@ -204,6 +204,7 @@ final class RayTracedWorldRenderer {
     private var completedGPUTime = 0.0
     private var completedError: String?
     private lazy var gpuProfiler=RayTracingGPUProfiler(device:device)
+    private var stageMedianFrameIndex: UInt64 = .max
     private var profilerFrameIndex: UInt64 = 0
     private(set) var diagnostics = RayTracingDiagnostics()
     /// The last successful frame's normalized Metal depth, not distance from the eye.
@@ -547,6 +548,11 @@ final class RayTracedWorldRenderer {
         let stageTimings=gpuProfiler.latest
         diagnostics.gpuStageMilliseconds=stageTimings?.milliseconds ?? [:]
         diagnostics.gpuStageFrameIndex=stageTimings?.sampleFrameIndex ?? 0
+        // A new sample arrives once every `sampleInterval` frames; the medians change only then.
+        if diagnostics.gpuStageFrameIndex != stageMedianFrameIndex {
+            stageMedianFrameIndex=diagnostics.gpuStageFrameIndex
+            diagnostics.gpuStageMedianMilliseconds=gpuProfiler.recentMedians
+        }
         let profile=gpuProfiler.beginFrame(command:command,frameIndex:profilerFrameIndex)
         profilerFrameIndex &+= 1
         memoryPressureReason=nil; encodingStarted=false

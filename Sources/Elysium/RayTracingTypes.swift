@@ -48,6 +48,8 @@ struct RayTracingDiagnostics {
     var historySamples = 0
     var gpuMilliseconds = 0.0
     var gpuStageMilliseconds: [String:Double] = [:]
+    /// Median of the last sampled frames (about half a minute): steadier than the single sample.
+    var gpuStageMedianMilliseconds: [String:Double] = [:]
     var gpuStageFrameIndex: UInt64 = 0
     var denoiser = "Spatial/temporal"
     var samplesPerPixel = 4

@@ -568,6 +568,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     private var uncapTimer: Timer?
     private var lanAutomationTimer: Timer?
     private var lastDrawableTime = CACurrentMediaTime()
+    /// Per-frame cost record behind the debug-control frame-timing snapshot.
+    let frameTiming = FrameTimingRecorder()
     var bot: PhysicsBot?
     var booth: PhotoBooth?
     // test hook: ELYSIUM_CMD="/tp 0 120 0;/time set 1000" runs once the world is up
@@ -1126,6 +1128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             hud.debugInfo["graphicsMemory"] = game.settings.shader == "raytraced"
                 ? rayTracingMemorySummary(ray) : nil
             hud.debugInfo["mem"] = "n/a"
+            hud.debugInfo["frames"] = frameTiming.summary(trailing: 10, now: now).overlayLine
             audio.applyVolumes(game.settings.volumes)
             applyFpsMode()
             updateWindowTitle()
@@ -1133,6 +1136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
 
         tickLANAutomation()
 
+        let drawableWaitStart = CACurrentMediaTime()
         guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor,
               let cmd = renderer.queue.makeCommandBuffer() else {
@@ -1142,6 +1146,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             return
         }
         lastDrawableTime = now
+        let drawableWaitMs = (CACurrentMediaTime() - drawableWaitStart) * 1000
+        // Only frames that draw a world are frame-rate evidence; title and menu frames are not.
+        let timingTicket: UInt64? = game.hasWorld()
+            ? frameTiming.begin(startTime: now, intervalMs: dt) : nil
+        var simulationMs = 0.0, worldMs = 0.0, interfaceStart = now
 
         if renderer.fbWidth == 0 {
             renderer.resize(Int(view.drawableSize.width), Int(view.drawableSize.height))
@@ -1226,7 +1235,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         var partial = 0.0
         var viewmodelCamera: CamState?
         if game.hasWorld() {
+            let simulationStart = CACurrentMediaTime()
             partial = game.frame(dtMs: dt)
+            simulationMs = (CACurrentMediaTime() - simulationStart) * 1000
             LANMultiplayerManager.shared.tickReplication(game: game)
             AIScriptBroker.pump(game: game)
             bot?.tick()
@@ -1234,7 +1245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             renderer.particles.tick(game.world)
             let cam = game.camState(partial, timeSec: timeSec)
             viewmodelCamera = cam
+            let worldStart = CACurrentMediaTime()
             enc = renderer.render(cmd: cmd, rpd: rpd, game: game, cam: cam, partial: partial, timeSec: timeSec)
+            interfaceStart = CACurrentMediaTime()
+            worldMs = (interfaceStart - worldStart) * 1000
         } else {
             enc = renderer.renderTitle(cmd: cmd, rpd: rpd)
         }
@@ -1271,7 +1285,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 DispatchQueue.main.async(execute: presentedFrameCallback)
             }
         }
+        if let timingTicket {
+            cmd.addCompletedHandler { [frameTiming] completed in
+                frameTiming.recordGPU(sequence: timingTicket,
+                                      milliseconds: (completed.gpuEndTime - completed.gpuStartTime) * 1000)
+            }
+        }
         cmd.commit()
+        if let timingTicket {
+            let end = CACurrentMediaTime()
+            frameTiming.end(sequence: timingTicket, cpuMs: (end - now) * 1000 - drawableWaitMs,
+                            drawableWaitMs: drawableWaitMs,
+                            simulationMs: simulationMs, worldMs: worldMs,
+                            interfaceMs: (end - interfaceStart) * 1000)
+        }
     }
 }
 
