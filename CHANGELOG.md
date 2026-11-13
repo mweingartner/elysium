@@ -5,6 +5,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.5.5 for the flyer fixes below.
+  Nothing on the wire or in a save changed; as always, both sides of a LAN game need the same
+  version.
+
 - **Pterosaurs fly, land and rest properly, and no longer get stuck under trees.** Several flaws
   in how flying creatures behave in a prehistoric world are fixed.
   - A flyer was hurt by its own flight. Every descent counted as a fall, and the next time it
