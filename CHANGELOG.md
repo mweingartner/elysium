@@ -5,6 +5,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.5.4 for the fix below. Nothing on
+  the wire or in a save changed; as always, both sides of a LAN game need the same version.
+
 - **A trapped pterosaur no longer drones like an engine.** In a prehistoric world a flying
   creature could stand in a gap of the forest canopy where the leaves around it left no room to
   spread its wings. It then tried to take off twenty times a second, and every attempt played
