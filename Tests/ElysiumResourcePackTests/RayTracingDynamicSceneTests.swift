@@ -102,12 +102,16 @@ final class RayTracingDynamicSceneTests: XCTestCase {
                 time: 3.5, headYaw: 0.2, ceilingOffset: floor(batPose.y + 1) - batPose.y))
         }
 
+        // A jointed dinosaur is posed from its rig and its eased motion, which the renderer
+        // fills in from the replicated action (`PrehistoricMotionStore`).
         let dinosaur = buildEntityGeometry("prehistoric.triceratops").model
+        let rig = try XCTUnwrap(PrehistoricRig(model: dinosaur))
         let head = try XCTUnwrap(dinosaur.parts.firstIndex { $0.name == "head" })
         var dinosaurPose = EntityPose()
-        let idle = EntityRendererM.partTransforms(model: dinosaur, pose: dinosaurPose, time: 0)
+        let idle = EntityRendererM.partTransforms(model: dinosaur, pose: dinosaurPose, time: 0, rig: rig)
         dinosaurPose.prehistoricAction = "charge"
-        let charging = EntityRendererM.partTransforms(model: dinosaur, pose: dinosaurPose, time: 0)
+        dinosaurPose.motion.weights = PrehistoricMotionState.targetWeights(.charge)
+        let charging = EntityRendererM.partTransforms(model: dinosaur, pose: dinosaurPose, time: 0, rig: rig)
         XCTAssertGreaterThan(simd_distance(idle[head][1], charging[head][1]), 0.4)
     }
 

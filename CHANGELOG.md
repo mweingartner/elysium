@@ -5,6 +5,26 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **The land and flying creatures of the prehistoric worlds are animated.** Until now a dinosaur
+  slid along on stiff one-piece legs, its neck and tail never moved, and a pterosaur stood on the
+  ground with its wings spread. Now:
+  - Legs bend at hip, knee and ankle, and each foot stays where it is set down while the body
+    passes over it. A Compsognathus scurries with many short steps; a Tyrannosaurus or a sauropod
+    takes few long ones at the same speed. An animal that stands still stands still, and one that
+    turns on the spot steps around.
+  - Necks, heads and tails move. An idle animal looks around in its own time, a sauropod's neck
+    bends along its length, a tail swings against the stride, and a theropod opens its jaw to
+    bite, to feed and when it is alert.
+  - What an animal is doing shows: feeding lowers the head (a Brachiosaurus reaches up), an alert
+    animal raises itself and scans quickly, a charge lowers the head and lengthens the stride.
+  - Flyers beat their wings in a take-off and in powered flight, slower the larger they are (a
+    Microraptor about five times a second, a Quetzalcoatlus a little more than once), hold them
+    out in a glide, bank into a turn, and fold them back along the body when they rest.
+  - In a LAN game a guest sees the same animation, and the host's prehistoric creatures now move
+    smoothly on a guest's screen instead of in five jumps a second.
+  - The five marine reptiles, Deinosuchus and the ordinary animals and monsters move as before.
+    Nothing in a save or on the wire changed; the animation is drawn from what was already there.
+
 - Bumped the release and exact-LAN-compatibility version to 1.5.5 for the flyer fixes below.
   Nothing on the wire or in a save changed; as always, both sides of a LAN game need the same
   version.

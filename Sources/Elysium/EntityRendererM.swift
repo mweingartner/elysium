@@ -37,6 +37,14 @@ struct EntityPose {
     /// Closed, replicated semantic state for opt-in prehistoric creatures.
     /// Renderer-only: it never feeds simulation/RNG decisions.
     var prehistoricAction = "idle"
+    /// This frame's reading of a jointed prehistoric creature's movement (`PrehistoricMotionStore`).
+    var motion = PrehistoricMotion()
+
+    /// How large the entity is drawn: its model's scale, its own, and half for a baby. The
+    /// model matrix and the stride of a jointed creature both read it here.
+    func displayScale(modelScale: Double) -> Double {
+        scale * modelScale * (baby ? 0.5 : 1)
+    }
 }
 
 struct EntityUniforms {
@@ -60,6 +68,8 @@ final class ModelGPU {
     let texture: MTLTexture
     let model: MobModel
     let rayTracingParts: [(partIndex: Int, geometry: RayTracingEntityGeometry)]
+    /// The skeleton of a jointed prehistoric model, read once; nil for every other model.
+    let prehistoricRig: PrehistoricRig?
 
     init(vb: MTLBuffer, count: Int, texture: MTLTexture, model: MobModel,
          rayTracingParts: [(partIndex: Int, geometry: RayTracingEntityGeometry)]) {
@@ -68,6 +78,7 @@ final class ModelGPU {
         self.texture = texture
         self.model = model
         self.rayTracingParts = rayTracingParts
+        self.prehistoricRig = PrehistoricRig(model: model)
     }
 }
 
@@ -165,7 +176,14 @@ final class EntityRendererM {
     }
 
     /// compute per-part matrices by animator profile
-    static func partTransforms(model: MobModel, pose p: EntityPose, time: Double) -> [simd_float4x4] {
+    static func partTransforms(model: MobModel, pose p: EntityPose, time: Double,
+                               rig: PrehistoricRig? = nil) -> [simd_float4x4] {
+        // A jointed prehistoric creature composes parent and child in its own pose code. The
+        // draw path hands in the rig it read once; any other caller gets it read here, so a
+        // jointed model is never posed by the per-part profiles below.
+        if let rig = rig ?? PrehistoricRig(model: model) {
+            return PrehistoricPose.partMatrices(rig: rig, pose: p, time: time)
+        }
         var partMats = [simd_float4x4](repeating: matrix_identity_float4x4, count: 24)
         let swing = p.limbSwing
         let amp = p.limbAmp
@@ -357,8 +375,7 @@ final class EntityRendererM {
                 }
             case "parrot":
                 if n == "wingR" || n == "wingL" {
-                    let activeFlight = p.airborne || p.prehistoricAction == "takeoff" || p.prehistoricAction == "flap"
-                    let flap = activeFlight ? Foundation.sin(time * 25) * 0.8 : 0
+                    let flap = p.airborne ? Foundation.sin(time * 25) * 0.8 : 0
                     m = mRotateZ(m, Float((n == "wingR" ? 1.0 : -1.0) * flap))
                 } else if n == "head" {
                     m = mRotateY(m, Float(p.headYaw))
@@ -368,8 +385,8 @@ final class EntityRendererM {
                 let active = p.prehistoricAction == "takeoff" || p.prehistoricAction == "flap"
                 let glide = p.prehistoricAction == "glide"
                 // Preserve the legacy Phantom's distinct powered, gliding,
-                // and perched wing states.  Source-authored pterosaurs have
-                // their own profile-safe rig below.
+                // and perched wing states.  Source-authored pterosaurs are
+                // jointed and posed by PrehistoricPose.
                 let landing = p.prehistoricAction == "landing"
                 let perched = !p.airborne && p.prehistoricAction == "idle"
                 let fold = perched ? 1.28 : (landing ? 0.62 : 0)
@@ -399,25 +416,6 @@ final class EntityRendererM {
                     } else if active {
                         m = mRotateZ(m, Float(-Foundation.sin(time * 14) * 0.18))
                     }
-                }
-            case "prehistoricPterosaur":
-                let active = p.prehistoricAction == "takeoff" || p.prehistoricAction == "flap"
-                let glide = p.prehistoricAction == "glide"
-                if n == "head" {
-                    m = mRotateY(m, Float(p.headYaw * 0.55))
-                    m = mRotateX(m, Float(-p.pitch * 0.55))
-                } else if n == "wingR" || n == "wingL" {
-                    // The authored rest mesh is a readable folded-wing
-                    // profile.  Do not reuse Phantom's wide-span-to-vertical
-                    // fold: it turns a side portrait into an opaque sail.
-                    let sign: Float = n == "wingR" ? 1 : -1
-                    if active {
-                        m = mRotateZ(m, sign * Float(Foundation.sin(time * 14) * 0.55))
-                    } else if glide {
-                        m = mRotateZ(m, sign * 0.10)
-                    }
-                } else if n == "tail" {
-                    m = mRotateY(m, Float(Foundation.sin(time * 2.2) * 0.05))
                 }
             case "dragon":
                 if n == "wingR" {
@@ -476,7 +474,7 @@ final class EntityRendererM {
     }
 
     static func presentation(model: MobModel, pose p: EntityPose, time: Double,
-                             origin: SIMD3<Double>) -> EntityPresentationMatrices {
+                             origin: SIMD3<Double>, rig: PrehistoricRig? = nil) -> EntityPresentationMatrices {
         var m = matrix_identity_float4x4
         m = mTranslate(m, Float(p.x - origin.x), Float(p.y - origin.y), Float(p.z - origin.z))
         // Vanilla-rig facing flip: every mob model is authored with its face at -Z
@@ -485,7 +483,7 @@ final class EntityRendererM {
         // (pi - yaw) instead of (-yaw) points the authored front along the direction
         // of travel; without the pi term every creature walks backwards.
         m = mRotateY(m, Float(.pi - p.yaw))
-        let sc = Float(p.scale * model.scale * (p.baby ? 0.5 : 1))
+        let sc = Float(p.displayScale(modelScale: model.scale))
         m = mScale(m, sc, sc, sc)
 
         var overlay = SIMD4<Float>(1, 0.2, 0.2, Float(p.hurtFlash * 0.5))
@@ -497,7 +495,8 @@ final class EntityRendererM {
                 ? SIMD4<Float>(0.55, 0.85, 1, Float(p.fuseOverlay))
                 : SIMD4<Float>(1, 1, 1, Float(p.fuseOverlay))
         }
-        return EntityPresentationMatrices(model: m, parts: partTransforms(model: model, pose: p, time: time),
+        return EntityPresentationMatrices(model: m,
+                                          parts: partTransforms(model: model, pose: p, time: time, rig: rig),
                                           overlay: overlay)
     }
 
@@ -505,7 +504,8 @@ final class EntityRendererM {
                   origin: SIMD3<Double>) -> EntityRenderSnapshot {
         let g = geom(name)
         return EntityRenderSnapshot(geometry: g, pose: p,
-            matrices: Self.presentation(model: g.model, pose: p, time: time, origin: origin))
+            matrices: Self.presentation(model: g.model, pose: p, time: time, origin: origin,
+                                        rig: g.prehistoricRig))
     }
 
     func rayTracingInstances(snapshot: EntityRenderSnapshot) -> [RayTracingEntityInstance] {

@@ -293,8 +293,8 @@ The current Elysium renderer has a bounded 24-rigid-pose-part native
 `MobModel` contract; it does not have a safe generic skinned-mesh/GLB runtime
 importer. Prehistoric creatures therefore use original source-authored,
 faceted low-poly triangle meshes and native procedural texture painting for all
-36 types. The mesh stream is immutable presentation data, shares the existing
-one-pose-per-part renderer path, and deliberately does not introduce a file
+36 types. The mesh stream is immutable presentation data, uses the existing
+one-matrix-per-part draw path, and deliberately does not introduce a file
 loader or weighted skinning. Every model is validated for finite,
 non-degenerate faces, in-skin UVs, no cuboid fallback, a bounded triangle
 count, and the 24-part limit. The art direction is historically informed and
@@ -305,13 +305,57 @@ Pteranodon has a toothless beak, crest, and paired membrane wings, and
 Ichthyosaurus uses a vertical tail fluke with fins rather than a reused dolphin
 model.
 
-Species landmarks stay in the rigid pose slot that moves them: skull details
-such as beaks, crests, frills, and horns move with the head; claws and thumb
-spikes move with their arm; and tail details move with their tail. Prehistoric
-quadrupeds preserve their source-authored tail rest angle rather than inheriting
-the legacy animal tail lift, while pterosaurs use a profile-safe standing pose
-instead of the generic phantom fold. This keeps a true in-game side view
-readable without adding a hierarchy or a new animation system.
+Species landmarks stay in the part that moves them: skull details such as
+beaks, crests, frills, and horns move with the head; claws and thumb spikes
+move with their arm or foot; and tail fans, spikes and clubs move with the
+last tail segment.
+
+### Jointed rigs and animation
+
+The 24 land and 6 flying species are jointed. A leg, neck, tail or wing is a
+chain of rigid parts; each part names the part it hangs from
+(`ModelPart.parent`) and where its bone ends (`ModelPart.tip`), and every
+segment overlaps its neighbour at the joint, so a bend closes on itself. The
+shader and the 24-matrix layout are unchanged: the app composes parent and
+child on the CPU (`PrehistoricRig`, `PrehistoricPose`) and hands the renderer
+one finished matrix for each part, as before. The five marine reptiles and
+Deinosuchus are not jointed and keep the fish and quadruped animators.
+
+| Body plan | Parts | Motion |
+| --- | --- | --- |
+| Bipeds (theropods, biped herbivores, Therizinosaurus; 18) | body, neck, head, lower jaw (theropods), three tail segments, two arms, and thigh, shin and foot for each leg | Feet are solved to planted targets, so a foot that stands does not slide. The hips rise over each standing leg, the tail swings against them, and neck and head keep the eyes level. |
+| Quadrupeds (ceratopsians, armoured dinosaurs, sauropods; 6) | body, head, two to four tail segments, upper leg, lower leg and foot for each of four legs, and four neck segments for the sauropods | A walk sets one foot down after another; the lighter animals trot at speed. Sauropod necks share every turn over their segments and sweep while feeding. Armoured tails swing when the animal is alert. |
+| Flyers (five pterosaurs, Microraptor) | body, neck, head, inner and outer wing for each side (Microraptor: fore and hind wings), legs, tail | Wings beat in `takeoff`, `flap` and `landing`, are held in a shallow V in a `glide`, and fold back along the body at rest. The body banks into a turn and pitches with its path; the head stays level. |
+
+Stride and cadence follow hip height (the dynamic similarity of walking
+animals), so at one speed a Compsognathus takes many short steps and a
+Tyrannosaurus few long ones. Where a stride is longer than the legs can sweep
+on the ground, the rest of it is spent in the air (a shorter stance), so the
+legs never hurry or slow against the pace. A standing foot stays where it is
+at a steady pace (measured: within 0.1% of the leg length for all 24 walkers);
+while the pace changes, stride and stance change with it and a standing foot
+may shift for a few steps (at most 19% of the leg through the start or the end
+of a chase). A quadruped changes between its walk and its trot over a few
+steps, not within a frame. Wing beats follow wingspan: about 4.6 a second
+for Microraptor, about 1.3 for Quetzalcoatlus. An idle or gliding animal looks
+around: it settles on a new direction every few seconds, in its own time, so a
+herd does not move in unison. The actions read differently: `browse` lowers the
+head to feed (a brachiosaur reaches up), `alert` raises the body and scans
+quickly, `charge` lowers the head and lengthens the stride, `eat` and a strike
+open a theropod's jaw, and `recover` sinks the body.
+
+All of this is presentation. The renderer keeps one small motion state for each
+creature it draws (`PrehistoricMotionStore`): speed, turn rate and climb read
+from where the creature is drawn, a step and a wing phase advanced from those,
+and eased weights for the replicated action, so a change of action never pops.
+It is never saved, never sent over the LAN, never read by the simulation, and
+it draws on no simulation RNG. The store keeps its own clock, which only runs
+forward: the renderer's frame time wraps every half hour, and a creature must
+neither stall nor snap when it does. A LAN guest's mirrored creatures do not tick;
+they animate from the same reading, and because a mirror's position arrives
+only five times a second, a mirrored prehistoric creature is drawn gliding
+from each snapshot to the next (one snapshot interval behind the host)
+instead of jumping.
 
 Creature voices combine bundled Suno-derived recordings with native synthesis and accessibility
 subtitles. Each of the 36 species has its own grazing/quiet-feeding, attack, and injury WAV. The

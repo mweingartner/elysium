@@ -3,6 +3,8 @@ import XCTest
 @testable import ElysiumCore
 
 final class PrehistoricModelTests: XCTestCase {
+    /// The animator profiles of the jointed rigs (`PrehistoricRig.Plan`).
+    private let jointedPlans = PrehistoricRigPlan.allCases.map(\.rawValue)
     private let expectedIDs = [
         "prehistoric.compsognathus", "prehistoric.coelophysis", "prehistoric.velociraptor",
         "prehistoric.dilophosaurus", "prehistoric.deinonychus", "prehistoric.allosaurus",
@@ -199,10 +201,12 @@ final class PrehistoricModelTests: XCTestCase {
                                     "Pteranodon's skull, beak, and crest must share one head pose")
         XCTAssertFalse(pteranodon.parts.contains { ["beak", "crest", "skullCrest", "crown"].contains($0.name) },
                        "Pterosaur skull landmarks cannot be independently rooted")
-        for wingName in ["wingR", "wingL"] {
+        for (wingName, tipName) in [("wingR", "wingTipR"), ("wingL", "wingTipL")] {
             let wing = try meshBackedPart(pteranodon, named: wingName, id: "prehistoric.pteranodon")
-            XCTAssertGreaterThanOrEqual(wing.meshes.count, 2,
-                                        "\(wingName) needs one complete arm/finger/membrane pose, not a disconnected outer wing")
+            XCTAssertGreaterThanOrEqual(wing.meshes.count, 2, "\(wingName) needs its arm and its inner membrane")
+            let tip = try meshBackedPart(pteranodon, named: tipName, id: "prehistoric.pteranodon")
+            XCTAssertGreaterThanOrEqual(tip.meshes.count, 2, "\(tipName) needs its wing finger and its outer membrane")
+            XCTAssertEqual(tip.parent, wingName, "the outer wing hangs from the inner wing at the wrist")
         }
 
         let ichthyosaurus = getModel("prehistoric.ichthyosaurus")
@@ -212,16 +216,16 @@ final class PrehistoricModelTests: XCTestCase {
         XCTAssertTrue(hasVerticalTailFluke(ichthyosaurus),
                       "Ichthyosaurus needs a vertical tail fluke, not a dolphin-like horizontal tail")
 
-        // Each landmark is carried by the rigid slot which its animation moves.
-        // The renderer has no parent transform hierarchy, so split decorative
-        // parts would otherwise detach during look, browse, or walk poses.
+        // Each landmark is carried by the rigid slot which its animation moves: a crest
+        // turns with the skull, a tail fan with the last tail segment, a claw with the
+        // foot. (A theropod's lower jaw is its own part, hinged on the head.)
         let taxonLandmarks: [(String, String, Int)] = [
-            ("prehistoric.dilophosaurus", "head", 4),
-            ("prehistoric.velociraptor", "tail", 2),
-            ("prehistoric.deinonychus", "legR", 3),
-            ("prehistoric.deinonychus", "legL", 3),
-            ("prehistoric.ceratosaurus", "head", 3),
-            ("prehistoric.carnotaurus", "head", 4),
+            ("prehistoric.dilophosaurus", "head", 3),
+            ("prehistoric.velociraptor", "tail2", 2),
+            ("prehistoric.deinonychus", "footR", 3),
+            ("prehistoric.deinonychus", "footL", 3),
+            ("prehistoric.ceratosaurus", "head", 2),
+            ("prehistoric.carnotaurus", "head", 3),
             ("prehistoric.spinosaurus", "body", 2),
             ("prehistoric.therizinosaurus", "armR", 5),
             ("prehistoric.therizinosaurus", "armL", 5),
@@ -274,8 +278,8 @@ final class PrehistoricModelTests: XCTestCase {
     }
 
     func testBipedHipsJoinTheirPresentationTorsosAndCeratopsianFrillsAreTransverse() throws {
-        let bipedIDs = expectedIDs.filter { getModel($0).anim == "biped" }
-        XCTAssertFalse(bipedIDs.isEmpty)
+        let bipedIDs = expectedIDs.filter { getModel($0).anim == PrehistoricRigPlan.biped.rawValue }
+        XCTAssertEqual(bipedIDs.count, 18)
         for id in bipedIDs {
             let model = getModel(id)
             let body = try meshBackedPart(model, named: "body", id: id)
@@ -295,6 +299,104 @@ final class PrehistoricModelTests: XCTestCase {
                 let foreAft = localAxisSpan(mesh, keyPath: \.z)
                 return lateral > 10 && lateral > foreAft * 3.5
             }, "\(id) needs a broad transverse frill, not a sagittal dorsal sail")
+        }
+    }
+
+    /// The jointed rigs: which part hangs from which, and where each bone ends. The
+    /// renderer's pose code trusts this data, so it is pinned here next to the models.
+    func testJointedModelsNameTheirParentsAndTheirBonesMeetAtTheJoints() throws {
+        let expectedParts: [String: Int] = [
+            "compsognathus": 15, "coelophysis": 15, "velociraptor": 15, "dilophosaurus": 15, "deinonychus": 15,
+            "allosaurus": 15, "ceratosaurus": 15, "carnotaurus": 15, "tyrannosaurus": 15, "spinosaurus": 15,
+            "therizinosaurus": 15,
+            "dryosaurus": 14, "pachycephalosaurus": 14, "gallimimus": 14, "oviraptor": 14,
+            "parasaurolophus": 14, "edmontosaurus": 14, "iguanodon": 14,
+            "triceratops": 16, "styracosaurus": 16, "stegosaurus": 17, "ankylosaurus": 17,
+            "diplodocus": 22, "brachiosaurus": 22,
+            "dimorphodon": 11, "rhamphorhynchus": 11, "pteranodon": 10, "tapejara": 10, "quetzalcoatlus": 11,
+            "microraptor": 10,
+            // The swimmers are not jointed and keep their part lists.
+            "ichthyosaurus": 7, "plesiosaurus": 10, "elasmosaurus": 14, "liopleurodon": 9, "mosasaurus": 7,
+            "deinosuchus": 8,
+        ]
+        XCTAssertEqual(expectedParts.count, expectedIDs.count)
+        var jointed = 0
+        for id in expectedIDs {
+            let model = getModel(id)
+            let short = String(id.dropFirst("prehistoric.".count))
+            XCTAssertEqual(model.parts.count, expectedParts[short], "\(id) part count")
+            guard jointedPlans.contains(model.anim) else {
+                XCTAssertTrue(model.parts.allSatisfy { $0.parent == nil && $0.tip == nil },
+                              "\(id) is not jointed and must not claim rig data")
+                continue
+            }
+            jointed += 1
+            var seen: [String: ModelPart] = [:]
+            for part in model.parts {
+                if part.name == "body" {
+                    XCTAssertNil(part.parent, "\(id): the body is the root")
+                    XCTAssertTrue(part.rot == (0, 0, 0), "\(id): the body carries no baked rotation")
+                } else {
+                    let parentName = try XCTUnwrap(part.parent, "\(id).\(part.name) hangs from nothing")
+                    let parent = try XCTUnwrap(seen[parentName], "\(id).\(part.name): parent \(parentName) must come first")
+                    // A segment of a limb, a neck, a tail or a wing starts where its parent's bone ends.
+                    let continues = part.name.hasPrefix("shin") || part.name.hasPrefix("foot")
+                        || part.name.hasPrefix("wingTip") || (part.name.last?.isNumber ?? false)
+                    if continues {
+                        let tip = try XCTUnwrap(parent.tip, "\(id).\(parentName) needs a bone end for \(part.name)")
+                        let cosX = Foundation.cos(parent.rot.0), sinX = Foundation.sin(parent.rot.0)
+                        let joint = (parent.pivot.0 + tip.0,
+                                     parent.pivot.1 + tip.1 * cosX - tip.2 * sinX,
+                                     parent.pivot.2 + tip.1 * sinX + tip.2 * cosX)
+                        XCTAssertEqual(joint.0, part.pivot.0, accuracy: 0.001, "\(id).\(part.name) x")
+                        XCTAssertEqual(joint.1, part.pivot.1, accuracy: 0.001, "\(id).\(part.name) y")
+                        XCTAssertEqual(joint.2, part.pivot.2, accuracy: 0.001, "\(id).\(part.name) z")
+                        XCTAssertTrue(parent.rot.1 == 0 && parent.rot.2 == 0, "\(id).\(parentName): chains bake x rotation only")
+                    }
+                }
+                if let tip = part.tip {
+                    XCTAssertTrue(tip.0.isFinite && tip.1.isFinite && tip.2.isFinite, "\(id).\(part.name) bone end")
+                    XCTAssertGreaterThan(tip.0 * tip.0 + tip.1 * tip.1 + tip.2 * tip.2, 0.01, "\(id).\(part.name) has no length")
+                }
+                seen[part.name] = part
+            }
+            // Feet stand on the ground: the walking legs end within a toe's depth of y = 0.
+            for part in model.parts where part.name.hasPrefix("foot") {
+                let tip = try XCTUnwrap(part.tip)
+                let ground = part.pivot.1 + tip.1
+                XCTAssertTrue((-0.05...2.2).contains(ground), "\(id).\(part.name) ends \(ground) units above the ground")
+            }
+        }
+        XCTAssertEqual(jointed, 30, "24 land and 6 flying species are jointed")
+    }
+
+    /// The pose code drives both sides of an animal with the same numbers, so a left limb that
+    /// is not the mirror of its right one would limp or fly crooked.
+    func testEveryJointedLimbMirrorsItsOtherSide() throws {
+        for id in expectedIDs where jointedPlans.contains(getModel(id).anim) {
+            let model = getModel(id)
+            let byName = Dictionary(uniqueKeysWithValues: model.parts.map { ($0.name, $0) })
+            var pairs = 0
+            for part in model.parts where part.name.hasSuffix("L") {
+                let rightName = String(part.name.dropLast()) + "R"
+                let right = try XCTUnwrap(byName[rightName], "\(id).\(part.name) has no \(rightName)")
+                pairs += 1
+                XCTAssertEqual(part.pivot.0, -right.pivot.0, accuracy: 0.001, "\(id).\(part.name) pivot x")
+                XCTAssertEqual(part.pivot.1, right.pivot.1, accuracy: 0.001, "\(id).\(part.name) pivot y")
+                XCTAssertEqual(part.pivot.2, right.pivot.2, accuracy: 0.001, "\(id).\(part.name) pivot z")
+                XCTAssertEqual(part.rot.0, right.rot.0, accuracy: 0.001, "\(id).\(part.name) pitch")
+                XCTAssertEqual(part.rot.1, -right.rot.1, accuracy: 0.001, "\(id).\(part.name) yaw")
+                XCTAssertEqual(part.rot.2, -right.rot.2, accuracy: 0.001, "\(id).\(part.name) roll")
+                XCTAssertEqual(part.parent.map { $0.hasSuffix("L") ? String($0.dropLast()) + "R" : $0 }, right.parent,
+                               "\(id).\(part.name) hangs from the mirror of \(rightName)'s parent")
+                XCTAssertEqual(part.tip == nil, right.tip == nil, "\(id).\(part.name) bone end")
+                if let tip = part.tip, let other = right.tip {
+                    XCTAssertEqual(tip.0, -other.0, accuracy: 0.001, "\(id).\(part.name) bone end x")
+                    XCTAssertEqual(tip.1, other.1, accuracy: 0.001, "\(id).\(part.name) bone end y")
+                    XCTAssertEqual(tip.2, other.2, accuracy: 0.001, "\(id).\(part.name) bone end z")
+                }
+            }
+            XCTAssertGreaterThanOrEqual(pairs, 2, "\(id) has paired limbs")
         }
     }
 }

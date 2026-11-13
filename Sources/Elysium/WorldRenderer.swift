@@ -365,6 +365,7 @@ final class WorldRenderer {
     var drawCalls = 0
 
     let entityRenderer: EntityRendererM
+    private let prehistoricMotion = PrehistoricMotionStore()
     let particles: ParticleSystemM
 
     // item sprite atlas (dropped items / thrown projectiles)
@@ -1673,6 +1674,7 @@ final class WorldRenderer {
     private func presentEntities(game: GameCore, camPos: SIMD3<Double>,
                                  partial: Double, timeSec: Double) -> [PresentedEntity] {
         let w = game.world
+        prehistoricMotion.beginFrame(time: timeSec)
         let maxD = game.settings.entityDistance * game.settings.entityDistance
         var result: [PresentedEntity] = []
         for e in w.entities {
@@ -1730,8 +1732,13 @@ final class WorldRenderer {
             pose.open = (ent as? Shulker)?.peekAmount ?? 0
             pose.hanging = (ent as? Bat)?.hanging ?? (ent.data.hanging ?? false)
             pose.alpha = deathFlip > 0 ? 1 - deathFlip * 0.6 : 1
+            // A jointed prehistoric creature steps and beats its wings from what this frame sees
+            // of it; a LAN guest's copy is also drawn gliding between its snapshots.
+            if let name, let rig = entityRenderer.geom(name).prehistoricRig {
+                prehistoricMotion.present(&pose, entity: ent, rig: rig)
+            }
             let snapshot = name.map { entityRenderer.snapshot(name: $0, p: pose, time: timeSec, origin: camPos) }
-            result.append(PresentedEntity(entity: ent, position: SIMD3(ix, iy, iz), snapshot: snapshot,
+            result.append(PresentedEntity(entity: ent, position: SIMD3(pose.x, pose.y, pose.z), snapshot: snapshot,
                                           primaryVisible: primaryVisible))
         }
         return result

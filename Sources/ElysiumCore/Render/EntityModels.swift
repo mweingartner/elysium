@@ -61,15 +61,25 @@ public struct ModelPart {
     public let rot: (Double, Double, Double)   // baked rotation, radians (XYZ order)
     public let boxes: [ModelBox]
     public let meshes: [ModelMesh]
+    /// The part this one hangs from, for a jointed rig. A part with a parent is listed after it.
+    /// Only a pose routine that composes parent and child reads this (the prehistoric rig);
+    /// every other animator poses each part on its own, as before.
+    public let parent: String?
+    /// The far end of the part's bone, in the part's own units: the next joint of a chain, or
+    /// the point of a foot that stands on the ground. Rig data, never drawn.
+    public let tip: (Double, Double, Double)?
 
     public init(name: String, pivot: (Double, Double, Double),
                 rot: (Double, Double, Double) = (0, 0, 0), boxes: [ModelBox],
-                meshes: [ModelMesh] = []) {
+                meshes: [ModelMesh] = [], parent: String? = nil,
+                tip: (Double, Double, Double)? = nil) {
         self.name = name
         self.pivot = pivot
         self.rot = rot
         self.boxes = boxes
         self.meshes = meshes
+        self.parent = parent
+        self.tip = tip
     }
 }
 

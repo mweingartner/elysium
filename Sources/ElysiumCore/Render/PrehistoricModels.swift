@@ -4,7 +4,8 @@
 // native, editable low-poly rigid-part models for the existing Metal entity
 // renderer: they neither load external meshes nor borrow a resource-pack skin.
 // Keep every model at 24 parts or fewer because EntityUniforms exposes exactly
-// 24 pose matrices.
+// 24 pose matrices.  The land and flying creatures are jointed (a part names
+// the part it hangs from); the swimmers pose each part on its own.
 
 import Foundation
 
@@ -46,6 +47,18 @@ public func prehistoricModelValidationErrors() -> [String] {
         }
         if !model.packTex.isEmpty {
             errors.append("prehistoric model must use its native procedural skin: \(id)")
+        }
+        // A jointed model lists every parent before its children, so a pose composes in
+        // one forward pass, and every bone end is a real point.
+        var earlier = Set<String>()
+        for part in model.parts {
+            if let parent = part.parent, !earlier.contains(parent) {
+                errors.append("model part hangs from a part that does not come before it: \(id).\(part.name)")
+            }
+            if let tip = part.tip, !(tip.0.isFinite && tip.1.isFinite && tip.2.isFinite) {
+                errors.append("model part has a non-finite bone end: \(id).\(part.name)")
+            }
+            earlier.insert(part.name)
         }
         var triangleCount = 0
         for part in model.parts {
@@ -107,6 +120,14 @@ public func prehistoricModelValidationErrors() -> [String] {
         }
     }
     return errors
+}
+
+/// The body plans of the jointed prehistoric models. The raw value is the model's `anim`
+/// key; the app reads the plan back from it (`PrehistoricRig`), so a plan is named here only.
+public enum PrehistoricRigPlan: String, CaseIterable, Sendable {
+    case biped = "prehistoricBiped"
+    case quadruped = "prehistoricQuadruped"
+    case flyer = "prehistoricFlyer"
 }
 
 enum PrehistoricRigFamily {

@@ -1,7 +1,9 @@
 // Faceted native meshes for Elysium's airborne and aquatic prehistoric families.
 //
-// These retain the established rigid part names so the renderer's bounded
-// phantom, fish, and quadruped pose paths keep working.  Geometry is authored
+// The swimmers retain the established rigid part names, so the renderer's bounded
+// fish and quadruped pose paths keep working.  The pterosaurs are jointed: each
+// wing is an inner part (arm and inner membrane) and an outer part (wing finger
+// and outer membrane) that hangs from it at the wrist.  Geometry is authored
 // directly from the safe primitive vocabulary in PrehistoricLowPolyModels.swift.
 
 private func airWaterRotatedPart(_ name: String, _ pivot: (Double, Double, Double),
@@ -9,21 +11,48 @@ private func airWaterRotatedPart(_ name: String, _ pivot: (Double, Double, Doubl
     ModelPart(name: name, pivot: pivot, rot: rot, boxes: [], meshes: meshes)
 }
 
-private func airWaterWingMeshes(side: Double, span: Double, chord: Double,
-                                tipSweep: Double, rootRadius: Double) -> [ModelMesh] {
-    let bone = lpTube(.x, [
+/// One pterosaur wing, cut at the wrist.  The outline is the single-piece wing's; the cut runs
+/// along the chord, so the outer wing hinges on it like a door and no gap opens when it lags
+/// the inner wing in a beat.  `wrist` is seen from the shoulder, `tip` from the wrist.
+private struct AirWaterWing {
+    let inner: [ModelMesh]
+    let outer: [ModelMesh]
+    let wrist: LowPolyPoint
+    let tip: LowPolyPoint
+}
+
+private func airWaterWing(side: Double, span: Double, chord: Double,
+                          tipSweep: Double, rootRadius: Double) -> AirWaterWing {
+    let wristShare = 0.40
+    let wrist = lp(side * span * wristShare, -0.19, tipSweep * 0.21)
+    let rootLead = lp(0, 0.30, -chord * 0.44)
+    let lead = lp(side * span * 0.23, 0.06, -chord * 0.57 + tipSweep * 0.12)
+    let tip = lp(side * span * 0.86, -0.50, tipSweep * 0.84)
+    let trail = lp(side * span * 0.63, -0.84, chord * 0.58 + tipSweep * 0.24)
+    let rootTrail = lp(side * span * 0.10, -0.26, chord * 0.44)
+    // Where the wrist chord meets the leading and the trailing edge of the outline.
+    let leadCut = lead + (tip - lead) * ((wristShare - 0.23) / (0.86 - 0.23))
+    let trailCut = rootTrail + (trail - rootTrail) * ((wristShare - 0.10) / (0.63 - 0.10))
+    let thickness = lp(0.20, 0.26, 0.16)
+
+    let arm = lpTube(.x, [
         lpr(0, 0, 0, rootRadius, rootRadius * 0.82),
-        lpr(side * span * 0.38, -0.18, tipSweep * 0.20, rootRadius * 0.72, rootRadius * 0.58),
-        lpr(side * span * 0.72, -0.38, tipSweep * 0.55, rootRadius * 0.38, rootRadius * 0.31),
+        lpr(wrist.x, wrist.y, wrist.z, rootRadius * 0.70, rootRadius * 0.57),
+        // A short dome beyond the wrist keeps the joint closed when the wing folds.
+        lpr(wrist.x + side * rootRadius * 0.5, wrist.y, wrist.z, rootRadius * 0.42, rootRadius * 0.34),
     ], sides: 6)
-    let membrane = lpBlade([
-        lp(0, 0.30, -chord * 0.44),
-        lp(side * span * 0.23, 0.06, -chord * 0.57 + tipSweep * 0.12),
-        lp(side * span * 0.86, -0.50, tipSweep * 0.84),
-        lp(side * span * 0.63, -0.84, chord * 0.58 + tipSweep * 0.24),
-        lp(side * span * 0.10, -0.26, chord * 0.44),
-    ], thickness: lp(0.20, 0.26, 0.16))
-    return [bone, membrane]
+    let innerMembrane = lpBlade([rootLead, lead, leadCut, trailCut, rootTrail], thickness: thickness)
+
+    let fingerEnd = lp(side * span * 0.72, -0.38, tipSweep * 0.55) - wrist
+    let finger = lpTube(.x, [
+        lpr(-side * rootRadius * 0.5, 0, 0, rootRadius * 0.42, rootRadius * 0.34),
+        lpr(0, 0, 0, rootRadius * 0.68, rootRadius * 0.55),
+        lpr(fingerEnd.x, fingerEnd.y, fingerEnd.z, rootRadius * 0.38, rootRadius * 0.31),
+    ], sides: 6)
+    let outerMembrane = lpBlade([leadCut - wrist, tip - wrist, trail - wrist, trailCut - wrist],
+                                thickness: thickness)
+    return AirWaterWing(inner: [arm, innerMembrane], outer: [finger, outerMembrane],
+                        wrist: wrist, tip: tip - wrist)
 }
 
 private func airWaterPaddleMeshes(side: Double, span: Double, chord: Double,
@@ -107,11 +136,11 @@ func lowPolyPterosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
         lpr(0, 0.08, bodyLength * 0.26, bodyRadius * 0.84, bodyHeight * 0.80),
         lpr(0, -0.20, bodyLength * 0.50, bodyRadius * 0.46, bodyHeight * 0.46),
     ], sides: 7)
-    let neck = lpTube(.z, [
+    let neckRings = [
         lpr(0, 0, 3.0, bodyRadius * 0.43, bodyHeight * 0.42),
         lpr(0, neckRise * 0.40, -neckLength * 0.44, bodyRadius * 0.30, bodyHeight * 0.30),
         lpr(0, neckRise, -neckLength, bodyRadius * 0.22, bodyHeight * 0.23),
-    ], sides: 7)
+    ]
     let headWidth = azhdarchid ? 3.3 : (pteranodon ? 4.0 : (tapejara ? 3.9 : (dimorphodon ? 4.3 : 3.0)))
     let head = lpTube(.z, [
         lpr(0, 0.15, 1.8, headWidth, headWidth * 0.76),
@@ -131,29 +160,12 @@ func lowPolyPterosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
         lpTranslated(beak, by: lp(0, -0.35, -headLength * 0.72)),
     ]
     let tailLength = rhamphorhynchus ? 28.0 : (dimorphodon ? 20.0 : (azhdarchid ? 4.8 : (pteranodon ? 5.6 : 5.0)))
-    let tail = lpTube(.z, [
+    let tailRings = [
         lpr(0, 0, 0, bodyRadius * 0.42, bodyHeight * 0.38),
         lpr(0, 0.05, tailLength * 0.35, bodyRadius * 0.23, bodyHeight * 0.21),
         lpr(0, 0, tailLength, 0.22, 0.22),
-    ], sides: 7)
-    var tailMeshes: [ModelMesh] = [tail]
-    var parts: [ModelPart] = [
-        lpPart("body", (0, chestY, 0), body),
-        lpPart("neck", (0, chestY + bodyHeight * 0.26, -bodyLength * 0.34), neck),
-        lpPart("head", headPivot, headMeshes),
-        // The complete arm/finger/membrane span is one rigid wing pose.  The
-        // previous split roots could not compose transforms in this renderer
-        // and visibly opened a gap while flapping or folding.
-        lpPart("wingR", (-bodyRadius * 0.78, chestY + bodyHeight * 0.36, shoulderZ),
-               airWaterWingMeshes(side: -1, span: wingSpan * 0.95, chord: wingChord, tipSweep: wingChord * 0.42, rootRadius: bodyRadius * 0.22)),
-        lpPart("wingL", (bodyRadius * 0.78, chestY + bodyHeight * 0.36, shoulderZ),
-               airWaterWingMeshes(side: 1, span: wingSpan * 0.95, chord: wingChord, tipSweep: wingChord * 0.42, rootRadius: bodyRadius * 0.22)),
-        lpPart("legR", (-bodyRadius * 0.45, legHeight, bodyLength * 0.20),
-               lpLeg(legHeight, footLength: azhdarchid ? 9.0 : 5.0, footWidth: azhdarchid ? 2.2 : 1.5)),
-        lpPart("legL", (bodyRadius * 0.45, legHeight, bodyLength * 0.20),
-               lpLeg(legHeight, footLength: azhdarchid ? 9.0 : 5.0, footWidth: azhdarchid ? 2.2 : 1.5)),
-        airWaterRotatedPart("tail", (0, chestY - bodyHeight * 0.08, bodyLength * 0.43), (-0.10, 0, 0), tailMeshes),
     ]
+    var tailExtras: [ModelMesh] = []
     if longTail {
         let vaneWidth = rhamphorhynchus ? 6.2 : 4.8
         let vaneHeight = rhamphorhynchus ? 5.6 : 4.2
@@ -161,7 +173,7 @@ func lowPolyPterosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
             lp(0, -vaneHeight, 0), lp(0, 0, vaneWidth),
             lp(0, vaneHeight, 0), lp(0, 0, -vaneWidth * 0.72),
         ], thickness: lp(0.52, 0.20, 0.22))
-        tailMeshes.append(lpTranslated(vane, by: lp(0, 0, tailLength)))
+        tailExtras.append(lpTranslated(vane, by: lp(0, 0, tailLength)))
     }
     if dimorphodon {
         let crest = lpBlade([
@@ -191,9 +203,36 @@ func lowPolyPterosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
         ], thickness: lp(0.72, 0.24, 0.20))
         headMeshes.append(crown)
     }
-    parts[2] = lpPart("head", headPivot, headMeshes)
-    parts[7] = airWaterRotatedPart("tail", (0, chestY - bodyHeight * 0.08, bodyLength * 0.43), (-0.10, 0, 0), tailMeshes)
-    return MobModel(texW: 128, texH: 128, parts: parts, anim: "prehistoricPterosaur", scale: recipe.scale,
+    // The long azhdarchid neck bends in the middle; the long tails of the early pterosaurs
+    // carry their vane on a second segment.
+    let neckNames = azhdarchid ? ["neck", "neck1"] : ["neck"]
+    let tailNames = longTail ? ["tail", "tail1"] : ["tail"]
+    let shoulderY = chestY + bodyHeight * 0.36
+    func wing(_ side: Double) -> AirWaterWing {
+        airWaterWing(side: side, span: wingSpan * 0.95, chord: wingChord, tipSweep: wingChord * 0.42,
+                     rootRadius: bodyRadius * 0.22)
+    }
+    let legMeshes = lpLeg(legHeight, footLength: azhdarchid ? 9.0 : 5.0, footWidth: azhdarchid ? 2.2 : 1.5)
+    var parts: [ModelPart] = [lpJoint("body", parent: nil, (0, chestY, 0), [body])]
+    parts += lpChain(neckNames, parent: "body", pivot: (0, chestY + bodyHeight * 0.26, -bodyLength * 0.34),
+                     rings: neckRings, cuts: Array(0..<neckNames.count))
+    parts.append(lpJoint("head", parent: neckNames[neckNames.count - 1], headPivot,
+                         tip: lp(0, -0.53, -headLength * 0.72 - beakLength), headMeshes))
+    for (suffix, side) in [("R", -1.0), ("L", 1.0)] {
+        let shoulder = (side * bodyRadius * 0.78, shoulderY, shoulderZ)
+        let wing = wing(side)
+        parts.append(lpJoint("wing\(suffix)", parent: "body", shoulder, tip: wing.wrist, wing.inner))
+        parts.append(lpJoint("wingTip\(suffix)", parent: "wing\(suffix)",
+                             (shoulder.0 + wing.wrist.x, shoulder.1 + wing.wrist.y, shoulder.2 + wing.wrist.z),
+                             tip: wing.tip, wing.outer))
+    }
+    parts.append(lpJoint("legR", parent: "body", (-bodyRadius * 0.45, legHeight, bodyLength * 0.20),
+                         tip: lp(0, -legHeight, -1.4), legMeshes))
+    parts.append(lpJoint("legL", parent: "body", (bodyRadius * 0.45, legHeight, bodyLength * 0.20),
+                         tip: lp(0, -legHeight, -1.4), legMeshes))
+    parts += lpChain(tailNames, parent: "body", pivot: (0, chestY - bodyHeight * 0.08, bodyLength * 0.43),
+                     rotX: -0.10, rings: tailRings, cuts: Array(0..<tailNames.count), lastExtras: tailExtras)
+    return MobModel(texW: 128, texH: 128, parts: parts, anim: PrehistoricRigPlan.flyer.rawValue, scale: recipe.scale,
                     paint: prehistoricPaint(recipe, headDepth: Int(headLength + beakLength * 0.32), eyeX: 1, eyeY: 2, eyeGap: 4))
 }
 
