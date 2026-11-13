@@ -326,9 +326,12 @@ enum PrehistoricPose {
             let jointed = rig.wings.contains { $0.outer >= 0 }
 
             // In the air the body follows the flight path, banks into a turn and rides the beat.
+            // Beating its wings without getting anywhere (a hover, the first beats of a
+            // take-off), it holds itself more upright.
             let path = atan2(motion.climb, max(2, motion.speed))
+            let slow = 1 - PrehistoricRig.smoothstep(0.5, 2.5, motion.speed)
             let pitch = min(0.8, fold * 0.10 + flight * max(-0.45, min(0.6, 0.8 * path))
-                + 0.30 * w.takeoff + 0.40 * w.landing + 0.01 * breath)
+                + 0.30 * w.takeoff + 0.40 * w.landing + 0.25 * power * slow + 0.01 * breath)
             let bank = flight * max(-0.7, min(0.7, -motion.turn * 0.45))
             let heave = -power * rig.wingLength * 0.05 * cos(stroke - 0.6)
             joint[rig.body] = mTranslate(matrix_identity_float4x4, 0, heave, 0)

@@ -102,7 +102,9 @@ struct PrehistoricMotionState {
     /// A creature that moved farther than this in one frame was moved, not walking.
     static let teleportDistance = 8.0
 
-    init(_ seen: PrehistoricObservation, time: Double) {
+    /// `plan` is the creature's body plan when the caller knows it: a flyer first seen off the
+    /// ground is already flying.
+    init(_ seen: PrehistoricObservation, time: Double, plan: PrehistoricRig.Plan? = nil) {
         self.time = time
         x = seen.x; y = seen.y; z = seen.z; yaw = seen.yaw
         fromX = seen.x; fromY = seen.y; fromZ = seen.z; fromYaw = seen.yaw
@@ -114,7 +116,7 @@ struct PrehistoricMotionState {
         attack = seen.attack
         motion.seed = seen.seed
         // A creature seen for the first time is already doing what it does: no easing in.
-        motion.weights = Self.targetWeights(seen.action)
+        motion.weights = Self.targetWeights(seen, plan: plan)
         motion.airborne = seen.onGround ? 0 : 1
         // Spread a herd's legs and wings over their cycles.
         motion.gaitPhase = Float(seen.seed & 0xff) / 256
@@ -122,8 +124,16 @@ struct PrehistoricMotionState {
         motion.clock = time
     }
 
-    /// The weights an action aims for.
-    static func targetWeights(_ action: PrehistoricAction) -> PrehistoricActionWeights {
+    /// The weights that what is seen of a creature aims for, given its body plan. The one place
+    /// that decides when a flyer counts as off the ground: whenever it does not stand.
+    static func targetWeights(_ seen: PrehistoricObservation, plan: PrehistoricRig.Plan?) -> PrehistoricActionWeights {
+        targetWeights(seen.action, flyerOffGround: plan == .flyer && !seen.onGround)
+    }
+
+    /// The weights an action aims for. A flyer that is off the ground is flying whatever its
+    /// action says: one held in the air with nowhere to go is `idle`, and it beats its wings in
+    /// place instead of standing in the air with them folded.
+    static func targetWeights(_ action: PrehistoricAction, flyerOffGround: Bool = false) -> PrehistoricActionWeights {
         var w = PrehistoricActionWeights()
         switch action {
         case .browse: w.browse = 1
@@ -136,6 +146,10 @@ struct PrehistoricMotionState {
         case .glide: w.flight = 1
         case .landing: w.flight = 1; w.power = 1; w.landing = 1
         case .idle, .cruise, .surface, .dive, .turn, .burst, .stranded: break
+        }
+        if flyerOffGround, w.flight == 0 {
+            w.flight = 1
+            w.power = 1
         }
         return w
     }
@@ -152,7 +166,7 @@ struct PrehistoricMotionState {
         let elapsed = now - time
         if elapsed < 0 {
             let frame = lastFrame
-            self = PrehistoricMotionState(seen, time: now)
+            self = PrehistoricMotionState(seen, time: now, plan: rig.plan)
             lastFrame = frame
             return (x, y, z, yaw)
         }
@@ -234,7 +248,7 @@ struct PrehistoricMotionState {
         }
 
         // Actions and wings.
-        let target = Self.targetWeights(seen.action)
+        let target = Self.targetWeights(seen, plan: rig.plan)
         ease(&motion.weights.browse, toward: target.browse, seconds: 0.35)
         ease(&motion.weights.alert, toward: target.alert, seconds: 0.22)
         ease(&motion.weights.charge, toward: target.charge, seconds: 0.20)
@@ -317,7 +331,7 @@ final class PrehistoricMotionStore {
             scale: Float(pose.displayScale(modelScale: Double(rig.scale))),
             // A mirror shares its seed with the host's creature, so both screens agree.
             seed: PrehistoricPose.seed(entity.lanReplicationSourceID ?? entity.id))
-        var state = states[entity.id] ?? PrehistoricMotionState(seen, time: clock)
+        var state = states[entity.id] ?? PrehistoricMotionState(seen, time: clock, plan: rig.plan)
         let drawn = state.advance(seen, rig: rig, time: clock)
         state.lastFrame = frame
         states[entity.id] = state

@@ -396,6 +396,69 @@ final class PrehistoricPoseTests: XCTestCase {
         }
     }
 
+    func testAnIdleFlyerHeldInTheAirBeatsItsWingsAndFoldsThemOnceItStands() throws {
+        // A flyer with nowhere to go is held in the air with the action `idle`. Standing in the
+        // air with folded wings would read as a bug; it hovers, and folds when it is set down.
+        for name in Self.flyers {
+            var subject = try Subject(name)
+            subject.run(seconds: 2, onGround: false)
+            let spread = subject.rig.wingLength
+            let rate = Double(subject.rig.beatRate(scale: subject.rig.scale))
+            var low = Float.greatestFiniteMagnitude, high = -Float.greatestFiniteMagnitude
+            for _ in 0..<Int(3 / rate * 240) {
+                subject.step(dt: 1.0 / 240, onGround: false)
+                let reach = wingReach(subject)
+                XCTAssertGreaterThan(abs(reach.x), 0.5 * spread, "\(name) folds its wings in the air")
+                low = min(low, reach.y); high = max(high, reach.y)
+            }
+            XCTAssertGreaterThan(high - low, 0.6 * spread, "\(name) hangs in the air without beating its wings")
+            // Nose up while it gets nowhere: the body's forward axis gains height.
+            XCTAssertGreaterThan(-subject.matrices()[subject.rig.body].columns.2.y, 0.1, "\(name) hovers level like a glider")
+            subject.run(seconds: 2, onGround: true)
+            let folded = wingReach(subject)
+            XCTAssertLessThan(abs(folded.x), 0.5 * spread, "\(name) keeps its wings out after it stands")
+            XCTAssertGreaterThan(folded.z, 0.3 * spread, "\(name) folds its wings back along the body")
+        }
+    }
+
+    func testAFlyerWhoseFootingFlickersMovesNoFasterThanAWingBeat() throws {
+        // `onGround` now decides whether a flyer flies, and the server's collision can flip it
+        // every few ticks: on take-off before the feet leave, at a landing, or brushing a ledge
+        // while hovering. However it flickers, no wing may snap from one frame to the next.
+        // The limits are those of `testAPoseMovesSmoothlyThroughChangesOfActionAndPace`.
+        for name in Self.flyers {
+            var subject = try Subject(name)
+            subject.run(seconds: 1, onGround: false)
+            let size = subject.rig.wingLength
+            let wingLimit = Float(1.4 * 2 * Double.pi) * subject.rig.beatRate(scale: subject.rig.scale) / 120 + 0.05
+            // Each frame: the action, and whether the feet touch. A hover that brushes the ground
+            // every third frame, a take-off whose feet stay down for five frames, a landing whose
+            // feet touch, lift and touch again, and a perch.
+            var frames: [(PrehistoricAction, Bool)] = (0..<120).map { (.idle, $0 % 6 < 3) }
+            frames += (0..<120).map { (.takeoff, $0 < 5) }
+            frames += (0..<60).map { _ in (.landing, false) } + (0..<20).map { (.landing, $0 % 4 < 2) }
+            frames += (0..<240).map { (.idle, $0 < 8 ? $0 % 2 == 0 : true) }
+            var last = subject.matrices()
+            for (frame, (action, onGround)) in frames.enumerated() {
+                subject.step(dt: 1.0 / 120, action: action, onGround: onGround)
+                let now = subject.matrices()
+                for (index, part) in subject.model.parts.enumerated() {
+                    let wing = subject.rig.wings.contains { $0.inner == index || $0.outer == index }
+                    let leg = subject.rig.legs.contains { $0.upper == index || $0.lower == index || $0.foot == index }
+                    let turned = angle(last[index], now[index])
+                    let shifted = simd_distance(last[index].columns.3, now[index].columns.3) / size
+                    XCTAssertLessThan(turned, wing ? wingLimit : (leg ? 0.10 : 0.12),
+                                      "\(name).\(part.name) snaps by \(turned) rad at frame \(frame) (\(action.rawValue))")
+                    XCTAssertLessThan(shifted, wing ? 0.25 : 0.12,
+                                      "\(name).\(part.name) jumps by \(shifted) at frame \(frame) (\(action.rawValue))")
+                }
+                last = now
+            }
+            // Set down for good, it folds its wings.
+            XCTAssertLessThan(subject.motion.weights.flight, 0.05, "\(name) stays spread on the ground")
+        }
+    }
+
     func testAFlyerBanksIntoATurnAndPitchesWithItsPath() throws {
         for name in Self.flyers {
             var level = try Subject(name)

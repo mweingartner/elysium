@@ -146,6 +146,85 @@ final class PrehistoricMotionTests: XCTestCase {
         }
     }
 
+    func testAFlyerOffTheGroundIsFlyingWhateverItsActionAndALandAnimalIsNot() throws {
+        // The flight controller holds a flyer that has nowhere to go in the air with the action
+        // `idle`. It is drawn beating its wings in place, not standing in the air with them folded.
+        for action in PrehistoricAction.allCases {
+            let grounded = PrehistoricMotionState.targetWeights(action)
+            let aloft = PrehistoricMotionState.targetWeights(action, flyerOffGround: true)
+            XCTAssertEqual(aloft.flight, 1, "\(action): a flyer off the ground flies")
+            if grounded.flight == 1 {
+                XCTAssertEqual(aloft, grounded, "\(action): a flight action is drawn as itself")
+            } else {
+                XCTAssertEqual(aloft.power, 1, "\(action): held in the air, it beats its wings")
+                XCTAssertEqual(aloft.takeoff, 0); XCTAssertEqual(aloft.landing, 0)
+            }
+        }
+        // Read from what a frame sees: the state of a flyer, of a land animal, and a first sight.
+        func settled(_ name: String, onGround: Bool) throws -> PrehistoricMotion {
+            var subject = try Subject(name)
+            subject.run(seconds: 2, onGround: onGround)
+            return subject.motion
+        }
+        XCTAssertGreaterThan(try settled("pteranodon", onGround: false).weights.flight, 0.99)
+        XCTAssertGreaterThan(try settled("pteranodon", onGround: false).weights.power, 0.99)
+        XCTAssertLessThan(try settled("pteranodon", onGround: true).weights.flight, 0.01)
+        XCTAssertEqual(try settled("triceratops", onGround: false).weights.flight, 0, "a falling land animal does not fly")
+        XCTAssertGreaterThan(try settled("triceratops", onGround: false).airborne, 0.99)
+        let rig = try Subject("microraptor").rig
+        let seen = PrehistoricObservation(x: 0, y: 80, z: 0, yaw: 0, action: .idle, onGround: false, attack: 0,
+                                          mirror: true, scale: rig.scale, seed: 4)
+        XCTAssertEqual(PrehistoricMotionState(seen, time: 0, plan: rig.plan).motion.weights.flight, 1,
+                       "a flyer first seen in the air is already flying")
+        XCTAssertEqual(PrehistoricMotionState(seen, time: 0, plan: .quadruped).motion.weights.flight, 0)
+        XCTAssertEqual(PrehistoricMotionState(seen, time: 0).motion.weights.flight, 0)
+        // The store hands the entity's own `onGround` on, also for a guest's mirror.
+        let world = World(dim: .overworld, seed: 3)
+        let definition = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.microraptor"))
+        let hovering = PrehistoricCreature(world: world, definition: definition)
+        let perched = PrehistoricCreature(world: world, definition: definition)
+        hovering.onGround = false; hovering.lanReplicatedMirror = true
+        perched.onGround = true
+        let store = PrehistoricMotionStore()
+        var poses = (EntityPose(), EntityPose())
+        for frame in 1...90 {
+            store.beginFrame(time: Double(frame) / 60)
+            poses = (EntityPose(), EntityPose())
+            poses.0.y = 80; poses.1.y = 64
+            store.present(&poses.0, entity: hovering, rig: rig)
+            store.present(&poses.1, entity: perched, rig: rig)
+        }
+        XCTAssertGreaterThan(poses.0.motion.weights.flight, 0.99, "a hovering flyer is drawn flying")
+        XCTAssertLessThan(poses.1.motion.weights.flight, 0.01, "a perched flyer is drawn at rest")
+    }
+
+    func testAFlyerFirstSeenOrRestartedInTheAirIsDrawnFlyingFromItsFirstFrame() throws {
+        // A hovering flyer that comes into view, or whose state starts again on a restarted
+        // clock, must not unfold its wings out of a perched pose over the next third of a second.
+        let world = World(dim: .overworld, seed: 5)
+        let definition = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.pteranodon"))
+        let rig = try Subject("pteranodon").rig
+        let hovering = PrehistoricCreature(world: world, definition: definition)
+        hovering.onGround = false
+        let store = PrehistoricMotionStore()
+        store.beginFrame(time: 1)
+        var pose = EntityPose()
+        pose.y = 80
+        store.present(&pose, entity: hovering, rig: rig)
+        XCTAssertEqual(pose.motion.weights, PrehistoricMotionState.targetWeights(.idle, flyerOffGround: true),
+                       "the store's first sight of a hovering flyer is a perched one")
+        // A clock that runs backward starts the state again from what is seen: still in the air.
+        var subject = try Subject("pteranodon")
+        subject.run(seconds: 2, onGround: false)
+        var state = try XCTUnwrap(subject.state)
+        let seen = PrehistoricObservation(x: 0, y: 80, z: 0, yaw: 0, action: .idle, onGround: false, attack: 0,
+                                          mirror: false, scale: rig.scale, seed: subject.seed)
+        _ = state.advance(seen, rig: rig, time: 0.05)
+        XCTAssertEqual(state.motion.clock, 0.05)
+        XCTAssertEqual(state.motion.weights, PrehistoricMotionState.targetWeights(.idle, flyerOffGround: true),
+                       "a restarted flyer in the air folds its wings")
+    }
+
     func testTheMotionStoreKeepsOnlyWhatIsStillDrawn() throws {
         let world = World(dim: .overworld, seed: 1)
         let store = PrehistoricMotionStore()
