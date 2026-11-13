@@ -774,6 +774,12 @@ public final class PrehistoricCreature: Animal {
     public override var requiresBodyAwarePathing: Bool {
         definition.medium == .land && definition.bodyClearanceRadius > 1
     }
+    /// A flyer comes down under its own wings: its descent is no fall. `move` counts every
+    /// downward step as fall distance and a landing never cleared it, so a flyer was charged
+    /// for its whole flight the next time it touched the ground.
+    public override func fallDamageMultiplier(for fallDistance: Double) -> Double {
+        definition.medium == .air ? 0 : super.fallDamageMultiplier(for: fallDistance)
+    }
     public override func hasPathClearance(atX x: Int, y: Int, z: Int) -> Bool {
         prehistoricHasClearance(world, definition: definition, x: x, y: y, z: z, requireGround: true)
     }
@@ -1169,15 +1175,15 @@ public final class PrehistoricCreature: Animal {
         let wet = touchesWater(atX: x, y: y, z: z, below: 0.1)
         let surface = Double(world.surfaceY(ifloor(x), ifloor(z)))
 
-        // An idle flyer with a timed action is resting on a previously
-        // validated footprint. It does not keep steering or drift into an
-        // unloaded chunk during that rest interval. A flyer that stands on dry
-        // ground with neither a route nor a perch in reach (boxed in under a
-        // forest canopy, say) rests the same way: it waits out the interval
-        // before it looks again instead of searching on every tick.
+        // An idle flyer with a timed action rests where it stands: on the perch
+        // it landed on, or boxed in with neither a route nor a perch in reach
+        // (under a forest canopy, say). It does not steer or drift into an
+        // unloaded chunk during that interval, and it looks for a way out when
+        // the interval ends, not on every tick. Resting takes dry solid ground
+        // under its feet: in water, in lava or in the air it keeps looking.
         if action == .idle, movementTarget == nil,
            (data.prehistoricActionTicks ?? 0) > 0,
-           flyerLandingTarget(atX: ifloor(x), z: ifloor(z)) != nil || (!wet && !inLava && standsOnSolidGround) {
+           !wet, !inLava, standsOnSolidGround {
             vx = 0; vy = 0; vz = 0
             onGround = true
             data.airborne = false
@@ -1201,7 +1207,7 @@ public final class PrehistoricCreature: Animal {
                 }
             }
         } else if wet || y < surface + 0.8 {
-            takeOff(ticks: 36)
+            climbAway(ticks: 36)
         } else if movementTarget == nil || horizontalCollision {
             if age % 240 == 0, let landing = findLandingTarget(radius: 12) {
                 setAction(.landing, ticks: 160)
@@ -1224,11 +1230,13 @@ public final class PrehistoricCreature: Animal {
                 setAction(.landing, ticks: 160)
                 movementTarget = landing
             } else {
-                // Nowhere to go, or only the perch it already stands on: it stays
-                // put and looks again later, without a landing it does not make.
+                // Nowhere to go, or only the perch it already stands on: it makes no
+                // landing it does not make, and looks again later.
                 vx = 0; vy = 0; vz = 0
+                driftWithNowhereToGo(wet: wet)
                 setAction(.idle, ticks: 20)
-                data.airborne = false
+                onGround = standsOnSolidGround
+                data.airborne = !onGround
                 return
             }
             guard let landing = movementTarget else { return }
@@ -1276,8 +1284,9 @@ public final class PrehistoricCreature: Animal {
         } else if landing, !flightRouteIsClear(to: target, landing: true) {
             movementTarget = findLandingTarget(radius: 12) ?? makeFlightTarget()
             if movementTarget == nil { setAction(.idle, ticks: 20) }
-        } else if wet || y < surface + 0.8 {
-            takeOff(ticks: 24)
+        } else if wet || (!landing && y < surface + 0.8) {
+            // Coming in to land takes a flyer this low on purpose; the settle above ends it.
+            climbAway(ticks: 24)
         } else if !landing && (distance < 2 || horizontalCollision) {
             setAction(.glide, ticks: 50 + rng.nextInt(40))
             movementTarget = makeFlightTarget()
@@ -1301,6 +1310,50 @@ public final class PrehistoricCreature: Animal {
         if movementTarget != nil { setAction(.takeoff, ticks: ticks) }
     }
 
+    /// Too low, or in water: up and away. A take-off that is under way keeps its target. Picking
+    /// a new heading on every tick while it was still low sent a flyer zig-zagging over whatever
+    /// stood beside its launch site, where it had no lift and came back down.
+    private func climbAway(ticks: Int) {
+        if movementTarget == nil || action != .takeoff { takeOff(ticks: ticks) }
+    }
+
+    /// What a flyer with nowhere to go does with its body. In water or lava it rises until it is
+    /// out or a block stops it (standing still it drowned under any roof). In the air it comes
+    /// down to whatever is under it, where it can rest, unless that is water or lava. `move`
+    /// collides, so neither passes a block, and nothing moves in a column that is not loaded.
+    private func driftWithNowhereToGo(wet: Bool) {
+        guard world.isLoadedAt(ifloor(x), ifloor(z)) else { return }
+        if wet || inLava {
+            move(0, 0.12, 0)
+        } else if !standsOnSolidGround, !hasFluidCloseBelow, hasGroundBelow {
+            move(0, -0.1, 0)
+        }
+        vx = 0; vy = 0; vz = 0
+    }
+
+    /// Whether water, lava or a water-filled block lies within a block under the feet.
+    private var hasFluidCloseBelow: Bool {
+        for depth in [0.1, 1.0] {
+            let cell = world.getBlock(ifloor(x), ifloor(y - depth), ifloor(z))
+            let block = cell >> 4
+            if block == Int(B.water) || block == Int(B.lava) { return true }
+            if cell >= 0, cell <= Int(UInt16.max), isWaterlogged(UInt16(cell)) { return true }
+        }
+        return false
+    }
+
+    /// Whether anything solid lies under the flyer in its column. Over a column with no floor
+    /// it hovers as it always did; it does not come down out of the world.
+    private var hasGroundBelow: Bool {
+        var yy = min(ifloor(y - 0.001), world.info.minY + world.info.height - 1)
+        while yy >= world.info.minY {
+            let block = world.getBlock(ifloor(x), yy, ifloor(z)) >> 4
+            if block > 0, block < blockDefs.count, blockDefs[block].solid { return true }
+            yy -= 1
+        }
+        return false
+    }
+
     /// Whether the block under the flyer's feet is solid: it stands, it does not hover.
     private var standsOnSolidGround: Bool {
         let below = world.getBlock(ifloor(x), ifloor(y - 0.001), ifloor(z)) >> 4
@@ -1308,7 +1361,7 @@ public final class PrehistoricCreature: Animal {
     }
 
     private func makeFlightTarget() -> (x: Double, y: Double, z: Double)? {
-        let ceiling = Double(world.info.minY + world.info.height - 4)
+        let ceiling = prehistoricFlightCeiling(world)
         for _ in 0..<8 {
             let heading = rng.nextFloat() * .pi * 2
             let distance = 4 + rng.nextFloat() * 12
@@ -1319,12 +1372,10 @@ public final class PrehistoricCreature: Animal {
             guard flightSpaceIsClear(px, py, pz), flightRouteIsClear(to: (px, py, pz), landing: false) else { continue }
             return (px, py, pz)
         }
-        // A vertical local lift is a bounded fallback for a one-chunk world
-        // fixture. It remains inside the currently loaded column and the
-        // periodic landing branch still returns the flyer to a valid perch.
-        let localSurface = Double(world.surfaceY(ifloor(x), ifloor(z)))
-        let local = (x, min(ceiling, max(localSurface + 4, y + 4)), z)
-        return flightSpaceIsClear(local.0, local.1, local.2) ? local : nil
+        // A lift straight up is the fallback: it stays inside the loaded column, the folded
+        // body has to fit all the way (so not under a roof), and the periodic landing branch
+        // still returns the flyer to a valid perch.
+        return definition.flyerLift(in: world, x, y, z)
     }
 
     private func findLandingTarget(radius: Int) -> (x: Double, y: Double, z: Double)? {
@@ -1343,72 +1394,15 @@ public final class PrehistoricCreature: Animal {
     }
 
     private func flyerLandingTarget(atX x: Int, z: Int) -> (x: Double, y: Double, z: Double)? {
-        guard world.isLoadedAt(x, z) else { return nil }
-        let y = world.surfaceY(x, z)
-        guard y > world.info.minY,
-              hasFlyerLandingClearance(atX: x, y: y, z: z)
-        else { return nil }
-        return (Double(x) + 0.5, Double(y), Double(z) + 0.5)
-    }
-
-    private func hasFlyerLandingClearance(atX x: Int, y: Int, z: Int) -> Bool {
-        let foldedRadius = definition.flightFoldedClearanceRadius
-        let openRadius = definition.flightOpenClearanceRadius
-        let vertical = definition.bodyClearanceHeight
-        for zz in (z - openRadius)...(z + openRadius) {
-            for xx in (x - openRadius)...(x + openRadius) {
-                guard world.isLoadedAt(xx, zz) else { return false }
-                if abs(xx - x) <= foldedRadius && abs(zz - z) <= foldedRadius {
-                    let ground = world.getBlock(xx, y - 1, zz) >> 4
-                    guard ground > 0, ground < blockDefs.count, blockDefs[ground].solid else { return false }
-                }
-                for yy in y..<(y + vertical + 3) {
-                    let cell = world.getBlock(xx, yy, zz)
-                    let block = cell >> 4
-                    if block == Int(B.water) || block == Int(B.lava)
-                        || (block != 0 && (block >= blockDefs.count || !blockDefs[block].replaceable)) {
-                        return false
-                    }
-                }
-            }
-        }
-        return true
+        definition.flyerLandingTarget(in: world, x: x, z: z)
     }
 
     private func flightRouteIsClear(to target: (x: Double, y: Double, z: Double), landing: Bool) -> Bool {
-        let dx = target.x - x, dy = target.y - y, dz = target.z - z
-        let distance = (dx * dx + dy * dy + dz * dz).squareRoot()
-        let steps = max(1, min(24, Int((distance / 1.5).rounded(.up))))
-        for step in 1...steps {
-            let fraction = Double(step) / Double(steps)
-            let px = x + dx * fraction, py = y + dy * fraction, pz = z + dz * fraction
-            if landing && step == steps {
-                guard flyerLandingTarget(atX: ifloor(px), z: ifloor(pz)) != nil else { return false }
-            } else if !flightSpaceIsClear(px, py, pz) {
-                return false
-            }
-        }
-        return true
+        definition.flightRouteIsClear(in: world, from: (x, y, z), to: target, landing: landing)
     }
 
     private func flightSpaceIsClear(_ px: Double, _ py: Double, _ pz: Double) -> Bool {
-        let radius = definition.flightOpenClearanceRadius
-        let lower = ifloor(py)
-        let upper = max(lower, ifloor(py + Double(definition.bodyClearanceHeight) - 0.000_001))
-        for zz in (ifloor(pz) - radius)...(ifloor(pz) + radius) {
-            for xx in (ifloor(px) - radius)...(ifloor(px) + radius) {
-                guard world.isLoadedAt(xx, zz) else { return false }
-                for yy in lower...upper {
-                    let cell = world.getBlock(xx, yy, zz)
-                    let block = cell >> 4
-                    if block == Int(B.water) || block == Int(B.lava)
-                        || (block != 0 && (block >= blockDefs.count || !blockDefs[block].replaceable)) {
-                        return false
-                    }
-                }
-            }
-        }
-        return true
+        definition.flightSpaceIsClear(in: world, px, py, pz)
     }
 
     private func tickSwim() {
@@ -1965,6 +1959,10 @@ public func prehistoricHasClearance(
                 }
             }
         }
+    }
+    // A grounded flyer is being placed, not routed: it needs a perch it can also leave.
+    if definition.medium == .air, requireGround {
+        return definition.flyerCanLaunch(in: world, x: x, y: y, z: z)
     }
     return true
 }

@@ -121,14 +121,35 @@ three bounded deterministic controllers:
   large defensive animals can telegraph a charge and recover after it.
 - Flyers launch from a valid footprint, then use a bounded target/flight state
   machine (`takeoff`, `flap`, `glide`, `landing`) driven solely by their seeded
-  entity RNG. A flyer enters `takeoff` only with a flight target in hand, and
-  `landing` only for a place other than the one it stands on, so an action cue
-  is played only for an action it performs. With no route and no perch in reach
-  (boxed in under a forest canopy, or at the edge of the loaded chunks) it stays
-  `idle`: standing on dry ground it rests for the 20-tick interval before it
-  searches again, in the air or in water it searches on every tick. The spawn
-  path still admits a flyer by body clearance alone, so one can be placed where
-  it cannot take off; it then rests there until a way opens.
+  entity RNG. `PrehistoricFlightSpace.swift` owns the geometry the controller
+  and the spawn paths both ask: whether spread wings fit (`flightSpaceIsClear`),
+  where a flyer may stand (`flyerPerchIsClear`, `flyerLandingTarget`), whether a
+  route is clear, and the lift straight up (`flyerLift`).
+  - A flyer enters `takeoff` only with a flight target in hand, and `landing`
+    only for a place other than the one it stands on, so an action cue is
+    played only for an action it performs. A landing approach is flown down to
+    the perch; being low is a reason to take off only outside a landing, and a
+    take-off that is under way keeps its target instead of drawing a new
+    heading on every tick.
+  - With no route and no perch in reach (under a closed canopy or a roof, or at
+    the edge of the loaded chunks) it stays `idle`. Standing on dry solid
+    ground, out of lava, it rests for the 20-tick interval before it searches
+    again. Otherwise it searches on every tick and its body goes where it can
+    rest: in water or lava it rises until it is out or a block stops it, in
+    the air it comes down to whatever is under it (not onto water or lava,
+    over which it hovers). In the air it reports `onGround == false` with its
+    wings out.
+  - A climb straight up its own place is made with folded wings: only the body
+    has to fit, and water or lava does not hold it down. So a flyer whose body
+    fits a one-column gap in a canopy climbs out of it to the first height
+    where its wings have room (searched at most 16 cells up); a roof ends the
+    climb. Every other route is swept with the wings spread.
+  - A flyer takes no fall damage: it comes down under its own wings.
+  - Placement: every spawn path admits a flyer only where the controller could
+    have landed it and where a lift reaches the open sky (`flyerCanLaunch`).
+    Body clearance alone used to admit the forest floor under a canopy, where a
+    flyer stood for the rest of its life. The open-sky test reads the heightmap,
+    so a roof that lets light through (glass) is not seen.
 - Aquatic reptiles use valid water-volume targets and explicit cruise, burst,
   surface, dive, and stranded states. Their controller first verifies an
   entire vertical breathing route, then uses a capped deterministic

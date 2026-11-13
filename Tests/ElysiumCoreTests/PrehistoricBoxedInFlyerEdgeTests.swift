@@ -7,9 +7,10 @@ import XCTest
 /// closed around a flyer in flight, save and reload, determinism, and a cue-rate bound over every
 /// flying species and several enclosures, and over every creature of every medium.
 ///
-/// The tests under "known defects" fail on purpose. Each pins a defect in the flight controller
-/// that is older than the fix (the same scenario gives the same result on the pre-fix code); they
-/// stay red until the controller is changed.
+/// The tests under "the older flight defects" each pin a defect of the flight controller that
+/// the test review of 1.5.4 found and 1.5.5 fixed; all five failed on the 1.5.4 controller.
+/// Since 1.5.5 a small flyer climbs out of a canopy gap with folded wings, so the fixture for
+/// "cannot leave" is the canopy without a gap (`closedCanopy`).
 extension PrehistoricBoxedInFlyerTests {
 
     // MARK: - fixture
@@ -138,29 +139,43 @@ extension PrehistoricBoxedInFlyerTests {
 
     // MARK: - water
 
-    func testFlyerStandingInWaterUnderACanopyKeepsLookingEveryTickAndStaysQuiet() throws {
-        // Wet, the flyer must not rest (the rest is for dry ground): it tries to leave on every
-        // tick. With nowhere to go, none of those tries may announce anything.
-        let world = makeShapedWorld(shape(of: .wetGap))
+    func testFlyerStandingInWaterUnderACanopyRisesOutOfItAndStaysQuiet() throws {
+        // Wet, the flyer must not rest (the rest is for dry ground). Under a closed canopy it has
+        // nowhere to fly, but it does not stay in the water: it rises until it is out, hovers
+        // over it under the leaves, keeps looking on every tick, and announces nothing.
+        let world = makeShapedWorld { x, y, z in
+            if x == Self.site.x, z == Self.site.z, y == 64 { return cell(B.water) }
+            return self.shape(of: .closedCanopy)(x, y, z)
+        }
         let flyer = try makeFlyer(world)
         let start = (flyer.x, flyer.y, flyer.z)
+        let health = flyer.health
+        var wetTicks = 0, inside: Int?
 
-        // 120 ticks keeps the run short of the animal's air running out (300 ticks).
-        let (heard, searches) = runCountingSearches(flyer, ticks: 120)
+        let (heard, searches) = runCountingSearches(flyer, ticks: 400) { tick in
+            if flyer.inWater { wetTicks += 1 }
+            if inside == nil, flyer.y + flyer.height > 66 { inside = tick }
+        }
 
-        XCTAssertTrue(flyer.inWater, "fixture: the flyer must stand in the water")
-        XCTAssertEqual(searches, 120, "a wet flyer must look for a way out on every tick, not rest")
+        XCTAssertGreaterThan(wetTicks, 0, "fixture: the flyer must start in the water")
+        XCTAssertLessThanOrEqual(wetTicks, 20, "the flyer stayed in the water for \(wetTicks) ticks")
+        XCTAssertFalse(flyer.inWater)
+        XCTAssertNil(inside, "the flyer rose into the leaves on tick \(inside ?? -1)")
+        XCTAssertEqual(searches, 400, "over water it has no ground to rest on: it keeps looking")
         XCTAssertTrue(heard.isEmpty, "\(heard.map(\.name))")
-        XCTAssertEqual(flyer.x, start.0); XCTAssertEqual(flyer.y, start.1); XCTAssertEqual(flyer.z, start.2)
+        XCTAssertEqual(flyer.x, start.0); XCTAssertEqual(flyer.z, start.2)
+        XCTAssertGreaterThan(flyer.y, start.1 + 0.9)
         XCTAssertEqual(flyer.action, .idle)
-        XCTAssertEqual(flyer.data.airborne, false)
+        XCTAssertFalse(flyer.onGround)
+        XCTAssertEqual(flyer.data.airborne, true, "over water it hovers: its wings are out")
+        XCTAssertEqual(flyer.health, health, "the flyer lost health in or over the water")
     }
 
     func testWaterBesideABoxedInFlyerDoesNotCancelItsRest() throws {
         // Only water the body touches makes it wet. A puddle in the next cell changes nothing.
         let world = makeShapedWorld { x, y, z in
             if x == Self.site.x + 1, z == Self.site.z, y == 64 { return cell(B.water) }
-            return self.shape(of: .canopyGap)(x, y, z)
+            return self.shape(of: .closedCanopy)(x, y, z)
         }
         let flyer = try makeFlyer(world)
 
@@ -177,7 +192,7 @@ extension PrehistoricBoxedInFlyerTests {
         // on every tick, says nothing, and does not claim to stand.
         let world = makeShapedWorld { x, y, z in
             if x == Self.site.x, z == Self.site.z, y == 63 { return cell(B.water) }
-            return self.shape(of: .canopyGap)(x, y, z)
+            return self.shape(of: .closedCanopy)(x, y, z)
         }
         let flyer = try makeFlyer(world)
         let start = (flyer.x, flyer.y, flyer.z)
@@ -187,7 +202,7 @@ extension PrehistoricBoxedInFlyerTests {
         XCTAssertEqual(searches, 200)
         XCTAssertTrue(heard.isEmpty, "\(heard.map(\.name))")
         XCTAssertFalse(flyer.onGround)
-        XCTAssertEqual(flyer.data.airborne, false)
+        XCTAssertEqual(flyer.data.airborne, true, "over water it hovers: its wings are out")
         XCTAssertEqual(flyer.x, start.0); XCTAssertEqual(flyer.y, start.1); XCTAssertEqual(flyer.z, start.2)
     }
 
@@ -222,10 +237,11 @@ extension PrehistoricBoxedInFlyerTests {
         XCTAssertEqual(heard.filter { $0.name == cue(flyer, .takeoff) }.map(\.tick), [left])
     }
 
-    func testBoxedInFlyerInLavaDoesNotRestThere() throws {
-        // Boxed in, lava in its cell: it cannot leave, but it must not rest in the lava either.
-        // It looks for a way out on every tick, and it says nothing while it does.
-        let world = makeShapedWorld(shape(of: .canopyGap))
+    func testBoxedInFlyerInLavaRisesOutOfItAndDoesNotRest() throws {
+        // Boxed in, lava in its cell: it cannot leave, but it neither rests nor stays in the lava.
+        // It rises out of it, hovers over it under the leaves, looks for a way out on every
+        // tick, and says nothing while it does.
+        let world = makeShapedWorld(shape(of: .closedCanopy))
         let flyer = try makeFlyer(world)
         flyer.addEffect("fire_resistance", 100_000)
         _ = runCountingSearches(flyer, ticks: 3)
@@ -234,12 +250,16 @@ extension PrehistoricBoxedInFlyerTests {
 
         _ = world.setBlock(Self.site.x, Self.site.y, Self.site.z, Int(cell(B.lava)))
         var lavaTicks = 0
-        let (heard, searches) = runCountingSearches(flyer, ticks: 15) { _ in if flyer.inLava { lavaTicks += 1 } }
+        let (heard, searches) = runCountingSearches(flyer, ticks: 60) { _ in if flyer.inLava { lavaTicks += 1 } }
 
-        XCTAssertEqual(lavaTicks, 15, "fixture: baseTick must see the lava on every tick")
-        XCTAssertEqual(searches, 15, "a flyer in lava rested instead of looking for a way out")
+        XCTAssertGreaterThan(lavaTicks, 0, "fixture: baseTick must see the lava")
+        XCTAssertLessThanOrEqual(lavaTicks, 12, "the flyer stayed in lava for \(lavaTicks) ticks")
+        XCTAssertFalse(flyer.inLava)
+        XCTAssertEqual(searches, 60, "a flyer in or over lava rested instead of looking for a way out")
         XCTAssertTrue(heard.isEmpty, "\(heard.map(\.name))")
-        XCTAssertEqual(flyer.y, Double(Self.site.y))
+        XCTAssertGreaterThan(flyer.y, Double(Self.site.y) + 0.5)
+        XCTAssertLessThanOrEqual(flyer.y + flyer.height, 66, "the flyer rose into the leaves")
+        XCTAssertFalse(flyer.onGround)
     }
 
     // MARK: - the edge of the loaded world
@@ -278,24 +298,31 @@ extension PrehistoricBoxedInFlyerTests {
 
     // MARK: - the world changing under a flyer
 
-    func testBoxedInFlyerWhoseFloorIsDugAwayStopsRestingAndStaysQuiet() throws {
-        // What it does: with no ground under it, it no longer rests; it looks for a way out on
-        // every tick and, finding none, hovers where it was (the controller applies no gravity
-        // to a flyer with no route, the same as `testFlyerHeldInTheAirWithNoRouteIsSilent`).
-        let world = makeShapedWorld(shape(of: .canopyGap))
+    func testBoxedInFlyerWhoseFloorIsDugAwayComesDownIntoTheHoleAndRestsThere() throws {
+        // With no ground under it, it no longer rests where it was. It has nowhere to fly, so it
+        // comes down to what is under it (the bottom of the hole, one block down), stands there,
+        // rests again, and says nothing.
+        let world = makeShapedWorld(shape(of: .closedCanopy))
         let flyer = try makeFlyer(world)
         _ = runCountingSearches(flyer, ticks: 5)
         XCTAssertEqual(flyer.action, .idle)
         XCTAssertTrue(flyer.onGround, "fixture: the flyer must be resting before its floor goes")
 
         _ = world.setBlock(Self.site.x, Self.site.y - 1, Self.site.z, 0)
-        let (heard, searches) = runCountingSearches(flyer, ticks: 200)
+        var stoodOnNothing: Int?
+        let (heard, searches) = runCountingSearches(flyer, ticks: 200) { tick in
+            let under = world.getBlock(ifloor(flyer.x), ifloor(flyer.y - 0.001), ifloor(flyer.z)) >> 4
+            if stoodOnNothing == nil, flyer.onGround, under == 0 { stoodOnNothing = tick }
+        }
 
-        XCTAssertEqual(searches, 200, "a flyer with nothing under it must not rest")
-        XCTAssertTrue(heard.isEmpty, "\(heard.map(\.name))")
-        XCTAssertEqual(flyer.y, Double(Self.site.y))
-        XCTAssertEqual(flyer.action, .idle)
+        XCTAssertNil(stoodOnNothing, "the flyer reported onGround over air on tick \(stoodOnNothing ?? -1)")
+        XCTAssertEqual(flyer.y, Double(Self.site.y - 1), accuracy: 1e-6, "it must stand on the bottom of the hole")
+        XCTAssertTrue(flyer.onGround)
         XCTAssertEqual(flyer.data.airborne, false)
+        XCTAssertEqual(flyer.action, .idle)
+        // Ten ticks to come down one block, looking on each, then one look per rest.
+        XCTAssertLessThanOrEqual(searches, 12 + 200 / 20, "it searched on \(searches) of 200 ticks")
+        XCTAssertTrue(heard.isEmpty, "\(heard.map(\.name))")
     }
 
     func testFlyerCagedInFlightStaysInsideTheCageAndStaysQuiet() throws {
@@ -330,7 +357,7 @@ extension PrehistoricBoxedInFlyerTests {
     // MARK: - save and reload
 
     func testBoxedInFlyerSavedMidRestResumesExactlyWhereItLeftOff() throws {
-        let world = makeShapedWorld(shape(of: .canopyGap))
+        let world = makeShapedWorld(shape(of: .closedCanopy))
         let flyer = try makeFlyer(world)
         _ = run(flyer, ticks: 27) // a search, then part of the second rest
         XCTAssertEqual(flyer.action, .idle)
@@ -368,8 +395,9 @@ extension PrehistoricBoxedInFlyerTests {
 
     func testTwoRunsWithTheSameSeedAreIdentical() throws {
         // Same world, same seed, same id: the same positions, actions and sounds on every tick.
-        // Covers a flyer that cannot leave, one that hits a ceiling, and one in the open.
-        let places: [Enclosure?] = [.canopyGap, .room, nil]
+        // Covers a flyer that climbs out of a gap, one that cannot leave, one in a room, and one
+        // in the open.
+        let places: [Enclosure?] = [.canopyGap, .closedCanopy, .room, nil]
         for enclosure in places {
             for id in ["prehistoric.dimorphodon", "prehistoric.quetzalcoatlus"] {
                 func trace() throws -> (steps: [String], sounds: [String]) {
@@ -397,8 +425,10 @@ extension PrehistoricBoxedInFlyerTests {
     func testEveryFlyerInEveryEnclosureKeepsItsActionCuesRare() throws {
         // For every flying species, three seeds and every enclosure: at most two action cues in
         // any second, never two on one tick, never one cue on two ticks in a row. Where the flyer
-        // can neither leave nor rise at all, no action cue at all.
-        let silent: Set<Enclosure> = [.canopyGap, .chimney, .wetGap]
+        // can neither leave nor rise at all, no action cue at all: under a roof, and in a gap
+        // or a shaft that is narrower than its body (a narrower body climbs out of those).
+        let roofed: Set<Enclosure> = [.closedCanopy, .caveRoof]
+        let oneWide: Set<Enclosure> = [.canopyGap, .chimney, .wetGap]
         for enclosure in Enclosure.allCases {
             let world = makeShapedWorld(shape(of: enclosure))
             for definition in PrehistoricCreatureDefinition.all where definition.medium == .air {
@@ -413,7 +443,9 @@ extension PrehistoricBoxedInFlyerTests {
                         let at = cues.filter { $0.name == name }.map(\.tick)
                         for (a, b) in zip(at, at.dropFirst()) { XCTAssertGreaterThan(b - a, 1, label) }
                     }
-                    if silent.contains(enclosure) { XCTAssertTrue(cues.isEmpty, label) }
+                    let boxedIn = roofed.contains(enclosure)
+                        || (oneWide.contains(enclosure) && definition.collisionWidth > 1)
+                    if boxedIn { XCTAssertTrue(cues.isEmpty, label) }
                     XCTAssertTrue(flyer.x.isFinite && flyer.y.isFinite && flyer.z.isFinite, label)
                 }
             }
@@ -440,4 +472,104 @@ extension PrehistoricBoxedInFlyerTests {
             XCTAssertLessThanOrEqual(cues.count, 40, label)
         }
     }
+
+    // MARK: - the older flight defects (found by the 1.5.4 test review, fixed in 1.5.5)
+
+    /// Was a defect: a flyer never completes a landing on level ground. `tickFlightToward` settles a
+    /// landing only within 0.35 of the target's height, but takes off again whenever it is lower
+    /// than `surface + 0.8`. Descending at most 0.20 a tick, it always passes through the band
+    /// between them, so every landing turns into a take-off and no flyer ever rests in the open.
+    func testFlyerInTheOpenCompletesALandingAndRests() throws {
+        for seed: UInt32 in [1, 3, 42] {
+            let world = makeFlatWorld()
+            let flyer = try makeFlyer(world, seed: seed)
+            var landings = 0, settles = 0
+            var last = flyer.action
+            _ = run(flyer, ticks: 2_400) { _ in
+                if flyer.action != last {
+                    if flyer.action == .landing { landings += 1 }
+                    if last == .landing, flyer.action == .idle { settles += 1 }
+                    last = flyer.action
+                }
+            }
+            XCTAssertGreaterThan(landings, 0, "seed \(seed): fixture, the flyer must try to land")
+            XCTAssertGreaterThan(settles, 0, "seed \(seed): \(landings) landings begun, none completed")
+        }
+    }
+
+    /// Was a defect: flyers die of fall damage from their own flight. `Entity.move` adds every
+    /// downward step to `fallDistance` while not on the ground; a flyer never resets it (its
+    /// landing uses `setPos`), so the first time a flight touches the ground `Living.onLand`
+    /// charges the whole descent since take-off. Most flyers die within two minutes in the open.
+    func testFlyerInTheOpenIsNotHurtByItsOwnFlight() throws {
+        for definition in PrehistoricCreatureDefinition.all where definition.medium == .air {
+            let world = makeFlatWorld()
+            let flyer = try makeFlyer(world, definition.id, seed: 3)
+            let heard = run(flyer, ticks: 2_400)
+            let falls = heard.filter { $0.name == "entity.generic.small_fall" || $0.name == "entity.generic.big_fall" }
+            XCTAssertTrue(falls.isEmpty, "\(definition.id): fell on ticks \(falls.map(\.tick))")
+            XCTAssertFalse(flyer.dead || flyer.deathTime > 0, "\(definition.id) died of its own flight")
+        }
+    }
+
+    /// Was a defect: a flyer under a closed roof (a canopy with no gap, a cave ceiling, a room) does not
+    /// rest. `makeFlightTarget`'s vertical-lift fallback takes its height from `surfaceY`, which
+    /// is the top of the roof, and is not checked with `flightRouteIsClear`. So the flyer
+    /// "finds" a point above the roof, takes off into the ceiling, and stays in `.takeoff`
+    /// pressed against it, searching on every tick, for as long as it lives.
+    func testFlyerUnderAClosedRoofRestsInsteadOfFlappingAgainstIt() throws {
+        for enclosure in [Enclosure.closedCanopy, .caveRoof] {
+            let world = makeShapedWorld(shape(of: enclosure))
+            let flyer = try makeFlyer(world, seed: 1)
+            let (heard, _) = runCountingSearches(flyer, ticks: 400)
+            let (_, lastQuarter) = runCountingSearches(flyer, ticks: 100)
+            XCTAssertNotEqual(flyer.action, .takeoff, "\(enclosure.rawValue): still taking off at y \(flyer.y)")
+            XCTAssertEqual(flyer.y, Double(Self.site.y), "\(enclosure.rawValue): the flyer must stay on the floor")
+            XCTAssertLessThanOrEqual(lastQuarter, 100 / 20 + 1, "\(enclosure.rawValue): searched on \(lastQuarter) of 100 ticks")
+            XCTAssertTrue(actionCues(flyer, heard).isEmpty, "\(enclosure.rawValue): \(heard.map(\.name))")
+        }
+    }
+
+    /// Was a defect: a grounded flyer whose take-off route is refused in its second tick (here at the
+    /// edge of the loaded world) picks a landing elsewhere, and `tickFlightToward` turns that
+    /// landing into a take-off in the same tick, because it stands below `surface + 0.8`. Both
+    /// cues play on one tick, several ticks running: seven action cues in seven ticks.
+    func testGroundedFlyerDoesNotAnnounceALandingAndATakeOffOnOneTick() throws {
+        let world = makeOneChunkWorld()
+        let flyer = try makeFlyer(world, "prehistoric.pteranodon", at: (2.5, 64, 2.5))
+        // Its own call draws from the controller RNG; silenced, seed 42 gives the seven-cue burst.
+        // (With the call, the same seed gives take-off, landing on tick 5, take-off on tick 7.)
+        flyer.ambientSoundTimer = 10_000
+        let cues = actionCues(flyer, run(flyer, ticks: 40))
+        let label = "\(cues.map { "\($0.tick):\($0.name)" })"
+        XCTAssertTrue(crowdedTicks(cues).isEmpty, "two action cues on one tick: \(label)")
+        XCTAssertLessThanOrEqual(busiestSecond(cues, ticks: 40), 2, label)
+    }
+
+    /// Was a defect: a resting flyer whose floor was dug away kept `onGround == true` while it
+    /// hung over the hole. Only `move` and the rest and settle paths set `onGround`; the no-route
+    /// fallback left the stale value from the rest. It now reports what is under its feet. Over
+    /// a shaft with no bottom it does not come down (there is nothing to stand on): it hovers
+    /// where it was, wings out.
+    func testFlyerOverABottomlessShaftHoversAndDoesNotClaimToStandOnGround() throws {
+        let world = makeShapedWorld(shape(of: .closedCanopy))
+        let flyer = try makeFlyer(world)
+        _ = runCountingSearches(flyer, ticks: 5)
+        XCTAssertTrue(flyer.onGround, "fixture: the flyer must be resting before its floor goes")
+
+        // The fixture's ground is two blocks thick over nothing: this opens a shaft with no bottom.
+        _ = world.setBlock(Self.site.x, Self.site.y - 1, Self.site.z, 0)
+        _ = world.setBlock(Self.site.x, Self.site.y - 2, Self.site.z, 0)
+        var claimedGround: Int?
+        let (heard, searches) = runCountingSearches(flyer, ticks: 200) { tick in
+            if claimedGround == nil, flyer.onGround || flyer.data.airborne != true { claimedGround = tick }
+        }
+
+        XCTAssertNil(claimedGround, "over the shaft the flyer reported onGround or folded wings on tick \(claimedGround ?? -1)")
+        XCTAssertEqual(flyer.y, Double(Self.site.y), "over a shaft with no bottom it must not come down")
+        XCTAssertEqual(searches, 200, "with nothing to stand on it keeps looking")
+        XCTAssertTrue(heard.isEmpty, "\(heard.map(\.name))")
+        XCTAssertFalse(flyer.dead || flyer.deathTime > 0)
+    }
+
 }

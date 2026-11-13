@@ -5,6 +5,28 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **Pterosaurs fly, land and rest properly, and no longer get stuck under trees.** Several flaws
+  in how flying creatures behave in a prehistoric world are fixed.
+  - A flyer was hurt by its own flight. Every descent counted as a fall, and the next time it
+    touched the ground it took the damage for all of it; in open country most flyers died within
+    a couple of minutes. Flying creatures now take no fall damage.
+  - A flyer never finished a landing on level ground: just above the ground the approach turned
+    into another take-off. It now comes down to its perch, folds its wings and rests there.
+  - A small flyer standing in a gap of the forest canopy (the ones that droned in 1.5.3) now
+    climbs straight up through the gap with folded wings and flies off above the trees. This
+    also frees the flyers that are stuck in existing worlds. A flyer whose body is wider than
+    the gap, or one under a closed canopy or a roof, still rests there quietly.
+  - New flyers are no longer placed where they cannot take off. They appear only on a spot they
+    could have landed on, with open sky to climb into, so you will see fewer of them inside
+    forests and none under a roof.
+  - A flyer under a closed roof no longer hangs against the ceiling in a take-off; it rests on
+    the floor. One with nowhere to go at the edge of the loaded world no longer plays a landing
+    and a take-off sound in the same instant. One left in the air with nowhere to fly (its floor
+    dug away, say) comes down to the ground and rests instead of hanging there, and one caught
+    in water or lava under cover rises out of it.
+  - A take-off keeps its heading. A flyer used to pick a new direction on every tick while it
+    was still close to the ground, which could send it zig-zagging into the trees beside it.
+
 - Bumped the release and exact-LAN-compatibility version to 1.5.4 for the fix below. Nothing on
   the wire or in a save changed; as always, both sides of a LAN game need the same version.
 

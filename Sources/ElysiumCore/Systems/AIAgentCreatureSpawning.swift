@@ -348,7 +348,9 @@ private func aiAgentAreaSpawnY(_ world: World, _ entity: String, _ x: Int, _ z: 
     // One validity check reads the body's whole clearance envelope.
     let definition = PrehistoricCreatureDefinition.named(entity)
     let footprint = 2 * (definition?.bodyClearanceRadius ?? 0) + 1
-    let validityCost = footprint * footprint * max(2, definition?.bodyClearanceHeight ?? 2)
+    // A flyer is also asked for a launch site: a perch and a lift into the open sky.
+    let launchCost = definition.flatMap { $0.medium == .air ? $0.flyerLaunchReadBound(in: world) : nil } ?? 0
+    let validityCost = footprint * footprint * max(2, definition?.bodyClearanceHeight ?? 2) + launchCost
     switch spawnPlacementMedium(forMob: entity) {
     case .water:
         // Start at the seabed and rise through the water column until the body fits.
