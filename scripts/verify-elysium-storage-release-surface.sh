@@ -292,7 +292,8 @@ EXPECTED_STORAGE_OBJECT_SHA256='7dd3d8314e6bd3067b1e3779d6ae52d63d009cb952175f5a
 # 1.5.3: only ELYSIUM_VERSION changes; was d57fe19db18af945117e6d930b536bbc99685d410af2a21824d530d19101631e.
 # 1.5.4: only ELYSIUM_VERSION changes; was 15ba0f0f32c3352369627d4ea7082e024d514cd3789bb410dbb43c001561b328.
 # 1.5.5: only ELYSIUM_VERSION changes; was 9a59bc5d4d2cc81313584cc5fee3b90ddcbf85edfeb9350f2d79a7ab837cbd06.
-EXPECTED_SAVES_SOURCE_SHA256='cefdcfb4bed7a49cc4a3a567b0b3602fd289d91f11c9d51751f945cde73fc15b'
+# 1.5.6: only ELYSIUM_VERSION changes; was cefdcfb4bed7a49cc4a3a567b0b3602fd289d91f11c9d51751f945cde73fc15b.
+EXPECTED_SAVES_SOURCE_SHA256='f66a13a1e46910752fc753ca5df4d0b3e8f46627194cfed3183915d9cc9f933e'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
 # 1.4.0: only the Saves.swift compiler-AST inventory entry moves (version literal); was
 # 377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb.
@@ -320,7 +321,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd
 # 5b9fd9b16ce9c7d1f40c7a07cdea00464068f8e57ee2de3f1e69a42eba63c8b6.
 # 1.5.5: only the Saves.swift compiler-AST entry moves (version literal); was
 # 799c5e9af82514bc011203fe4dedda11f10e6f2d5f703a2c7056e07364bf5f76.
-EXPECTED_CORE_CAPABILITY_SHA256='9bf3b61244c4e14b19594a8be944fb9075d0b0b1f9301bd7557718e8178e34bc'
+# 1.5.6: only the Saves.swift compiler-AST entry moves (version literal); was
+# 9bf3b61244c4e14b19594a8be944fb9075d0b0b1f9301bd7557718e8178e34bc.
+EXPECTED_CORE_CAPABILITY_SHA256='e3345651a700ba4dd931e209394ccc9e120bfb6b1c15a91dc5c0c60daf83905c'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 # Deployment target 26: was 0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3.
 # Swift 6.4.2 toolchain (unchanged source): was d1edea9616bbc18445df21194e4f8f085f25a0466122cb9b35c94f8bcf1a4444.
@@ -590,7 +593,14 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='cc9d46a31f4b7f6deebdcbfb3ea0536ba34ec2c258fa21
 # literal. No save, wire or storage code is touched: GameCore.swift, Player.swift, the storage
 # and text-input sources and objects are byte-identical. Was
 # 1bd330f9c37b040f9e8aa0553f571e63a788a677aadf93b5174702a5be89e598. See docs/release-1.5.5-build.md.
-EXPECTED_CORE_OBJECT_SHA256='56aa3f5ed7b1e69bcf50e283afa814fbd9d758dc858e6d2ea98cf5309aa7051c'
+# 1.5.6 (creature animation): the Core object moves for the jointed creature models
+# (EntityModels.swift, PrehistoricModels.swift and the three PrehistoricLowPoly model files: every
+# walking leg is thigh, shin and foot, necks and tails are segmented, a theropod's jaw is hinged,
+# and a Brachiosaurus's hind legs reach the ground), and the version literal. No simulation, save,
+# wire or storage code is touched: GameCore.swift, Player.swift, the storage and text-input sources
+# and objects are byte-identical. Was
+# 56aa3f5ed7b1e69bcf50e283afa814fbd9d758dc858e6d2ea98cf5309aa7051c. See docs/release-1.5.6-build.md.
+EXPECTED_CORE_OBJECT_SHA256='3d2be4b2e41a57721edc8a009b69f8e55e1894124468c22f8032e51dd430b6ac'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -706,8 +716,14 @@ EXPECTED_CORE_OBJECT_SHA256='56aa3f5ed7b1e69bcf50e283afa814fbd9d758dc858e6d2ea98
 # still 19eb940. Were
 # 37941d2e6762c9e152a92139447edb7fb6757dc22512041716ba5bd07f90107c (Elysium) and
 # 46377142460162b910a02dba95ea3a9d5c21e06d34958a370c6ee79bbf0c9923 (elysmoke).
-EXPECTED_ELYSIUM_PRODUCT_SHA256='156f7f2cda70caf1ad8a166530bdbf1dc9e95525c69a475d7e541e6a88a13dff'
-EXPECTED_SMOKE_PRODUCT_SHA256='bf73d15773cd85d83e7cfa715eba13e861bc8486bec8a951750a16a422918dc7'
+# 1.5.6: the Elysium product relinks the Core change above and adds the creature animation
+# (PrehistoricRig.swift, PrehistoricMotion.swift and PrehistoricPose.swift, new; EntityRendererM.swift
+# and WorldRenderer.swift draw prehistoric creatures from the posed rig); elysmoke only relinks
+# Core. Atrium still 19eb940. Were
+# 156f7f2cda70caf1ad8a166530bdbf1dc9e95525c69a475d7e541e6a88a13dff (Elysium) and
+# bf73d15773cd85d83e7cfa715eba13e861bc8486bec8a951750a16a422918dc7 (elysmoke).
+EXPECTED_ELYSIUM_PRODUCT_SHA256='a0d08b018c6080726b77e09cf3776f644e0e0d851afc4afc1464a5d30849bcf7'
+EXPECTED_SMOKE_PRODUCT_SHA256='7b81c6d921db4d1a4d222304999f69cfef17bf9d89d5d5644733fedc34cab27d'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

@@ -5,6 +5,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.5.6 for the creature animation
+  below. Nothing on the wire or in a save changed; as always, both sides of a LAN game need the
+  same version.
+
 - **The land and flying creatures of the prehistoric worlds are animated.** Until now a dinosaur
   slid along on stiff one-piece legs, its neck and tail never moved, and a pterosaur stood on the
   ground with its wings spread. Now:
