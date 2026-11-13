@@ -121,7 +121,14 @@ three bounded deterministic controllers:
   large defensive animals can telegraph a charge and recover after it.
 - Flyers launch from a valid footprint, then use a bounded target/flight state
   machine (`takeoff`, `flap`, `glide`, `landing`) driven solely by their seeded
-  entity RNG.
+  entity RNG. A flyer enters `takeoff` only with a flight target in hand, and
+  `landing` only for a place other than the one it stands on, so an action cue
+  is played only for an action it performs. With no route and no perch in reach
+  (boxed in under a forest canopy, or at the edge of the loaded chunks) it stays
+  `idle`: standing on dry ground it rests for the 20-tick interval before it
+  searches again, in the air or in water it searches on every tick. The spawn
+  path still admits a flyer by body clearance alone, so one can be placed where
+  it cannot take off; it then rests there until a way opens.
 - Aquatic reptiles use valid water-volume targets and explicit cruise, burst,
   surface, dive, and stranded states. Their controller first verifies an
   entire vertical breathing route, then uses a capped deterministic

@@ -5,6 +5,17 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- **A trapped pterosaur no longer drones like an engine.** In a prehistoric world a flying
+  creature could stand in a gap of the forest canopy where the leaves around it left no room to
+  spread its wings. It then tried to take off twenty times a second, and every attempt played
+  its "takes off" and "settles" sounds: a loud, engine-like drone that carried forty blocks, also
+  down into a cave. A flyer now makes those sounds only when it really takes off or lands. One
+  with nowhere to fly rests where it stands, calls now and then like any resting animal, looks
+  for a way out about once a second, and leaves as soon as there is room, for example when you
+  clear the leaves above it.
+  - Such a flyer is still trapped until then. Creatures can still be placed under trees they
+    cannot fly out of; this release does not change where they are placed.
+
 - Bumped the release and exact-LAN-compatibility version to 1.5.3 for the LAN container fix
   below. Nothing on the wire or in a save changed; as always, both sides of a LAN game need
   the same version.

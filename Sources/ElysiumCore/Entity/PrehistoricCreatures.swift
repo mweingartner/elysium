@@ -1171,10 +1171,13 @@ public final class PrehistoricCreature: Animal {
 
         // An idle flyer with a timed action is resting on a previously
         // validated footprint. It does not keep steering or drift into an
-        // unloaded chunk during that rest interval.
+        // unloaded chunk during that rest interval. A flyer that stands on dry
+        // ground with neither a route nor a perch in reach (boxed in under a
+        // forest canopy, say) rests the same way: it waits out the interval
+        // before it looks again instead of searching on every tick.
         if action == .idle, movementTarget == nil,
            (data.prehistoricActionTicks ?? 0) > 0,
-           flyerLandingTarget(atX: ifloor(x), z: ifloor(z)) != nil {
+           flyerLandingTarget(atX: ifloor(x), z: ifloor(z)) != nil || (!wet && !inLava && standsOnSolidGround) {
             vx = 0; vy = 0; vz = 0
             onGround = true
             data.airborne = false
@@ -1198,14 +1201,14 @@ public final class PrehistoricCreature: Animal {
                 }
             }
         } else if wet || y < surface + 0.8 {
-            setAction(.takeoff, ticks: 36)
-            movementTarget = makeFlightTarget()
+            takeOff(ticks: 36)
         } else if movementTarget == nil || horizontalCollision {
             if age % 240 == 0, let landing = findLandingTarget(radius: 12) {
                 setAction(.landing, ticks: 160)
                 movementTarget = landing
+            } else if action == .idle {
+                takeOff(ticks: 36)
             } else {
-                if action == .idle { setAction(.takeoff, ticks: 36) }
                 movementTarget = makeFlightTarget()
             }
         } else if age % 240 == 0, let landing = findLandingTarget(radius: 12) {
@@ -1217,10 +1220,12 @@ public final class PrehistoricCreature: Animal {
             // A loaded-world fallback prefers a real landing; when no valid
             // local footprint exists, stop rather than asking streaming to
             // create terrain or flying through an unknown chunk.
-            if let landing = findLandingTarget(radius: 12) {
+            if let landing = findLandingTarget(radius: 12), !(landing.x == x && landing.y == y && landing.z == z) {
                 setAction(.landing, ticks: 160)
                 movementTarget = landing
             } else {
+                // Nowhere to go, or only the perch it already stands on: it stays
+                // put and looks again later, without a landing it does not make.
                 vx = 0; vy = 0; vz = 0
                 setAction(.idle, ticks: 20)
                 data.airborne = false
@@ -1272,8 +1277,7 @@ public final class PrehistoricCreature: Animal {
             movementTarget = findLandingTarget(radius: 12) ?? makeFlightTarget()
             if movementTarget == nil { setAction(.idle, ticks: 20) }
         } else if wet || y < surface + 0.8 {
-            setAction(.takeoff, ticks: 24)
-            movementTarget = makeFlightTarget()
+            takeOff(ticks: 24)
         } else if !landing && (distance < 2 || horizontalCollision) {
             setAction(.glide, ticks: 50 + rng.nextInt(40))
             movementTarget = makeFlightTarget()
@@ -1287,6 +1291,20 @@ public final class PrehistoricCreature: Animal {
         tickManualLimbAnimation()
         tickLocomotionSound()
         tickManualAmbient()
+    }
+
+    /// Takes off toward a new flight target, if there is one. A flyer with nowhere to fly keeps
+    /// its action, so trying again changes no state and plays no cue. (Entering `.takeoff` first
+    /// and falling back to `.idle` in the same tick played both cues on every tick.)
+    private func takeOff(ticks: Int) {
+        movementTarget = makeFlightTarget()
+        if movementTarget != nil { setAction(.takeoff, ticks: ticks) }
+    }
+
+    /// Whether the block under the flyer's feet is solid: it stands, it does not hover.
+    private var standsOnSolidGround: Bool {
+        let below = world.getBlock(ifloor(x), ifloor(y - 0.001), ifloor(z)) >> 4
+        return below > 0 && below < blockDefs.count && blockDefs[below].solid
     }
 
     private func makeFlightTarget() -> (x: Double, y: Double, z: Double)? {
