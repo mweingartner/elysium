@@ -49,6 +49,10 @@ struct PrehistoricMotion: Equatable {
     var flapPhase: Float = 0
     /// A land animal off the ground: 0 standing, 1 in the air.
     var airborne: Float = 0
+    /// A flyer without way on: 1 hanging in place (a hover, a straight descent, standing),
+    /// 0 flying along. Eased like the action weights, so that a flyer stopped dead in the air
+    /// swings its legs under it instead of snapping them there.
+    var hang: Float = 1
     var weights = PrehistoricActionWeights()
     /// Seconds since the animal last struck; large when it has not.
     var strikeAge: Float = 1_000
@@ -93,6 +97,12 @@ struct PrehistoricMotionState {
     private var glideStart: Double
     private var glideSpan: Double
     private var snapshotTime: Double
+    /// Until when a flyer's hang keeps the value it was first seen with. The hang follows the
+    /// measured speed, and a creature that has not yet been seen to move has none: a guest's
+    /// mirror stands still until the snapshot after its first sight. Easing toward that zero
+    /// swung its legs half a radian forward and back on every first sight.
+    private var hangHeldUntil: Double
+    private var awaitingFirstSnapshot: Bool
     var lastFrame: UInt64 = 0
 
     /// How much longer a mirror's glide lasts than the gap between its last two snapshots.
@@ -101,6 +111,10 @@ struct PrehistoricMotionState {
     static let longestStep = 0.1
     /// A creature that moved farther than this in one frame was moved, not walking.
     static let teleportDistance = 8.0
+    /// How long a speed takes to read true from a standing start (the speed eases over 0.12 s).
+    static let speedSettles = 0.35
+    /// The longest a mirror's hang waits for its first snapshot.
+    static let longestHangHold = 0.6
 
     /// `plan` is the creature's body plan when the caller knows it: a flyer first seen off the
     /// ground is already flying.
@@ -114,10 +128,16 @@ struct PrehistoricMotionState {
         glideSpan = LAN_MULTIPLAYER_HOST_ENTITY_REPLICATION_INTERVAL * Self.glideStretch
         action = seen.action
         attack = seen.attack
+        hangHeldUntil = time + (seen.mirror ? Self.longestHangHold : Self.speedSettles)
+        awaitingFirstSnapshot = seen.mirror
         motion.seed = seen.seed
         // A creature seen for the first time is already doing what it does: no easing in.
         motion.weights = Self.targetWeights(seen, plan: plan)
         motion.airborne = seen.onGround ? 0 : 1
+        // Its speed is not known yet: a flyer first seen in a flight action other than a
+        // take-off is under way; taking off, or doing anything else, it hangs in place.
+        let aim = Self.targetWeights(seen.action)
+        motion.hang = aim.flight == 1 && aim.takeoff == 0 ? 0 : 1
         // Spread a herd's legs and wings over their cycles.
         motion.gaitPhase = Float(seen.seed & 0xff) / 256
         motion.flapPhase = Float((seen.seed >> 8) & 0xff) / 256
@@ -188,6 +208,11 @@ struct PrehistoricMotionState {
                 toX = seen.x; toY = seen.y; toZ = seen.z; toYaw = seen.yaw
                 // The glide leaves from where the creature was drawn in the frame before.
                 glideStart = max(previous, now - Self.longestStep)
+                if awaitingFirstSnapshot {
+                    // From here its speed is measured; give the measurement time to settle.
+                    awaitingFirstSnapshot = false
+                    hangHeldUntil = min(hangHeldUntil, now + Self.speedSettles * 0.6)
+                }
             }
             let t = min(1, max(0, (now - glideStart) / glideSpan))
             drawX = fromX + (toX - fromX) * t
@@ -258,6 +283,9 @@ struct PrehistoricMotionState {
         ease(&motion.weights.power, toward: target.power, seconds: 0.35)
         ease(&motion.weights.takeoff, toward: target.takeoff, seconds: 0.25)
         ease(&motion.weights.landing, toward: target.landing, seconds: 0.30)
+        if rig.plan == .flyer, now >= hangHeldUntil {
+            ease(&motion.hang, toward: 1 - PrehistoricRig.smoothstep(0.5, 2.5, motion.speed), seconds: 0.30)
+        }
         if rig.plan == .flyer, motion.weights.flight > 0.01 {
             // A glider's wings still ride the air; they only stop beating in earnest.
             let effort = 0.45 + 0.55 * motion.weights.power + 0.20 * motion.weights.takeoff

@@ -421,6 +421,164 @@ final class PrehistoricPoseTests: XCTestCase {
         }
     }
 
+    func testAFlyerBeatingItsWingsInPlaceHangsUprightWithItsLegsUnderIt() throws {
+        // A flyer with nowhere to go hovers, or sinks at 0.1 a tick (2 blocks a second) to
+        // whatever is under it, with the action `idle`. It gets nowhere forward, so it is not
+        // diving: nose up and legs under the body. With way on, it follows its path as before.
+        /// How upright the legs hang: 1 where they are when the animal stands, 0 straight back.
+        func legsUnder(_ subject: Subject) -> Float {
+            let matrices = subject.matrices()
+            return subject.rig.danglingLegs.map { simd_normalize(simd_make_float3(matrices[$0].columns.1)).y }.min() ?? 1
+        }
+        /// The height the body's forward axis gains: above 0 the nose points up.
+        func noseUp(_ subject: Subject) -> Float {
+            -simd_normalize(simd_make_float3(subject.matrices()[subject.rig.body].columns.2)).y
+        }
+        for name in Self.flyers {
+            for climb in [0.0, -2.0] {
+                var subject = try Subject(name)
+                subject.run(seconds: 2, onGround: false, climb: climb)
+                let rate = Double(subject.rig.beatRate(scale: subject.rig.scale))
+                for _ in 0..<Int(240 / rate) {
+                    subject.step(dt: 1.0 / 240, onGround: false, climb: climb)
+                    XCTAssertGreaterThan(noseUp(subject), 0.1, "\(name) points its nose down while it sinks in place (climb \(climb))")
+                    XCTAssertGreaterThan(legsUnder(subject), 0.98, "\(name) trails its legs while it hangs in place (climb \(climb))")
+                }
+                // Set down, it keeps its legs under it while the wings fold (within 0.2 rad: legs
+                // that read the beat instead of the speed swing back about 0.36 rad here).
+                for _ in 0..<120 {
+                    subject.step(dt: 1.0 / 120, onGround: true)
+                    XCTAssertGreaterThan(legsUnder(subject), 0.98, "\(name) kicks its legs back as it is set down (climb \(climb))")
+                }
+            }
+            var gliding = try Subject(name)
+            gliding.run(seconds: 2, speed: 5, action: .glide, onGround: false, climb: -2)
+            XCTAssertLessThan(noseUp(gliding), -0.1, "\(name) glides downhill with its nose up")
+            XCTAssertLessThan(legsUnder(gliding), 0.7, "\(name) glides with its legs hanging")
+            var diving = try Subject(name)
+            diving.run(seconds: 2, speed: 5, action: .flap, onGround: false, climb: -3)
+            XCTAssertLessThan(noseUp(diving), -0.1, "\(name) flies downhill under power with its nose up")
+            XCTAssertLessThan(legsUnder(diving), 0.7, "\(name) flies on with its legs hanging")
+        }
+    }
+
+    /// The turn of a flyer's first dangling leg against the body, in radians: negative trails
+    /// back, positive reaches forward.
+    private func legPitch(_ subject: Subject) -> Float {
+        let matrices = subject.matrices(), leg = subject.rig.danglingLegs[0]
+        let joint = simd_inverse(matrices[subject.rig.body] * subject.rig.local[leg]) * matrices[leg]
+        return atan2(joint.columns.1.z, joint.columns.1.y)
+    }
+
+    func testAFlyerReachesTheSameWayWithItsLegsInEveryTakeOffAndLandingWhateverItsSpeed() throws {
+        // Hanging the legs under a body with no way on must not reach into a take-off (a
+        // flyer rising straight up still trails its legs) or add to a landing's reach (a
+        // flyer set down onto a perch from above reaches no farther than one that lands at
+        // speed). Against the body, a take-off's legs and a landing's legs do not read the speed.
+        for name in Self.flyers {
+            for (action, climb) in [(PrehistoricAction.takeoff, 3.0), (.landing, -2.0)] {
+                var reaches: [Float] = []
+                for speed in [0.0, 1.0, 1.5, 2.0, 4.0] {
+                    var subject = try Subject(name)
+                    subject.run(seconds: 2.5, speed: speed, action: action, onGround: false, climb: climb)
+                    reaches.append(legPitch(subject))
+                }
+                for (k, reach) in reaches.enumerated() {
+                    XCTAssertEqual(reach, reaches.last!, accuracy: 0.02, "\(name) \(action.rawValue): legs at speed index \(k)")
+                }
+                if action == .takeoff {
+                    XCTAssertLessThan(reaches[0], -1.2, "\(name) hangs its legs rising straight up")
+                } else {
+                    XCTAssertGreaterThan(reaches[0], 0.6, "\(name) does not reach forward to land")
+                }
+            }
+        }
+    }
+
+    /// One stage of a flyer's script: the speed runs from `from` to `to` over the stage.
+    typealias FlightStage = (seconds: Double, from: Double, to: Double, action: PrehistoricAction, onGround: Bool, climb: Double)
+
+    /// Drives each flyer through `script` at 120 Hz and checks every frame against the limits
+    /// of `testAPoseMovesSmoothlyThroughChangesOfActionAndPace` and the joint limits.
+    private func checkFlight(_ script: [FlightStage], file: StaticString = #filePath, line: UInt = #line) throws {
+        for name in Self.flyers {
+            var subject = try Subject(name)
+            subject.run(seconds: 1)
+            let size = subject.rig.wingLength
+            let wingLimit = Float(1.4 * 2 * Double.pi) * subject.rig.beatRate(scale: subject.rig.scale) / 120 + 0.05
+            var last = subject.matrices()
+            for (number, stage) in script.enumerated() {
+                let frames = Int(stage.seconds * 120)
+                for frame in 0..<frames {
+                    let speed = stage.from + (stage.to - stage.from) * Double(frame) / Double(frames)
+                    subject.step(dt: 1.0 / 120, speed: speed, action: stage.action, onGround: stage.onGround,
+                                 climb: stage.climb)
+                    let now = subject.matrices()
+                    for (index, part) in subject.model.parts.enumerated() {
+                        let wing = subject.rig.wings.contains { $0.inner == index || $0.outer == index }
+                        let turned = angle(last[index], now[index])
+                        let shifted = simd_distance(last[index].columns.3, now[index].columns.3) / size
+                        let what = "\(name).\(part.name) stage \(number) (\(stage.action.rawValue)) frame \(frame)"
+                        XCTAssertLessThan(turned, wing ? wingLimit : 0.12, "\(what) snaps by \(turned) rad", file: file, line: line)
+                        XCTAssertLessThan(shifted, wing ? 0.25 : 0.12, "\(what) jumps by \(shifted)", file: file, line: line)
+                        let parent = subject.rig.parents[index]
+                        let reference = parent >= 0 ? now[parent] * subject.rig.local[index] : subject.rig.rest[index]
+                        XCTAssertTrue(now[index].allFinite, "\(what) is not finite", file: file, line: line)
+                        XCTAssertLessThanOrEqual(angle(reference, now[index]), Self.jointLimit(subject.rig, index),
+                                                 "\(what) leaves its joint limit", file: file, line: line)
+                    }
+                    last = now
+                }
+            }
+        }
+    }
+
+    func testAFlyerSpeedingOutOfAHoverAndBrakingBackIntoOneMovesSmoothlyWithinItsJoints() throws {
+        // The hover's upright body and hanging legs are blended in by the speed, between 0.5
+        // and 2.5 blocks a second. The flight controller gains about 12 blocks a second each
+        // second from a standstill and stops dead when it has nowhere to go; speed eases in an
+        // eighth of a second, so the band is swept in a few frames. Nothing may snap, and no
+        // joint may leave its limits: hover, speed out into a dive, level out, stop dead, a slow
+        // circuit through the band, a glide that loses its way, a landing at speed, a
+        // straight-up take-off, and a landing from above.
+        try checkFlight([
+            (1.0, 0, 0, .idle, false, -2), (0.4, 0, 5, .flap, false, -1), (1.0, 5, 5, .flap, false, -3),
+            (1.0, 5, 5, .flap, false, 0), (1.0, 0, 0, .idle, false, 0), (2.0, 0, 3, .flap, false, -2),
+            (2.0, 3, 0, .idle, false, -2), (0.4, 0, 4, .glide, false, -2), (1.0, 4, 4, .glide, false, -2),
+            (1.5, 0, 0, .glide, false, -2), (1.0, 3, 3, .landing, false, -2), (1.0, 0, 0, .idle, true, 0),
+            (1.0, 0, 0, .takeoff, false, 3), (0.2, 0, 1.5, .flap, false, -1), (1.0, 1.5, 1.5, .flap, false, -1),
+            (0.5, 1.5, 0, .landing, false, -2), (1.0, 0, 0, .landing, false, -2), (1.0, 0, 0, .idle, true, 0),
+        ])
+    }
+
+    func testAFlyerThatStopsDeadOnTheWayDownMovesNoFasterThanTheSmoothnessLimit() throws {
+        // A flyer flying downhill that finds nowhere to go is stopped dead and sinks in place
+        // (`idle`). Its legs swing from trailing to hanging on top of the body's pitch coming
+        // up. Read straight from the eased speed they turned 0.136 rad in a frame at 120 Hz;
+        // the hang is eased like the action weights for that reason.
+        try checkFlight([(1.0, 0, 0, .idle, false, -2), (0.4, 0, 5, .flap, false, -1), (1.0, 5, 5, .flap, false, -3),
+                         (1.0, 0, 0, .idle, false, -2)])
+    }
+
+    func testTheHangingOfAFlyersLegsAndBodyIsMonotonicInItsSpeed() throws {
+        // Between a hover and flight the legs and the nose move one way only: the slower the
+        // flyer goes, the more upright it hangs. Held at each speed until it settles.
+        for name in Self.flyers {
+            var lastLegs = Float.infinity, lastPitch = Float.infinity
+            for step in 0...12 {
+                let speed = 0.25 * Double(step)
+                var subject = try Subject(name)
+                subject.run(seconds: 2, speed: speed, onGround: false, climb: -2)
+                let legs = legPitch(subject)
+                let pitch = -simd_normalize(simd_make_float3(subject.matrices()[subject.rig.body].columns.2)).y
+                XCTAssertLessThanOrEqual(legs, lastLegs + 0.01, "\(name): legs swing forward speeding up to \(speed)")
+                XCTAssertLessThanOrEqual(pitch, lastPitch + 0.01, "\(name): nose rises speeding up to \(speed)")
+                if speed <= 0.5 { XCTAssertGreaterThan(pitch, 0.1, "\(name) dives at \(speed) blocks a second") }
+                lastLegs = legs; lastPitch = pitch
+            }
+        }
+    }
+
     func testAFlyerWhoseFootingFlickersMovesNoFasterThanAWingBeat() throws {
         // `onGround` now decides whether a flyer flies, and the server's collision can flip it
         // every few ticks: on take-off before the feet leave, at a landing, or brushing a ledge

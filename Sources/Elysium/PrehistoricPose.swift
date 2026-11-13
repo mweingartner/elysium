@@ -326,12 +326,13 @@ enum PrehistoricPose {
             let jointed = rig.wings.contains { $0.outer >= 0 }
 
             // In the air the body follows the flight path, banks into a turn and rides the beat.
-            // Beating its wings without getting anywhere (a hover, the first beats of a
-            // take-off), it holds itself more upright.
+            // With no way on (a hover, a straight descent to a perch, the first beats of a
+            // take-off) it never points its nose down, because a body that sinks in place is
+            // not diving, and while it beats its wings there it holds itself more upright.
             let path = atan2(motion.climb, max(2, motion.speed))
-            let slow = 1 - PrehistoricRig.smoothstep(0.5, 2.5, motion.speed)
-            let pitch = min(0.8, fold * 0.10 + flight * max(-0.45, min(0.6, 0.8 * path))
-                + 0.30 * w.takeoff + 0.40 * w.landing + 0.25 * power * slow + 0.01 * breath)
+            let hang = motion.hang
+            let pitch = min(0.8, fold * 0.10 + flight * max(-0.45 * (1 - hang), min(0.6, 0.8 * path))
+                + 0.30 * w.takeoff + 0.40 * w.landing + 0.25 * power * hang + 0.01 * breath)
             let bank = flight * max(-0.7, min(0.7, -motion.turn * 0.45))
             let heave = -power * rig.wingLength * 0.05 * cos(stroke - 0.6)
             joint[rig.body] = mTranslate(matrix_identity_float4x4, 0, heave, 0)
@@ -379,8 +380,14 @@ enum PrehistoricPose {
                 }
             }
 
-            // Legs trail in flight and reach down and forward to land.
-            let trail = -pitch * fold + flight * (-1.15 - 0.20 * w.takeoff + 1.9 * w.landing)
+            // Legs trail in flight. Under a body with no way on they hang straight down,
+            // whatever its pitch, as they do when it stands: so a flyer that is set down out of
+            // a hover keeps them where they are while it folds. A landing reaches down and
+            // forward from either, and each step is a plain blend, so none can overshoot.
+            let trailing = -1.15 - 0.20 * w.takeoff
+            let under = trailing + (-pitch - trailing) * hang * (1 - w.takeoff)
+            let aloft = under + (trailing + 1.9 - under) * w.landing
+            let trail = -pitch * fold + flight * aloft
             for index in rig.danglingLegs {
                 joint[index] = Self.turn(pitch: trail)
             }

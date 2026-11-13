@@ -590,4 +590,201 @@ final class PrehistoricMotionTests: XCTestCase {
         XCTAssertGreaterThan(standing.motion.weights.alert, 0.99)
         XCTAssertEqual(standing.x, 5)
     }
+
+    // MARK: A flyer's hang
+
+    /// The turn of a flyer's first dangling leg against its body, in radians: negative trails back.
+    private func legPitch(_ rig: PrehistoricRig, _ matrices: [simd_float4x4]) -> Float {
+        let leg = rig.danglingLegs[0]
+        let joint = simd_inverse(matrices[rig.body] * rig.local[leg]) * matrices[leg]
+        return atan2(joint.columns.1.z, joint.columns.1.y)
+    }
+
+    /// A flyer first seen in the air in `action`, flying on at `speed` and `climb` for three
+    /// seconds at 120 Hz: how far its legs ever are from where they settle.
+    private func legSwingAfterFirstSight(_ rig: PrehistoricRig, action: PrehistoricAction, speed: Double,
+                                         climb: Double, mirror: Bool) -> Float {
+        var seen = PrehistoricObservation(x: 0, y: 80, z: 0, yaw: 0, action: action, onGround: false, attack: 0,
+                                          mirror: mirror, scale: rig.scale, seed: 11)
+        var state = PrehistoricMotionState(seen, time: 0, plan: rig.plan)
+        var time = 0.0, hostZ = 0.0, hostY = 80.0, sinceSnapshot = 0.0
+        var legs: [Float] = []
+        for _ in 0..<360 {
+            time += 1.0 / 120
+            hostZ += speed / 120; hostY += climb / 120
+            sinceSnapshot += 1.0 / 120
+            // A host's creature is seen where it is; a guest's mirror five times a second.
+            if !mirror || sinceSnapshot >= LAN_MULTIPLAYER_HOST_ENTITY_REPLICATION_INTERVAL - 1e-9 {
+                sinceSnapshot = 0
+                seen.z = hostZ; seen.y = hostY
+            }
+            _ = state.advance(seen, rig: rig, time: time)
+            var pose = EntityPose()
+            pose.motion = state.motion
+            legs.append(legPitch(rig, PrehistoricPose.partMatrices(rig: rig, pose: pose, time: time)))
+        }
+        return legs.map { abs($0 - legs.last!) }.max() ?? 0
+    }
+
+    func testAFlyerFirstSeenUnderWayDoesNotSwingItsLegsOutOfPlace() throws {
+        // A flyer coming into view is already doing what it does. Its speed is not known on the
+        // first frame, so one first seen flapping, gliding or landing starts with its legs as
+        // under way, and one first seen taking off or held in place starts with them hanging.
+        // Its legs must not swing far from where they settle while the speed is measured.
+        let cases: [(PrehistoricAction, Double, Double)] = [
+            (.flap, 5, 0), (.flap, 5, -3), (.glide, 4, -2), (.landing, 3, -2), (.takeoff, 1, 3), (.idle, 0, -2),
+        ]
+        for name in PrehistoricPoseTests.flyers {
+            let rig = try Subject(name).rig
+            for (action, speed, climb) in cases {
+                let swing = legSwingAfterFirstSight(rig, action: action, speed: speed, climb: climb, mirror: false)
+                XCTAssertLessThan(swing, 0.3, "\(name) first seen in \(action.rawValue) at \(speed) b/s swings its legs \(swing) rad")
+            }
+        }
+        // A guest's mirror stands still until its first snapshot after the first sight, 0.2 s
+        // on, so its measured speed is 0 until then. Its hang holds its first-sight value until
+        // the snapshot has come and the speed has had time to settle (it used to ease toward a
+        // hover meanwhile, and the legs swung 0.5 to 0.7 rad forward and back).
+        for name in PrehistoricPoseTests.flyers {
+            let rig = try Subject(name).rig
+            for (action, speed, climb) in cases.prefix(4) {
+                let swing = legSwingAfterFirstSight(rig, action: action, speed: speed, climb: climb, mirror: true)
+                XCTAssertLessThan(swing, 0.3, "\(name) mirror first seen in \(action.rawValue) swings its legs \(swing) rad")
+            }
+        }
+    }
+
+    func testAMirrorThatNeverMovesStillSettlesItsHangAfterTheLongestWait() throws {
+        // A mirror first seen flapping that stays where it is (the first-sight guess was wrong)
+        // does not keep its legs trailing for ever: after the longest wait its hang eases to a
+        // hover like any flyer that is not getting anywhere.
+        let rig = try Subject(PrehistoricPoseTests.flyers[0]).rig
+        let seen = PrehistoricObservation(x: 0, y: 80, z: 0, yaw: 0, action: .flap, onGround: false, attack: 0,
+                                          mirror: true, scale: rig.scale, seed: 3)
+        var state = PrehistoricMotionState(seen, time: 0, plan: rig.plan)
+        XCTAssertEqual(state.motion.hang, 0, "fixture: first seen flapping, it starts under way")
+        var time = 0.0
+        while time < PrehistoricMotionState.longestHangHold - 0.05 {
+            time += 1.0 / 120
+            _ = state.advance(seen, rig: rig, time: time)
+        }
+        XCTAssertEqual(state.motion.hang, 0, "the hang must hold while the mirror waits for a snapshot")
+        while time < PrehistoricMotionState.longestHangHold + 1.5 {
+            time += 1.0 / 120
+            _ = state.advance(seen, rig: rig, time: time)
+        }
+        XCTAssertGreaterThan(state.motion.hang, 0.95, "after the longest wait the hang settles to a hover")
+    }
+
+    func testAFlyerThatHangsInTheAirMovesNoFasterAtSixtyOrThirtyFramesASecond() throws {
+        // The hang is eased in seconds, not frames: at every frame rate a flyer stopped dead on
+        // the way down, whose landing is called off in the air, or that is set down out of a
+        // hover turns its body and legs at no more than the 120 Hz limit, in radians a second.
+        typealias Stage = (seconds: Double, from: Double, to: Double, action: PrehistoricAction, onGround: Bool, climb: Double)
+        let script: [Stage] = [
+            (1.0, 0, 0, .idle, false, -2), (0.4, 0, 5, .flap, false, -1), (1.0, 5, 5, .flap, false, -3),
+            (1.0, 0, 0, .idle, false, -2), (0.5, 0, 0, .landing, false, -2), (1.0, 0, 0, .idle, false, -2),
+            (1.0, 3, 0, .landing, false, -2), (1.0, 0, 0, .idle, true, 0),
+        ]
+        for fps in [30.0, 60.0, 120.0] {
+            for name in PrehistoricPoseTests.flyers {
+                var subject = try Subject(name)
+                subject.run(seconds: 1)
+                let wings = Set(subject.rig.wings.flatMap { [$0.inner, $0.outer] })
+                var last = subject.matrices(), worst: Float = 0, worstAt = ""
+                for (number, stage) in script.enumerated() {
+                    let frames = Int(stage.seconds * fps)
+                    for frame in 0..<frames {
+                        let speed = stage.from + (stage.to - stage.from) * Double(frame) / Double(frames)
+                        subject.step(dt: 1 / fps, speed: speed, action: stage.action, onGround: stage.onGround,
+                                     climb: stage.climb)
+                        let now = subject.matrices()
+                        for index in 0..<subject.model.parts.count where !wings.contains(index) {
+                            XCTAssertTrue(now[index].allFinite, "\(name) part \(index) at \(fps) fps is not finite")
+                            let rate = turned(last[index], now[index]) * Float(fps / 120)
+                            if rate > worst { worst = rate; worstAt = "\(subject.model.parts[index].name) stage \(number) frame \(frame)" }
+                        }
+                        last = now
+                    }
+                }
+                XCTAssertLessThan(worst, 0.12, "\(name) at \(fps) fps: \(worstAt) turns \(worst) rad per 120th of a second")
+            }
+        }
+    }
+
+    func testAFlyerWithWayOnOrAtRestIsPosedByTheFormulaItHadBeforeTheHang() throws {
+        // The hang only adds to a flyer without way on. Fully under way (hang 0, at 2.5 b/s or
+        // more) and at rest (no flight, whatever the hang) the body and legs follow the formula
+        // of ee62ecc exactly, for every mix of take-off and landing.
+        func pitchMatrix(_ pitch: Float) -> simd_float3x3 {
+            let m = PrehistoricPose.Frame.turn(pitch: pitch)
+            return simd_float3x3(simd_make_float3(m.columns.0), simd_make_float3(m.columns.1), simd_make_float3(m.columns.2))
+        }
+        func upper(_ m: simd_float4x4) -> simd_float3x3 {
+            simd_float3x3(simd_make_float3(m.columns.0), simd_make_float3(m.columns.1), simd_make_float3(m.columns.2))
+        }
+        func near(_ a: simd_float3x3, _ b: simd_float3x3) -> Float {
+            let d = a - b
+            return [d.columns.0, d.columns.1, d.columns.2].map { simd_reduce_max(simd_abs($0)) }.max() ?? 0
+        }
+        var checked = 0
+        for name in PrehistoricPoseTests.flyers {
+            let rig = try Subject(name).rig
+            for flight: Float in [0, 0.4, 1] {
+                let moving: [(hang: Float, speed: Float)] = flight == 0
+                    ? [(0, 0), (0.5, 1), (1, 0), (1, 5)] : [(0, 2.5), (0, 5)]
+                for (hang, speed) in moving {
+                    for power: Float in [0, 1] { for takeoff: Float in [0, 0.5, 1] { for landing: Float in [0, 0.5, 1] {
+                        for climb: Float in [-3, 0, 2] {
+                            var motion = PrehistoricMotion()
+                            motion.speed = speed; motion.climb = climb; motion.hang = hang
+                            motion.flapPhase = 0.3; motion.seed = 5
+                            motion.weights.flight = flight; motion.weights.power = power
+                            motion.weights.takeoff = takeoff; motion.weights.landing = landing
+                            var frame = PrehistoricPose.Frame(rig: rig, motion: motion, time: 1.7, scale: rig.scale, lookPitch: 0)
+                            frame.poseFlyer()
+                            // ee62ecc, PrehistoricPose.swift poseFlyer().
+                            let fold = 1 - flight, powered = power * flight
+                            let path = atan2(climb, max(2, speed))
+                            let slow = 1 - PrehistoricRig.smoothstep(0.5, 2.5, speed)
+                            let pitch = min(0.8, fold * 0.10 + flight * max(-0.45, min(0.6, 0.8 * path))
+                                + 0.30 * takeoff + 0.40 * landing + 0.25 * powered * slow + 0.01 * frame.wave(0.42))
+                            let trail = -pitch * fold + flight * (-1.15 - 0.20 * takeoff + 1.9 * landing)
+                            let what = "\(name) flight \(flight) hang \(hang) speed \(speed) power \(power) takeoff \(takeoff) landing \(landing) climb \(climb)"
+                            XCTAssertLessThan(near(upper(frame.joint[rig.body]), pitchMatrix(pitch)), 1e-5, "\(what): body")
+                            for leg in rig.danglingLegs {
+                                XCTAssertLessThan(near(upper(frame.joint[leg]), pitchMatrix(trail)), 1e-5, "\(what): leg")
+                            }
+                            checked += 1
+                        }
+                    } } }
+                }
+            }
+            // At rest the hang changes nothing anywhere in the pose.
+            var rested = PrehistoricMotion()
+            rested.seed = 5
+            var pose = EntityPose()
+            pose.motion = rested
+            let reference = PrehistoricPose.partMatrices(rig: rig, pose: pose, time: 2.3)
+            for hang: Float in [0, 0.37] {
+                pose.motion.hang = hang
+                XCTAssertEqual(PrehistoricPose.partMatrices(rig: rig, pose: pose, time: 2.3), reference, "\(name) at rest with hang \(hang)")
+            }
+        }
+        XCTAssertEqual(checked, 6 * (4 + 2 + 2) * 2 * 3 * 3 * 3)
+    }
+
+    func testALandAnimalNeitherReadsNorEasesAFlyersHang() throws {
+        for name in ["velociraptor", "tyrannosaurus", "triceratops", "diplodocus"] {
+            var subject = try Subject(name)
+            subject.run(seconds: 2, speed: 3, action: .charge)
+            XCTAssertEqual(subject.motion.hang, 1, "\(name) eases a hang it does not have")
+            var pose = EntityPose()
+            pose.motion = subject.motion
+            let walking = PrehistoricPose.partMatrices(rig: subject.rig, pose: pose, time: subject.time)
+            pose.motion.hang = 0
+            XCTAssertEqual(PrehistoricPose.partMatrices(rig: subject.rig, pose: pose, time: subject.time), walking,
+                           "\(name)'s pose reads the hang")
+        }
+    }
 }
